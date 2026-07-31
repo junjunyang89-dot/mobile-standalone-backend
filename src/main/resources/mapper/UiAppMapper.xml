@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.UiAppMapper">
+
+    <resultMap id="UiAppMap" type="com.mobile.standalone.entity.UiApp">
+        <id property="id" column="id"/>
+        <result property="nameZh" column="name_zh"/>
+        <result property="description" column="description"/>
+        <result property="androidPackage" column="android_package"/>
+        <result property="iosBundleId" column="ios_bundle_id"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findAll" resultMap="UiAppMap">
+        SELECT * FROM ui_apps
+        <where>
+            <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+        </where>
+        ORDER BY sort_order ASC, name_zh ASC
+    </select>
+
+    <select id="findById" resultMap="UiAppMap">
+        SELECT * FROM ui_apps WHERE id = #{id}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO ui_apps
+        (id, name_zh, description, android_package, ios_bundle_id, enabled, sort_order, created_at, updated_at)
+        VALUES
+        (#{id}, #{nameZh}, #{description}, #{androidPackage}, #{iosBundleId}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE ui_apps
+        SET name_zh = #{nameZh},
+            description = #{description},
+            android_package = #{androidPackage},
+            ios_bundle_id = #{iosBundleId},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ui_apps WHERE id = #{id}
+    </delete>
+</mapper>

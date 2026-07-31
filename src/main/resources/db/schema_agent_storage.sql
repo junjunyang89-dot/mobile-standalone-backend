@@ -1,0 +1,17 @@
+-- CodeWords 知识库（与 Python FastAPI 示例一致）
+-- 若你已建表可跳过
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    topic VARCHAR(255) NOT NULL,
+    content MEDIUMTEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Agent 知识库';
+
+CREATE TABLE IF NOT EXISTS agent_conversations (
+    session_id VARCHAR(128) PRIMARY KEY COMMENT '会话ID',
+    messages MEDIUMTEXT NOT NULL COMMENT '消息数组 JSON',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Agent 对话历史';

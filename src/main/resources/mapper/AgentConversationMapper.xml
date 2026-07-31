@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.AgentConversationMapper">
+
+    <resultMap id="AgentConversationMap" type="com.mobile.standalone.entity.AgentConversation">
+        <id property="sessionId" column="session_id"/>
+        <result property="messages" column="messages"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findBySessionId" resultMap="AgentConversationMap">
+        SELECT * FROM agent_conversations WHERE session_id = #{sessionId} LIMIT 1
+    </select>
+
+    <insert id="upsert">
+        INSERT INTO agent_conversations (session_id, messages, created_at, updated_at)
+        VALUES (#{sessionId}, #{messages}, #{createdAt}, #{updatedAt})
+        ON DUPLICATE KEY UPDATE
+            messages = VALUES(messages),
+            updated_at = VALUES(updated_at)
+    </insert>
+</mapper>

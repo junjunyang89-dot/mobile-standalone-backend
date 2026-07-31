@@ -1,0 +1,75 @@
+wrapper/maven-wrapper.jar
+
+# ========== IDE ==========
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# ========== Logs ==========
+logs/
+*.log
+
+# ========== OS ==========
+.DS_Store
+Thumbs.db
+._*
+
+# ========== 本地调试 / 临时文件 ==========
+screenshots/
+test-results/
+allure-results/
+patches/
+*.tmp
+*.bak
+# ========== 敏感配置（含密码 / API Key，勿提交）==========
+src/main/resources/application.yml
+src/main/resources/application-dev.yml
+src/main/resources/application-prod.yml
+wmpay_plus.yml
+*.local.yml
+.env
+.env.*
+
+# ========== Maven ==========
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ========== IDE ==========
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# ========== Logs ==========
+logs/
+*.log
+
+# ========== OS ==========
+.DS_Store
+Thumbs.db
+._*
+
+# ========== 本地调试 / 临时文件 ==========
+screenshots/
+test-results/
+allure-results/
+patches/
+*.tmp
+*.bak

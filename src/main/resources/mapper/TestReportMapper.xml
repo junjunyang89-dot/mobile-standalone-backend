@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" 
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.TestReportMapper">
+    
+    <resultMap id="TestReportResultMap" type="com.mobile.standalone.entity.TestReport">
+        <id property="id" column="id"/>
+        <result property="planId" column="plan_id"/>
+        <result property="caseId" column="case_id"/>
+        <result property="deviceId" column="device_id"/>
+        <result property="appId" column="app_id"/>
+        <result property="executionId" column="execution_id"/>
+        <result property="status" column="status" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="startTime" column="start_time"/>
+        <result property="endTime" column="end_time"/>
+        <result property="duration" column="duration"/>
+        <result property="screenshotPaths" column="screenshot_paths" 
+                typeHandler="com.mobile.standalone.mapper.typehandler.JsonListTypeHandler"/>
+        <result property="errorMessage" column="error_message"/>
+        <result property="testData" column="test_data"/>
+        <result property="reportPath" column="report_path"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+    
+    <select id="findAll" resultMap="TestReportResultMap">
+        SELECT * FROM test_reports ORDER BY created_at DESC
+    </select>
+    
+    <select id="findById" resultMap="TestReportResultMap">
+        SELECT * FROM test_reports WHERE id = #{id}
+    </select>
+    
+    <select id="findByPlanId" resultMap="TestReportResultMap">
+        SELECT * FROM test_reports WHERE plan_id = #{planId} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findByCaseId" resultMap="TestReportResultMap">
+        SELECT * FROM test_reports WHERE case_id = #{caseId} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findByDeviceId" resultMap="TestReportResultMap">
+        SELECT * FROM test_reports WHERE device_id = #{deviceId} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findByExecutionId" resultMap="TestReportResultMap">
+        SELECT * FROM test_reports WHERE execution_id = #{executionId}
+    </select>
+    
+    <insert id="insert">
+        INSERT INTO test_reports (id, plan_id, case_id, device_id, app_id, execution_id, status, start_time, end_time, duration, screenshot_paths, error_message, test_data, report_path, created_at)
+        VALUES (#{id}, #{planId}, #{caseId}, #{deviceId}, #{appId}, #{executionId}, #{status}, #{startTime}, #{endTime}, #{duration}, 
+                #{screenshotPaths, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler}, 
+                #{errorMessage}, #{testData}, #{reportPath}, #{createdAt})
+    </insert>
+    
+    <update id="update">
+        UPDATE test_reports
+        SET status = #{status},
+            end_time = #{endTime},
+            duration = #{duration},
+            screenshot_paths = #{screenshotPaths, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+            error_message = #{errorMessage},
+            test_data = #{testData},
+            report_path = #{reportPath}
+        WHERE id = #{id}
+    </update>
+    
+    <delete id="deleteById">
+        DELETE FROM test_reports WHERE id = #{id}
+    </delete>
+    
+</mapper>

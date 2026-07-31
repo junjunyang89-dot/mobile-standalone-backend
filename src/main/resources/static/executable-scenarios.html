@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>可执行场景 - 自动化测试</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container { display: flex; min-height: 100vh; }
+        .sidebar {
+            width: 240px;
+            background: linear-gradient(180deg, #1890ff 0%, #096dd9 100%);
+            color: white;
+            padding: 20px 0;
+            position: fixed;
+            height: 100vh;
+        }
+        .sidebar-header { padding: 0 20px 20px; border-bottom: 1px solid rgba(255,255,255,0.2); margin-bottom: 20px; }
+        .sidebar-title { font-size: 20px; font-weight: 600; }
+        .nav-item {
+            padding: 12px 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: background-color 0.3s;
+        }
+        .nav-item:hover { background-color: rgba(255,255,255,0.1); }
+        .nav-item.active { background-color: rgba(255,255,255,0.2); }
+        .nav-item-icon { width: 20px; height: 20px; margin-right: 12px; }
+        .main-content { flex: 1; margin-left: 240px; padding: 0 40px 40px; }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding: 20px 0;
+        }
+        .page-title { font-size: 24px; font-weight: 600; color: #262626; }
+        .header-actions { display: flex; gap: 12px; align-items: center; }
+        .header-select {
+            padding: 8px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            background: white;
+        }
+        .module-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+        .module-card details { display: block; }
+        .module-card summary {
+            list-style: none;
+            padding: 16px 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: #fafafa;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 16px;
+            font-weight: 600;
+            color: #262626;
+            transition: background 0.2s;
+        }
+        .module-card summary::-webkit-details-marker { display: none; }
+        .module-card summary::before {
+            content: '▶';
+            font-size: 12px;
+            color: #8c8c8c;
+            transition: transform 0.2s;
+        }
+        .module-card details[open] summary::before {
+            transform: rotate(90deg);
+            color: #1890ff;
+        }
+        .module-card summary:hover { background: #f0f0f0; }
+        .module-card details[open] summary {
+            background: #e6f7ff;
+            border-bottom-color: #91d5ff;
+        }
+        .module-count {
+            font-size: 13px;
+            font-weight: 400;
+            color: #8c8c8c;
+            margin-left: 4px;
+        }
+        .module-body { padding: 0; }
+        /* 子模块行：即场景，做自动化的，含执行按钮 */
+        .scenario-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px 12px 36px;
+            border-bottom: 1px solid #f5f5f5;
+            font-size: 14px;
+            background: white;
+        }
+        .scenario-row:last-child { border-bottom: none; }
+        .scenario-row:hover { background: #fafafa; }
+        .scenario-info { flex: 1; }
+        .scenario-name { font-weight: 500; color: #262626; margin-bottom: 4px; }
+        .scenario-meta { font-size: 12px; color: #8c8c8c; max-width: 600px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .scenario-meta span { margin-right: 16px; }
+        .scenario-actions { display: flex; align-items: center; gap: 12px; }
+        .btn-execute {
+            padding: 6px 16px;
+            background: #1890ff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-execute:hover { background: #40a9ff; }
+        .btn-execute:disabled { background: #d9d9d9; cursor: not-allowed; }
+        .platform-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            background: #e6f7ff;
+            color: #1890ff;
+        }
+        .platform-tag.ios { background: #f6ffed; color: #52c41a; }
+        .platform-tag.pog_android { background: #e6fffb; color: #13c2c2; }
+        .platform-tag.pog_ios { background: #f9f0ff; color: #722ed1; }
+        .empty-tip { padding: 40px; text-align: center; color: #8c8c8c; }
+        .loading { padding: 40px; text-align: center; color: #8c8c8c; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-title">DevEco Testing</div>
+            </div>
+            <div class="nav-item" onclick="location.href='index.html'">
+                <span class="nav-item-icon">🏠</span>
+                <span>首页</span>
+            </div>
+            <div class="nav-item" onclick="location.href='create-task.html'">
+                <span class="nav-item-icon">📋</span>
+                <span>专项测试</span>
+            </div>
+            <div class="nav-item active">
+                <span class="nav-item-icon">📂</span>
+                <span>可执行场景</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">📝</span>
+                <span>测试任务</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <p style="color:#595959;font-size:14px;margin-bottom:8px;">选择场景后点击「执行」，指定设备与应用即可创建并运行任务。</p>
+            <p id="scenarioCountTip" style="color:#8c8c8c;font-size:13px;margin-bottom:16px;"></p>
+            <div class="header">
+                <h1 class="page-title">可执行场景</h1>
+                <div class="header-actions">
+                    <select class="header-select" id="platformFilter" onchange="filterByPlatform()">
+                        <option value="">全部平台</option>
+                        <option value="ANDROID">Android</option>
+                        <option value="IOS">iOS</option>
+                        <option value="HARMONYOS">鸿蒙</option>
+                        <option value="POG_ANDROID">Pog-Android</option>
+                        <option value="POG_IOS">Pog-iOS</option>
+                    </select>
+                    <select class="header-select" id="deviceSelect" disabled>
+                        <option value="">请选择设备</option>
+                    </select>
+                    <select class="header-select" id="appSelect" disabled>
+                        <option value="">请选择应用</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="scenarioList">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+        /** 与 GET /functional-test/scenarios/by-platform-module 一致：Pog 平台无场景时不会出现在数组中 */
+        let platformModuleData = [];
+        let devices = [];
+        let apps = [];
+
+        async function loadScenarios() {
+            try {
+                const res = await fetch(`${API_BASE}/functional-test/scenarios/by-platform-module`);
+                platformModuleData = await res.json();
+                renderScenarios();
+            } catch (e) {
+                document.getElementById('scenarioList').innerHTML = '<div class="empty-tip">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function loadDevices(platform) {
+            if (!platform) return;
+            try {
+                const res = await fetch(`${API_BASE}/devices/platform/${platform}`);
+                devices = await res.json();
+                const sel = document.getElementById('deviceSelect');
+                sel.innerHTML = '<option value="">请选择设备</option>';
+                devices.forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d.id;
+                    opt.textContent = d.name + (d.version ? ' ' + d.version : '');
+                    sel.appendChild(opt);
+                });
+                sel.disabled = devices.length === 0;
+            } catch (e) {
+                console.error('加载设备失败', e);
+            }
+        }
+
+        async function loadApps(platform) {
+            if (!platform) return;
+            try {
+                const res = await fetch(`${API_BASE}/applications/platform/${platform}`);
+                apps = await res.json();
+                const sel = document.getElementById('appSelect');
+                sel.innerHTML = '<option value="">请选择应用</option>';
+                apps.forEach(a => {
+                    const opt = document.createElement('option');
+                    opt.value = a.id;
+                    opt.textContent = a.name + (a.version ? ' (' + a.version + ')' : '');
+                    sel.appendChild(opt);
+                });
+                sel.disabled = apps.length === 0;
+            } catch (e) {
+                console.error('加载应用失败', e);
+            }
+        }
+
+        function filterByPlatform() {
+            const platform = document.getElementById('platformFilter').value;
+            document.getElementById('deviceSelect').disabled = !platform;
+            document.getElementById('appSelect').disabled = !platform;
+            if (platform) {
+                loadDevices(platform);
+                loadApps(platform);
+            }
+            renderScenarios();
+        }
+
+        function renderScenarios() {
+            const platformFilter = document.getElementById('platformFilter').value;
+            let groups = platformModuleData || [];
+            if (platformFilter) {
+                groups = groups.filter(g => g.platform === platformFilter);
+            }
+            const html = groups.map(pmg => {
+                const modules = pmg.modules || [];
+                const platformLabel = pmg.platformLabel || pmg.platform || '';
+                const modHtml = modules.map(mod => {
+                    const scenarios = mod.scenarios || [];
+                    if (scenarios.length === 0) return '';
+                    const scenarioRows = scenarios.map(s => `
+                    <div class="scenario-row">
+                        <div class="scenario-info">
+                            <div class="scenario-name">${escapeHtml(s.name)}</div>
+                            <div class="scenario-meta">
+                                <span>平台: ${escapeHtml(s.platform || '')}</span>
+                                <span>任务类型: ${escapeHtml(s.taskType || '-')}</span>
+                                ${s.description ? '<span title="' + escapeHtml(s.description) + '">描述: ' + escapeHtml(s.description.length > 60 ? s.description.slice(0,60)+'...' : s.description) + '</span>' : ''}
+                            </div>
+                        </div>
+                        <div class="scenario-actions">
+                            <span class="platform-tag ${(s.platform || '').toLowerCase()}">${escapeHtml(s.platform || '')}</span>
+                            <button class="btn-execute" onclick="executeScenario('${s.id}')" data-scenario-id="${escapeHtml(s.id)}">执行</button>
+                        </div>
+                    </div>
+                `).join('');
+                    return `
+                    <div class="module-card">
+                        <details>
+                            <summary>
+                                <span>${escapeHtml(mod.moduleName)}</span>
+                                <span class="module-count">(${scenarios.length}个场景)</span>
+                            </summary>
+                            <div class="module-body">${scenarioRows}</div>
+                        </details>
+                    </div>`;
+                }).filter(Boolean).join('');
+                if (!modHtml) return '';
+                const groupTotal = modules.reduce((sum, m) => sum + (m.scenarios || []).length, 0);
+                return `
+                <div class="module-card" style="margin-bottom:20px;border:1px solid #e8e8e8;">
+                    <div style="padding:12px 16px;background:#fafafa;font-weight:600;border-bottom:1px solid #f0f0f0;">
+                        ${escapeHtml(platformLabel)}
+                        <span class="module-count">(${groupTotal}个场景)</span>
+                    </div>
+                    ${modHtml}
+                </div>`;
+            }).filter(Boolean).join('');
+
+            document.getElementById('scenarioList').innerHTML = html || '<div class="empty-tip">暂无场景</div>';
+
+            if (!platformFilter) {
+                total = (platformModuleData || []).reduce((sum, g) => {
+                    return sum + (g.modules || []).reduce((s, m) => s + (m.scenarios || []).length, 0);
+                }, 0);
+            } else {
+                total = groups.reduce((sum, g) => {
+                    return sum + (g.modules || []).reduce((s, m) => s + (m.scenarios || []).length, 0);
+                }, 0);
+            }
+            const tip = document.getElementById('scenarioCountTip');
+            if (platformFilter) {
+                const label = platformFilter === 'ANDROID' ? 'Android'
+                    : platformFilter === 'IOS' ? 'iOS'
+                    : platformFilter === 'HARMONYOS' ? '鸿蒙'
+                    : platformFilter === 'POG_ANDROID' ? 'Pog-Android'
+                    : platformFilter === 'POG_IOS' ? 'Pog-iOS'
+                    : platformFilter;
+                tip.textContent = label + ' ' + total + '个场景（按模块展开）';
+            } else {
+                tip.textContent = '共 ' + total + ' 个场景（按平台与模块展开）';
+            }
+        }
+
+        function escapeHtml(s) {
+            if (!s) return '';
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
+        async function executeScenario(scenarioId) {
+            const deviceId = document.getElementById('deviceSelect').value;
+            const appId = document.getElementById('appSelect').value;
+            if (!deviceId || !appId) {
+                alert('请先选择平台、设备和应用');
+                return;
+            }
+            const btn = document.querySelector(`[data-scenario-id="${scenarioId}"]`);
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch(`${API_BASE}/functional-test/execute`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ scenarioId, deviceId, applicationId: appId })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    alert('任务已提交执行，任务ID: ' + (data.taskId || ''));
+                    if (data.taskId) {
+                        if (confirm('是否跳转到任务详情？')) {
+                            location.href = 'create-task.html'; // 可改为 task-detail.html?id=' + data.taskId
+                        }
+                    }
+                } else {
+                    alert('执行失败: ' + (data.message || res.statusText));
+                }
+            } catch (e) {
+                alert('执行失败: ' + e.message);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', loadScenarios);
+    </script>
+</body>
+</html>

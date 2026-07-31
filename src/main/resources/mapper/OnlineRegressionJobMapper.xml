@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.OnlineRegressionJobMapper">
+
+    <resultMap id="JobMap" type="com.mobile.standalone.entity.OnlineRegressionJob">
+        <id property="id" column="id"/>
+        <result property="runId" column="run_id"/>
+        <result property="jobKey" column="job_key"/>
+        <result property="appId" column="app_id"/>
+        <result property="appName" column="app_name"/>
+        <result property="deviceId" column="device_id"/>
+        <result property="deviceName" column="device_name"/>
+        <result property="devicePlatform" column="device_platform"/>
+        <result property="endpoint" column="endpoint"/>
+        <result property="status" column="status"/>
+        <result property="progress" column="progress"/>
+        <result property="currentStepLabel" column="current_step_label"/>
+        <result property="accountPhone" column="account_phone"/>
+        <result property="errorMessage" column="error_message"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByRunId" resultMap="JobMap">
+        SELECT * FROM online_regression_jobs WHERE run_id = #{runId} ORDER BY created_at ASC
+    </select>
+
+    <select id="findById" resultMap="JobMap">
+        SELECT * FROM online_regression_jobs WHERE id = #{id}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO online_regression_jobs
+        (id, run_id, job_key, app_id, app_name, device_id, device_name, device_platform, endpoint,
+         status, progress, current_step_label, account_phone, error_message, created_at, updated_at)
+        VALUES
+        (#{id}, #{runId}, #{jobKey}, #{appId}, #{appName}, #{deviceId}, #{deviceName}, #{devicePlatform}, #{endpoint},
+         #{status}, #{progress}, #{currentStepLabel}, #{accountPhone}, #{errorMessage}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE online_regression_jobs
+        SET status = #{status},
+            progress = #{progress},
+            current_step_label = #{currentStepLabel},
+            account_phone = #{accountPhone},
+            error_message = #{errorMessage},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+</mapper>

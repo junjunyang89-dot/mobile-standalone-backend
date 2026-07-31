@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.UiKeywordMapper">
+
+    <resultMap id="UiKeywordMap" type="com.mobile.standalone.entity.UiKeyword">
+        <id property="id" column="id"/>
+        <result property="code" column="code"/>
+        <result property="nameZh" column="name_zh"/>
+        <result property="description" column="description"/>
+        <result property="category" column="category"/>
+        <result property="needsElement" column="needs_element"/>
+        <result property="paramSchema" column="param_schema"/>
+        <result property="builtin" column="builtin"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findAll" resultMap="UiKeywordMap">
+        SELECT * FROM ui_keywords
+        <where>
+            <if test="category != null and category != ''">AND category = #{category}</if>
+            <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+        </where>
+        ORDER BY sort_order ASC, code ASC
+    </select>
+
+    <select id="findById" resultMap="UiKeywordMap">
+        SELECT * FROM ui_keywords WHERE id = #{id}
+    </select>
+
+    <select id="findByCode" resultMap="UiKeywordMap">
+        SELECT * FROM ui_keywords WHERE code = #{code} LIMIT 1
+    </select>
+
+    <insert id="insert">
+        INSERT INTO ui_keywords
+        (id, code, name_zh, description, category, needs_element, param_schema, builtin, enabled, sort_order, created_at, updated_at)
+        VALUES
+        (#{id}, #{code}, #{nameZh}, #{description}, #{category}, #{needsElement}, #{paramSchema},
+         #{builtin}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE ui_keywords
+        SET name_zh = #{nameZh},
+            description = #{description},
+            category = #{category},
+            needs_element = #{needsElement},
+            param_schema = #{paramSchema},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ui_keywords WHERE id = #{id}
+    </delete>
+</mapper>

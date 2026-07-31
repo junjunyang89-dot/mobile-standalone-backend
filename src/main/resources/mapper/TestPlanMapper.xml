@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" 
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.TestPlanMapper">
+    
+    <resultMap id="TestPlanResultMap" type="com.mobile.standalone.entity.TestPlan">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="cronExpression" column="cron_expression"/>
+        <result property="timezone" column="timezone"/>
+        <result property="deviceId" column="device_id"/>
+        <result property="deviceIds" column="device_ids" typeHandler="com.mobile.standalone.mapper.typehandler.JsonListTypeHandler"/>
+        <result property="appId" column="app_id"/>
+        <result property="scenarioId" column="scenario_id"/>
+        <result property="scenarioIds" column="scenario_ids" typeHandler="com.mobile.standalone.mapper.typehandler.JsonListTypeHandler"/>
+        <result property="scenarioConfig" column="scenario_config"/>
+        <result property="planType" column="plan_type" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="caseIds" column="case_ids" 
+                typeHandler="com.mobile.standalone.mapper.typehandler.JsonListTypeHandler"/>
+        <result property="enabled" column="enabled"/>
+        <result property="status" column="status" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="lastRunTime" column="last_run_time"/>
+        <result property="nextRunTime" column="next_run_time"/>
+        <result property="runCount" column="run_count"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+    
+    <select id="findAll" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans ORDER BY created_at DESC
+    </select>
+    
+    <select id="findById" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans WHERE id = #{id}
+    </select>
+    
+    <select id="findByDeviceId" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans WHERE device_id = #{deviceId} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findByAppId" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans WHERE app_id = #{appId} ORDER BY created_at DESC
+    </select>
+
+    <select id="findByPlanType" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans WHERE plan_type = #{planType} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findEnabledPlans" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans WHERE enabled = TRUE AND status = 'ACTIVE' ORDER BY next_run_time ASC
+    </select>
+    
+    <select id="findPlansToRun" resultMap="TestPlanResultMap">
+        SELECT * FROM test_plans 
+        WHERE enabled = TRUE 
+          AND status = 'ACTIVE' 
+          AND next_run_time IS NOT NULL 
+          AND next_run_time &lt;= #{currentTime}
+        ORDER BY next_run_time ASC
+    </select>
+    
+    <insert id="insert">
+        INSERT INTO test_plans (id, name, description, cron_expression, timezone, device_id, device_ids, app_id, scenario_id, scenario_ids, scenario_config, plan_type, case_ids, enabled, status, created_by, created_at, updated_at)
+        VALUES (#{id}, #{name}, #{description}, #{cronExpression}, #{timezone}, #{deviceId},
+                #{deviceIds, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+                #{appId}, #{scenarioId},
+                #{scenarioIds, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+                #{scenarioConfig}, #{planType}, #{caseIds, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+                #{enabled}, #{status}, #{createdBy}, #{createdAt}, #{updatedAt})
+    </insert>
+    
+    <update id="update">
+        UPDATE test_plans
+        SET name = #{name},
+            description = #{description},
+            cron_expression = #{cronExpression},
+            timezone = #{timezone},
+            device_id = #{deviceId},
+            device_ids = #{deviceIds, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+            app_id = #{appId},
+            scenario_id = #{scenarioId},
+            scenario_ids = #{scenarioIds, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+            scenario_config = #{scenarioConfig},
+            plan_type = #{planType},
+            case_ids = #{caseIds, typeHandler=com.mobile.standalone.mapper.typehandler.JsonListTypeHandler},
+            enabled = #{enabled},
+            status = #{status},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+    
+    <update id="updateLastRunTime">
+        UPDATE test_plans SET last_run_time = #{lastRunTime} WHERE id = #{id}
+    </update>
+    
+    <update id="updateNextRunTime">
+        UPDATE test_plans SET next_run_time = #{nextRunTime} WHERE id = #{id}
+    </update>
+    
+    <update id="incrementRunCount">
+        UPDATE test_plans SET run_count = run_count + 1 WHERE id = #{id}
+    </update>
+    
+    <delete id="deleteById">
+        DELETE FROM test_plans WHERE id = #{id}
+    </delete>
+    
+</mapper>

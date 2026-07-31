@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>功能体验基础质量测试 - 创建任务</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* 左侧导航栏 */
+        .sidebar {
+            width: 240px;
+            background: linear-gradient(180deg, #1890ff 0%, #096dd9 100%);
+            color: white;
+            padding: 20px 0;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+        }
+
+        .sidebar-header {
+            padding: 0 20px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 20px;
+        }
+
+        .sidebar-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .nav-item {
+            padding: 12px 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: background-color 0.3s;
+        }
+
+        .nav-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .nav-item.active {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .nav-item-icon {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+
+        /* 主内容区 */
+        .main-content {
+            flex: 1;
+            margin-left: 240px;
+            padding: 20px 40px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .back-link {
+            color: #1890ff;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .back-link:hover {
+            color: #40a9ff;
+        }
+
+        .page-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #262626;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 16px;
+        }
+
+        .header-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background-color: #f0f0f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+
+        /* 进度条 */
+        .progress-bar {
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+            padding: 20px 0;
+        }
+
+        .progress-step {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            position: relative;
+        }
+
+        .step-number {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background-color: #d9d9d9;
+            color: #8c8c8c;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            margin-right: 12px;
+            position: relative;
+            z-index: 2;
+        }
+
+        .progress-step.active .step-number {
+            background-color: #1890ff;
+            color: white;
+        }
+
+        .step-label {
+            font-size: 14px;
+            color: #8c8c8c;
+        }
+
+        .progress-step.active .step-label {
+            color: #1890ff;
+            font-weight: 600;
+        }
+
+        .progress-line {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            right: -16px;
+            height: 2px;
+            background-color: #d9d9d9;
+            z-index: 1;
+        }
+
+        .progress-step.active .progress-line {
+            background-color: #1890ff;
+        }
+
+        .progress-step:last-child .progress-line {
+            display: none;
+        }
+
+        /* 表单区域 */
+        .form-container {
+            background: white;
+            border-radius: 8px;
+            padding: 32px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }
+
+        .form-group {
+            margin-bottom: 24px;
+        }
+
+        .form-label {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #262626;
+        }
+
+        .required-mark {
+            color: #ff4d4f;
+            margin-left: 4px;
+        }
+
+        .char-count {
+            margin-left: auto;
+            font-size: 12px;
+            color: #8c8c8c;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #1890ff;
+        }
+
+        .form-select {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            background-color: white;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23333' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            padding-right: 32px;
+        }
+
+        .form-select:focus {
+            outline: none;
+            border-color: #1890ff;
+        }
+
+        /* Tab切换 */
+        .tab-container {
+            margin-bottom: 16px;
+        }
+
+        .tab-list {
+            display: flex;
+            border-bottom: 1px solid #e8e8e8;
+            margin-bottom: 16px;
+        }
+
+        .tab-item {
+            padding: 12px 24px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #8c8c8c;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .tab-item.active {
+            color: #1890ff;
+            border-bottom-color: #1890ff;
+            font-weight: 600;
+        }
+
+        /* 警告框 */
+        .warning-box {
+            background-color: #fff7e6;
+            border: 1px solid #ffd591;
+            border-radius: 4px;
+            padding: 12px 16px;
+            margin-top: 16px;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .warning-icon {
+            color: #fa8c16;
+            font-size: 18px;
+            margin-top: 2px;
+        }
+
+        .warning-content {
+            flex: 1;
+        }
+
+        .warning-title {
+            font-weight: 600;
+            color: #262626;
+            margin-bottom: 4px;
+        }
+
+        .warning-text {
+            font-size: 14px;
+            color: #595959;
+            line-height: 1.5;
+        }
+
+        /* 创建按钮 */
+        .create-button {
+            width: 100%;
+            padding: 12px;
+            background-color: #1890ff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            margin-top: 32px;
+        }
+
+        .create-button:hover {
+            background-color: #40a9ff;
+        }
+
+        .create-button:disabled {
+            background-color: #d9d9d9;
+            cursor: not-allowed;
+        }
+
+        /* 右侧提示栏 */
+        .tips-sidebar {
+            width: 280px;
+            background: white;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            margin-left: 24px;
+            height: fit-content;
+            position: sticky;
+            top: 20px;
+        }
+
+        .tips-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #262626;
+        }
+
+        .tips-link {
+            color: #1890ff;
+            text-decoration: none;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+
+        .tips-list {
+            list-style: none;
+        }
+
+        .tips-list li {
+            font-size: 14px;
+            color: #595959;
+            line-height: 1.8;
+            margin-bottom: 12px;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .tips-list li::before {
+            content: counter(list-item);
+            counter-increment: list-item;
+            position: absolute;
+            left: 0;
+            color: #1890ff;
+            font-weight: 600;
+        }
+
+        .tips-list {
+            counter-reset: list-item;
+        }
+
+        .content-wrapper {
+            display: flex;
+            gap: 24px;
+        }
+
+        .form-wrapper {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 左侧导航栏 -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-title">DevEco Testing</div>
+            </div>
+            <div class="nav-item" onclick="location.href='index.html'">
+                <span class="nav-item-icon">🏠</span>
+                <span>首页</span>
+            </div>
+            <div class="nav-item active">
+                <span class="nav-item-icon">📋</span>
+                <span>专项测试</span>
+            </div>
+            <div class="nav-item" onclick="location.href='executable-scenarios.html'">
+                <span class="nav-item-icon">📂</span>
+                <span>可执行场景</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">✅</span>
+                <span>上架预检</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">🔍</span>
+                <span>探索测试</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">🔄</span>
+                <span>回归测试</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">📝</span>
+                <span>测试任务</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">🔧</span>
+                <span>实用工具</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">⚙️</span>
+                <span>设置</span>
+            </div>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="main-content">
+            <div class="header">
+                <a href="index.html" class="back-link">
+                    <span>←</span>
+                    <span>返回</span>
+                </a>
+                <h1 class="page-title">功能体验基础质量测试</h1>
+                <div class="header-actions">
+                    <div class="header-icon">🔔</div>
+                    <div class="header-icon">👤</div>
+                </div>
+            </div>
+
+            <!-- 进度条 -->
+            <div class="progress-bar">
+                <div class="progress-step active">
+                    <div class="step-number">1</div>
+                    <div class="step-label">创建任务</div>
+                    <div class="progress-line"></div>
+                </div>
+                <div class="progress-step">
+                    <div class="step-number">2</div>
+                    <div class="step-label">执行测试</div>
+                    <div class="progress-line"></div>
+                </div>
+                <div class="progress-step">
+                    <div class="step-number">3</div>
+                    <div class="step-label">查看报告</div>
+                </div>
+            </div>
+
+            <div class="content-wrapper">
+                <!-- 表单区域 -->
+                <div class="form-wrapper">
+                    <div class="form-container">
+                        <!-- 任务名称 -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <span>任务名称</span>
+                                <span class="required-mark">*</span>
+                                <span class="char-count" id="taskNameCount">0/60</span>
+                            </label>
+                            <input 
+                                type="text" 
+                                class="form-input" 
+                                id="taskName" 
+                                placeholder="请输入任务名称"
+                                maxlength="60"
+                                required
+                            />
+                        </div>
+
+                        <!-- 备注信息 -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <span>备注信息</span>
+                                <span class="char-count" id="remarksCount">0/80</span>
+                            </label>
+                            <input 
+                                type="text" 
+                                class="form-input" 
+                                id="remarks" 
+                                placeholder="请输入任务备注信息"
+                                maxlength="80"
+                            />
+                        </div>
+
+                        <!-- 平台选择 -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <span>平台类型</span>
+                                <span class="required-mark">*</span>
+                            </label>
+                            <select class="form-select" id="platform" required onchange="onPlatformChange()">
+                                <option value="">请选择平台</option>
+                                <option value="HARMONYOS">鸿蒙 (HarmonyOS)</option>
+                                <option value="ANDROID">安卓 (Android)</option>
+                                <option value="IOS">iOS</option>
+                                <option value="POG_ANDROID">Pog-Android</option>
+                                <option value="POG_IOS">Pog-iOS</option>
+                            </select>
+                        </div>
+
+                        <!-- 测试设备 -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <span>测试设备</span>
+                                <span class="required-mark">*</span>
+                            </label>
+                            <select class="form-select" id="testDevice" required disabled>
+                                <option value="">请先选择平台</option>
+                            </select>
+                        </div>
+
+                        <!-- 选择应用 -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <span>选择应用</span>
+                                <span class="required-mark">*</span>
+                            </label>
+                            <div class="tab-container">
+                                <div class="tab-list">
+                                    <div class="tab-item active" onclick="switchTab('installed')">已安装的应用</div>
+                                    <div class="tab-item" onclick="switchTab('new')">安装新的应用</div>
+                                </div>
+                                <div id="installedTab" class="tab-content">
+                                    <select class="form-select" id="testApplication" required>
+                                        <option value="">请选择测试应用</option>
+                                    </select>
+                                </div>
+                                <div id="newTab" class="tab-content" style="display: none;">
+                                    <input 
+                                        type="file" 
+                                        class="form-input" 
+                                        id="newApplication" 
+                                        accept=".apk,.ipa,.app,.hap"
+                                        disabled
+                                    />
+                                    <div style="margin-top: 8px; font-size: 12px; color: #8c8c8c;">
+                                        <div id="fileHint">请先选择平台</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 功能体验基础质量测试配置 -->
+                        <div class="form-group">
+                            <div class="warning-box">
+                                <span class="warning-icon">⚠️</span>
+                                <div class="warning-content">
+                                    <div class="warning-title">服务使用提醒</div>
+                                    <div class="warning-text">
+                                        本服务功能已集成到应用上架预检服务, 提供了更强的自主遍历和问题检测能力, 推荐移步使用。
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 创建任务按钮 -->
+                        <button class="create-button" id="createTaskBtn" onclick="createTask()">
+                            创建任务
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 右侧提示栏 -->
+                <div class="tips-sidebar">
+                    <div class="tips-title">测试 Tips</div>
+                    <a href="#" class="tips-link">
+                        <span>测试指南</span>
+                        <span>→</span>
+                    </a>
+                    <ul class="tips-list">
+                        <li>任务执行过程中,请避免PC进入休眠状态。</li>
+                        <li>待测设备系统版本支持HarmonyOS 5.0及以上版本。</li>
+                        <li>请勿设置锁屏密码。</li>
+                        <li>测试之前请完成小艺输入法授权操作。</li>
+                        <li>请选用手机设备进行测试,平板和PC等设备还在适配当中!</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+
+        // 字符计数
+        document.getElementById('taskName').addEventListener('input', function() {
+            const count = this.value.length;
+            document.getElementById('taskNameCount').textContent = `${count}/60`;
+        });
+
+        document.getElementById('remarks').addEventListener('input', function() {
+            const count = this.value.length;
+            document.getElementById('remarksCount').textContent = `${count}/80`;
+        });
+
+        let currentPlatform = '';
+        let selectedDeviceId = '';
+
+        // 平台选择变化
+        async function onPlatformChange() {
+            const platform = document.getElementById('platform').value;
+            currentPlatform = platform;
+            
+            if (!platform) {
+                // 清空并禁用设备和应用选择
+                document.getElementById('testDevice').innerHTML = '<option value="">请先选择平台</option>';
+                document.getElementById('testDevice').disabled = true;
+                document.getElementById('testApplication').innerHTML = '<option value="">请先选择平台</option>';
+                document.getElementById('testApplication').disabled = true;
+                document.getElementById('newApplication').disabled = true;
+                updateFileHint('');
+                return;
+            }
+            
+            // 启用设备和应用选择
+            document.getElementById('testDevice').disabled = false;
+            document.getElementById('testApplication').disabled = false;
+            document.getElementById('newApplication').disabled = false;
+            
+            // 更新文件上传提示
+            updateFileHint(platform);
+            
+            // 加载对应平台的设备
+            await loadDevicesByPlatform(platform);
+            
+            // 加载对应平台的应用
+            await loadApplicationsByPlatform(platform);
+        }
+
+        // 更新文件上传提示
+        function updateFileHint(platform) {
+            const hint = document.getElementById('fileHint');
+            if (!platform) {
+                hint.textContent = '请先选择平台';
+                return;
+            }
+            
+            const hints = {
+                'HARMONYOS': '支持 .hap 或 .app 格式文件',
+                'ANDROID': '支持 .apk 格式文件',
+                'POG_ANDROID': '支持 .apk 格式文件',
+                'IOS': '支持 .ipa 或 .app 格式文件',
+                'POG_IOS': '支持 .ipa 或 .app 格式文件'
+            };
+            hint.textContent = hints[platform] || '';
+        }
+
+        // Tab切换
+        function switchTab(tab) {
+            const tabs = document.querySelectorAll('.tab-item');
+            tabs.forEach(t => t.classList.remove('active'));
+            
+            if (tab === 'installed') {
+                tabs[0].classList.add('active');
+                document.getElementById('installedTab').style.display = 'block';
+                document.getElementById('newTab').style.display = 'none';
+            } else {
+                tabs[1].classList.add('active');
+                document.getElementById('installedTab').style.display = 'none';
+                document.getElementById('newTab').style.display = 'block';
+                
+                // 如果选择了新应用tab，监听文件选择
+                document.getElementById('newApplication').addEventListener('change', handleFileUpload);
+            }
+        }
+
+        // 按平台加载设备列表
+        async function loadDevicesByPlatform(platform) {
+            try {
+                const response = await fetch(`${API_BASE}/devices/platform/${platform}`);
+                const devices = await response.json();
+                const select = document.getElementById('testDevice');
+                select.innerHTML = '<option value="">请选择测试设备</option>';
+                
+                if (devices.length === 0) {
+                    const option = document.createElement('option');
+                    option.value = '';
+                    option.textContent = '暂无可用设备，请连接USB设备';
+                    select.appendChild(option);
+                    return;
+                }
+                
+                devices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.id;
+                    // 显示格式：设备名称 (系统版本)
+                    const versionText = device.version ? ` ${device.version}` : '';
+                    option.textContent = `${device.name}${versionText}`;
+                    select.appendChild(option);
+                });
+                
+                // 保存选中的设备ID
+                select.addEventListener('change', function() {
+                    selectedDeviceId = this.value;
+                });
+            } catch (error) {
+                console.error('加载设备列表失败:', error);
+                const select = document.getElementById('testDevice');
+                select.innerHTML = '<option value="">加载设备失败</option>';
+            }
+        }
+
+        // 按平台加载应用列表
+        async function loadApplicationsByPlatform(platform) {
+            try {
+                const response = await fetch(`${API_BASE}/applications/platform/${platform}`);
+                const applications = await response.json();
+                const select = document.getElementById('testApplication');
+                select.innerHTML = '<option value="">请选择测试应用</option>';
+                
+                if (applications.length === 0) {
+                    const option = document.createElement('option');
+                    option.value = '';
+                    option.textContent = '暂无已安装的应用';
+                    select.appendChild(option);
+                    return;
+                }
+                
+                applications.forEach(app => {
+                    const option = document.createElement('option');
+                    option.value = app.id;
+                    option.textContent = `${app.name} (${app.version || ''})`;
+                    select.appendChild(option);
+                });
+            } catch (error) {
+                console.error('加载应用列表失败:', error);
+                const select = document.getElementById('testApplication');
+                select.innerHTML = '<option value="">加载应用失败</option>';
+            }
+        }
+
+        // 处理文件上传
+        async function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            if (!currentPlatform) {
+                alert('请先选择平台');
+                return;
+            }
+            
+            // 验证文件类型
+            const fileName = file.name.toLowerCase();
+            let isValid = false;
+            switch (currentPlatform) {
+                case 'HARMONYOS':
+                    isValid = fileName.endsWith('.hap') || fileName.endsWith('.app');
+                    break;
+                case 'ANDROID':
+                case 'POG_ANDROID':
+                    isValid = fileName.endsWith('.apk');
+                    break;
+                case 'IOS':
+                case 'POG_IOS':
+                    isValid = fileName.endsWith('.ipa') || fileName.endsWith('.app');
+                    break;
+            }
+            
+            if (!isValid) {
+                alert('文件格式不正确，请选择正确的应用文件');
+                event.target.value = '';
+                return;
+            }
+            
+            // 上传文件
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('platform', currentPlatform);
+            if (selectedDeviceId) {
+                formData.append('deviceId', selectedDeviceId);
+            }
+            
+            const btn = document.getElementById('createTaskBtn');
+            btn.disabled = true;
+            btn.textContent = '上传并安装中...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/applications/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    alert(`应用上传成功！应用ID: ${result.applicationId}`);
+                    
+                    // 刷新应用列表
+                    await loadApplicationsByPlatform(currentPlatform);
+                    
+                    // 自动选择刚上传的应用
+                    document.getElementById('testApplication').value = result.applicationId;
+                    
+                    // 切换到已安装应用tab
+                    switchTab('installed');
+                } else {
+                    const error = await response.text();
+                    alert('应用上传失败: ' + error);
+                }
+            } catch (error) {
+                console.error('上传应用失败:', error);
+                alert('上传应用失败，请稍后重试');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '创建任务';
+            }
+        }
+
+        // 创建任务
+        async function createTask() {
+            const taskName = document.getElementById('taskName').value.trim();
+            const remarks = document.getElementById('remarks').value.trim();
+            const platform = document.getElementById('platform').value;
+            const deviceId = document.getElementById('testDevice').value;
+            const applicationId = document.getElementById('testApplication').value;
+
+            // 验证必填项
+            if (!taskName) {
+                alert('请输入任务名称');
+                return;
+            }
+            if (!platform) {
+                alert('请选择平台类型');
+                return;
+            }
+            if (!deviceId) {
+                alert('请选择测试设备');
+                return;
+            }
+            if (!applicationId) {
+                alert('请选择测试应用');
+                return;
+            }
+
+            const btn = document.getElementById('createTaskBtn');
+            btn.disabled = true;
+            btn.textContent = '创建中...';
+
+            try {
+                const response = await fetch(`${API_BASE}/functional-test/tasks`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        taskName: taskName,
+                        remarks: remarks,
+                        platform: platform,
+                        deviceId: deviceId,
+                        applicationId: applicationId
+                    })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    alert('任务创建成功！任务ID: ' + result.taskId);
+                    // 可以跳转到任务列表或任务详情页
+                    // location.href = `task-detail.html?id=${result.taskId}`;
+                } else {
+                    const error = await response.text();
+                    alert('任务创建失败: ' + error);
+                }
+            } catch (error) {
+                console.error('创建任务失败:', error);
+                alert('创建任务失败，请稍后重试');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '创建任务';
+            }
+        }
+
+        // 页面加载时初始化
+        window.addEventListener('DOMContentLoaded', function() {
+            // 生成默认任务名称
+            const now = new Date();
+            const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+            const timeStr = now.toTimeString().slice(0, 5).replace(':', '');
+            const defaultName = `Task-${dateStr}-${timeStr}`;
+            document.getElementById('taskName').value = defaultName;
+            document.getElementById('taskNameCount').textContent = `${defaultName.length}/60`;
+            
+            // 初始化文件上传提示
+            updateFileHint('');
+        });
+    </script>
+</body>
+</html>

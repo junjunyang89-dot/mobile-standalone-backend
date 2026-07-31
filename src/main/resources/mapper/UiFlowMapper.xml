@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.UiFlowMapper">
+
+    <resultMap id="UiFlowMap" type="com.mobile.standalone.entity.UiFlow">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="appId" column="app_id"/>
+        <result property="platform" column="platform"/>
+        <result property="catalog" column="catalog"/>
+        <result property="isComponent" column="is_component"/>
+        <result property="steps" column="steps"/>
+        <result property="enabled" column="enabled"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByFilters" resultMap="UiFlowMap">
+        SELECT * FROM ui_flows
+        <where>
+            <if test="appId != null and appId != ''">AND app_id = #{appId}</if>
+            <if test="platform != null and platform != ''">AND platform = #{platform}</if>
+            <if test="catalog != null and catalog != ''">AND catalog = #{catalog}</if>
+            <if test="componentOnly != null and componentOnly">AND is_component = 1</if>
+        </where>
+        ORDER BY updated_at DESC
+    </select>
+
+    <select id="findById" resultMap="UiFlowMap">
+        SELECT * FROM ui_flows WHERE id = #{id}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO ui_flows
+        (id, name, description, app_id, platform, catalog, is_component, steps, enabled, created_by, created_at, updated_at)
+        VALUES
+        (#{id}, #{name}, #{description}, #{appId}, #{platform}, #{catalog}, #{isComponent}, #{steps},
+         #{enabled}, #{createdBy}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE ui_flows
+        SET name = #{name},
+            description = #{description},
+            app_id = #{appId},
+            platform = #{platform},
+            catalog = #{catalog},
+            is_component = #{isComponent},
+            steps = #{steps},
+            enabled = #{enabled},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ui_flows WHERE id = #{id}
+    </delete>
+</mapper>

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" 
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.TaskExecutionMapper">
+    
+    <resultMap id="TaskExecutionResultMap" type="com.mobile.standalone.entity.TaskExecution">
+        <id property="id" column="id"/>
+        <result property="taskId" column="task_id"/>
+        <result property="status" column="status" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="startTime" column="start_time"/>
+        <result property="endTime" column="end_time"/>
+        <result property="reportPath" column="report_path"/>
+        <result property="errorMessage" column="error_message"/>
+        <result property="resultData" column="result_data"/>
+        <result property="executionLog" column="execution_log"/>
+        <result property="executionVariables" column="execution_variables"/>
+    </resultMap>
+    
+    <select id="findAll" resultMap="TaskExecutionResultMap">
+        SELECT * FROM task_executions
+    </select>
+    
+    <select id="findById" resultMap="TaskExecutionResultMap">
+        SELECT * FROM task_executions WHERE id = #{id}
+    </select>
+    
+    <select id="findByTaskId" resultMap="TaskExecutionResultMap">
+        SELECT * FROM task_executions WHERE task_id = #{taskId}
+    </select>
+    
+    <select id="findByTaskIdOrderByStartTimeDesc" resultMap="TaskExecutionResultMap">
+        SELECT * FROM task_executions WHERE task_id = #{taskId} ORDER BY start_time DESC
+    </select>
+    
+    <insert id="insert">
+        INSERT INTO task_executions (id, task_id, status, start_time, end_time, report_path, error_message, result_data, execution_log, execution_variables)
+        VALUES (#{id}, #{taskId}, #{status}, #{startTime}, #{endTime}, #{reportPath}, #{errorMessage}, #{resultData}, #{executionLog}, #{executionVariables})
+    </insert>
+    
+    <update id="update">
+        UPDATE task_executions
+        SET task_id = #{taskId},
+            status = #{status},
+            start_time = #{startTime},
+            end_time = #{endTime},
+            report_path = #{reportPath},
+            error_message = #{errorMessage},
+            result_data = #{resultData},
+            execution_log = #{executionLog},
+            execution_variables = #{executionVariables}
+        WHERE id = #{id}
+    </update>
+    
+    <delete id="deleteById">
+        DELETE FROM task_executions WHERE id = #{id}
+    </delete>
+    
+</mapper>

@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" 
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.TaskMapper">
+    
+    <resultMap id="TaskResultMap" type="com.mobile.standalone.entity.Task">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="projectPath" column="project_path"/>
+        <result property="scriptPath" column="script_path"/>
+        <result property="platform" column="platform" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="deviceId" column="device_id"/>
+        <result property="appId" column="app_id"/>
+        <result property="taskType" column="task_type" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="scenarioKey" column="scenario_key"/>
+        <result property="status" column="status" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="config" column="config"/>
+    </resultMap>
+    
+    <select id="findAll" resultMap="TaskResultMap">
+        SELECT * FROM tasks ORDER BY created_at DESC
+    </select>
+    
+    <select id="findById" resultMap="TaskResultMap">
+        SELECT * FROM tasks WHERE id = #{id}
+    </select>
+    
+    <select id="findByStatus" resultMap="TaskResultMap">
+        SELECT * FROM tasks WHERE status = #{status} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findByPlatform" resultMap="TaskResultMap">
+        SELECT * FROM tasks WHERE platform = #{platform} ORDER BY created_at DESC
+    </select>
+    
+    <select id="findByTaskType" resultMap="TaskResultMap">
+        SELECT * FROM tasks WHERE task_type = #{taskType} ORDER BY created_at DESC
+    </select>
+
+    <sql id="genericFilterWhere">
+        <where>
+            <if test="taskType != null">
+                AND task_type = #{taskType}
+            </if>
+            <if test="platform != null">
+                AND platform = #{platform}
+            </if>
+            <if test="status != null">
+                AND status = #{status}
+            </if>
+            <if test="deviceId != null and deviceId != ''">
+                AND device_id = #{deviceId}
+            </if>
+            <if test="appId != null and appId != ''">
+                AND app_id = #{appId}
+            </if>
+        </where>
+    </sql>
+
+    <select id="findByFilters" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        <include refid="genericFilterWhere"/>
+        ORDER BY created_at DESC
+    </select>
+
+    <select id="countByFilters" resultType="int">
+        SELECT COUNT(*) FROM tasks
+        <include refid="genericFilterWhere"/>
+    </select>
+
+    <select id="findByFiltersPage" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        <include refid="genericFilterWhere"/>
+        ORDER BY created_at DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="findFunctionalTasksFiltered" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        <where>
+            AND task_type = #{taskType}
+            <if test="status != null">
+                AND status = #{status}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (name LIKE CONCAT('%', #{keyword}, '%') OR description LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+            <if test="days != null and days > 0">
+                AND created_at &gt;= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+            </if>
+        </where>
+        ORDER BY created_at DESC
+    </select>
+
+    <sql id="functionalTestFilterWhere">
+        <where>
+            <if test="taskTypes != null and !taskTypes.isEmpty()">
+                AND task_type IN
+                <foreach collection="taskTypes" item="t" open="(" separator="," close=")">
+                    #{t}
+                </foreach>
+            </if>
+            <if test="status != null">
+                AND status = #{status}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (name LIKE CONCAT('%', #{keyword}, '%') OR description LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+            <if test="days != null and days > 0">
+                AND created_at &gt;= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+            </if>
+        </where>
+    </sql>
+
+    <select id="countFunctionalTestTasksFiltered" resultType="int">
+        SELECT COUNT(*) FROM tasks
+        <include refid="functionalTestFilterWhere"/>
+    </select>
+
+    <select id="findFunctionalTasksFilteredPage" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        <include refid="functionalTestFilterWhere"/>
+        ORDER BY created_at DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="existsById" resultType="boolean">
+        SELECT COUNT(*) > 0 FROM tasks WHERE id = #{id}
+    </select>
+    
+    <insert id="insert">
+        INSERT INTO tasks (id, name, description, project_path, script_path, platform, device_id, app_id, task_type, scenario_key, status, created_at, updated_at, config)
+        VALUES (#{id}, #{name}, #{description}, #{projectPath}, #{scriptPath}, #{platform}, #{deviceId}, #{appId}, #{taskType}, #{scenarioKey}, #{status}, #{createdAt}, #{updatedAt}, #{config})
+    </insert>
+
+    <update id="update">
+        UPDATE tasks
+        SET name = #{name},
+            description = #{description},
+            project_path = #{projectPath},
+            script_path = #{scriptPath},
+            platform = #{platform},
+            device_id = #{deviceId},
+            app_id = #{appId},
+            task_type = #{taskType},
+            scenario_key = #{scenarioKey},
+            status = #{status},
+            updated_at = #{updatedAt},
+            config = #{config}
+        WHERE id = #{id}
+    </update>
+    
+    <delete id="deleteById">
+        DELETE FROM tasks WHERE id = #{id}
+    </delete>
+    
+</mapper>

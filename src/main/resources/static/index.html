@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DevEco Testing - 首页</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* 左侧导航栏 */
+        .sidebar {
+            width: 240px;
+            background: linear-gradient(180deg, #1890ff 0%, #096dd9 100%);
+            color: white;
+            padding: 20px 0;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+        }
+
+        .sidebar-header {
+            padding: 0 20px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 20px;
+        }
+
+        .sidebar-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .nav-item {
+            padding: 12px 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: background-color 0.3s;
+        }
+
+        .nav-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .nav-item.active {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .nav-item-icon {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+            display: inline-block;
+        }
+
+        /* 主内容区 */
+        .main-content {
+            flex: 1;
+            margin-left: 240px;
+            padding: 20px 40px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+
+        .header-title {
+            font-size: 28px;
+            font-weight: 600;
+            color: #262626;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 16px;
+        }
+
+        .header-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background-color: #f0f0f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .header-icon:hover {
+            background-color: #e0e0e0;
+        }
+
+        /* 提示横幅 */
+        .alert-banner {
+            background-color: #fffbe6;
+            border: 1px solid #ffe58f;
+            border-radius: 4px;
+            padding: 12px 16px;
+            margin-bottom: 30px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .alert-icon {
+            color: #faad14;
+            font-size: 18px;
+        }
+
+        /* 描述区域 */
+        .description-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 40px;
+        }
+
+        .description-text {
+            font-size: 16px;
+            color: #595959;
+            line-height: 1.6;
+        }
+
+        /* 常用服务网格 */
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .service-card {
+            background: white;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .service-card:hover {
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+            transform: translateY(-2px);
+        }
+
+        .service-icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            font-size: 24px;
+        }
+
+        .service-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #262626;
+            margin-bottom: 8px;
+        }
+
+        .service-description {
+            font-size: 14px;
+            color: #8c8c8c;
+            line-height: 1.5;
+            margin-bottom: 16px;
+        }
+
+        .service-link {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: #1890ff;
+            font-size: 14px;
+            text-decoration: none;
+        }
+
+        .service-link:hover {
+            color: #40a9ff;
+        }
+
+        .link-arrow {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background-color: #e6f7ff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+        }
+
+        .service-link:hover .link-arrow {
+            background-color: #bae7ff;
+            transform: translateX(4px);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 左侧导航栏 -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-title">DevEco Testing</div>
+            </div>
+            <div class="nav-item active">
+                <span class="nav-item-icon">🏠</span>
+                <span>首页</span>
+            </div>
+            <div class="nav-item" onclick="location.href='create-task.html'">
+                <span class="nav-item-icon">📋</span>
+                <span>专项测试</span>
+            </div>
+            <div class="nav-item" onclick="location.href='executable-scenarios.html'">
+                <span class="nav-item-icon">📂</span>
+                <span>可执行场景</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">✅</span>
+                <span>上架预检</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">🔍</span>
+                <span>探索测试</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">🔄</span>
+                <span>回归测试</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">📝</span>
+                <span>测试任务</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">🔧</span>
+                <span>实用工具</span>
+            </div>
+            <div class="nav-item">
+                <span class="nav-item-icon">⚙️</span>
+                <span>设置</span>
+            </div>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="main-content">
+            <div class="header">
+                <h1 class="header-title">DevEco Testing</h1>
+                <div class="header-actions">
+                    <div class="header-icon">🔔</div>
+                    <div class="header-icon">👤</div>
+                </div>
+            </div>
+
+            <!-- 提示横幅 -->
+            <div class="alert-banner">
+                <span class="alert-icon">🔔</span>
+                <span>最新版本获取及更多产品信息查询,请前往华为开发者联盟官网!</span>
+            </div>
+
+            <!-- 描述区域 -->
+            <div class="description-section">
+                <p class="description-text">
+                    DevEco Testing 是 HarmonyOS 应用能力测试中心,为生态开发者提供专业的测试服务。
+                </p>
+            </div>
+
+            <!-- 常用服务 -->
+            <div>
+                <h2 style="font-size: 20px; font-weight: 600; margin-bottom: 20px; color: #262626;">常用服务</h2>
+                <div class="services-grid">
+                    <!-- 功能体验基础质量测试 -->
+                    <div class="service-card" onclick="location.href='create-task.html'">
+                        <div class="service-icon">{}</div>
+                        <div class="service-title">功能体验基础质量测试</div>
+                        <div class="service-description">
+                            根据应用功能体验建议,检测应用在当前系统、设备及升级场景下运行是否存在兼容性问题。
+                        </div>
+                        <a href="create-task.html" class="service-link" onclick="event.stopPropagation();">
+                            <span>查看详情</span>
+                            <div class="link-arrow">→</div>
+                        </a>
+                    </div>
+
+                    <!-- 其他服务卡片 -->
+                    <div class="service-card">
+                        <div class="service-icon">✓</div>
+                        <div class="service-title">稳定性基础质量测试</div>
+                        <div class="service-description">
+                            检测应用是否存在崩溃、资源过载、内存泄漏等问题。
+                        </div>
+                        <a href="#" class="service-link">
+                            <span>查看详情</span>
+                            <div class="link-arrow">→</div>
+                        </a>
+                    </div>
+
+                    <div class="service-card">
+                        <div class="service-icon">⏱</div>
+                        <div class="service-title">性能基础质量测试</div>
+                        <div class="service-description">
+                            评估应用启动、资源使用等场景下的性能表现。
+                        </div>
+                        <a href="#" class="service-link">
+                            <span>查看详情</span>
+                            <div class="link-arrow">→</div>
+                        </a>
+                    </div>
+
+                    <div class="service-card">
+                        <div class="service-icon">⚡</div>
+                        <div class="service-title">功耗基础质量测试</div>
+                        <div class="service-description">
+                            检测应用在后台运行时是否存在异常的系统资源占用。
+                        </div>
+                        <a href="#" class="service-link">
+                            <span>查看详情</span>
+                            <div class="link-arrow">→</div>
+                        </a>
+                    </div>
+
+                    <div class="service-card">
+                        <div class="service-icon">📊</div>
+                        <div class="service-title">性能指标监控测试</div>
+                        <div class="service-description">
+                            检测并评估应用的帧率、内存、CPU负载等性能指标。
+                        </div>
+                        <a href="#" class="service-link">
+                            <span>查看详情</span>
+                            <div class="link-arrow">→</div>
+                        </a>
+                    </div>
+
+                    <div class="service-card">
+                        <div class="service-icon">&lt;/&gt;</div>
+                        <div class="service-title">回归测试</div>
+                        <div class="service-description">
+                            自定义自动化测试场景,监控内存、CPU使用情况。
+                        </div>
+                        <a href="#" class="service-link">
+                            <span>查看详情</span>
+                            <div class="link-arrow">→</div>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.UiElementMapper">
+
+    <resultMap id="UiElementMap" type="com.mobile.standalone.entity.UiElement">
+        <id property="id" column="id"/>
+        <result property="appId" column="app_id"/>
+        <result property="platform" column="platform"/>
+        <result property="catalog" column="catalog"/>
+        <result property="nameZh" column="name_zh"/>
+        <result property="nameEn" column="name_en"/>
+        <result property="description" column="description"/>
+        <result property="moduleTag" column="module_tag"/>
+        <result property="locatorType" column="locator_type"/>
+        <result property="locatorValue" column="locator_value"/>
+        <result property="previewImage" column="preview_image"/>
+        <result property="defaultTimeoutSec" column="default_timeout_sec"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByFilters" resultMap="UiElementMap">
+        SELECT * FROM ui_elements
+        <where>
+            <if test="appId != null and appId != ''">AND app_id = #{appId}</if>
+            <if test="platform != null and platform != ''">AND platform = #{platform}</if>
+            <if test="catalog != null and catalog != ''">AND catalog = #{catalog}</if>
+            <if test="catalogs != null and catalogs.size() > 0">
+                AND catalog IN
+                <foreach collection="catalogs" item="c" open="(" separator="," close=")">
+                    #{c}
+                </foreach>
+            </if>
+            <if test="moduleTag != null and moduleTag != ''">AND module_tag = #{moduleTag}</if>
+            <if test="keyword != null and keyword != ''">
+                AND (name_zh LIKE CONCAT('%', #{keyword}, '%')
+                  OR name_en LIKE CONCAT('%', #{keyword}, '%')
+                  OR description LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        ORDER BY sort_order ASC, module_tag ASC, name_zh ASC
+    </select>
+
+    <select id="findById" resultMap="UiElementMap">
+        SELECT * FROM ui_elements WHERE id = #{id}
+    </select>
+
+    <select id="findByAppPlatformKey" resultMap="UiElementMap">
+        SELECT * FROM ui_elements
+        WHERE app_id = #{appId} AND platform = #{platform} AND name_en = #{nameEn}
+        LIMIT 1
+    </select>
+
+    <insert id="insert">
+        INSERT INTO ui_elements
+        (id, app_id, platform, catalog, name_zh, name_en, description, module_tag,
+         locator_type, locator_value, preview_image, default_timeout_sec, enabled, sort_order, created_by, created_at, updated_at)
+        VALUES
+        (#{id}, #{appId}, #{platform}, #{catalog}, #{nameZh}, #{nameEn}, #{description}, #{moduleTag},
+         #{locatorType}, #{locatorValue}, #{previewImage}, #{defaultTimeoutSec}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE ui_elements
+        SET catalog = #{catalog},
+            name_zh = #{nameZh},
+            name_en = #{nameEn},
+            description = #{description},
+            module_tag = #{moduleTag},
+            locator_type = #{locatorType},
+            locator_value = #{locatorValue},
+            preview_image = #{previewImage},
+            default_timeout_sec = #{defaultTimeoutSec},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ui_elements WHERE id = #{id}
+    </delete>
+</mapper>

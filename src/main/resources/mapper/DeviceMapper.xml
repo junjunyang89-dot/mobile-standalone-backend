@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" 
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.DeviceMapper">
+    
+    <resultMap id="DeviceResultMap" type="com.mobile.standalone.entity.Device">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="platform" column="platform" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="version" column="version"/>
+        <result property="status" column="status" typeHandler="org.apache.ibatis.type.EnumTypeHandler"/>
+        <result property="lastSeen" column="last_seen"/>
+        <result property="config" column="config"/>
+    </resultMap>
+    
+    <select id="findAll" resultMap="DeviceResultMap">
+        SELECT * FROM devices
+    </select>
+    
+    <select id="findById" resultMap="DeviceResultMap">
+        SELECT * FROM devices WHERE id = #{id}
+    </select>
+    
+    <select id="findByStatus" resultMap="DeviceResultMap">
+        SELECT * FROM devices WHERE status = #{status}
+    </select>
+    
+    <insert id="insert">
+        INSERT INTO devices (id, name, platform, version, status, last_seen, config)
+        VALUES (#{id}, #{name}, #{platform}, #{version}, #{status}, #{lastSeen}, #{config})
+    </insert>
+    
+    <update id="update">
+        UPDATE devices
+        SET name = #{name},
+            platform = #{platform},
+            version = #{version},
+            status = #{status},
+            last_seen = #{lastSeen},
+            config = #{config}
+        WHERE id = #{id}
+    </update>
+    
+    <delete id="deleteById">
+        DELETE FROM devices WHERE id = #{id}
+    </delete>
+    
+</mapper>
