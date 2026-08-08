@@ -1,0 +1,92 @@
+package com.mobile.standalone.service.apitest;
+
+import com.mobile.standalone.entity.ApiTestVariable;
+import com.mobile.standalone.mapper.ApiTestVariableMapper;
+import com.mobile.standalone.util.TestEnvironment;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 环境变量的增删改查，以及执行时取真值。
+ */
+@Service
+@RequiredArgsConstructor
+public class ApiTestVariableService {
+
+    /** 掩码用固定长度，不暴露原值长度——长度本身也是信息 */
+    public static final String MASK = "••••••••••";
+
+    private final ApiTestVariableMapper mapper;
+
+    /**
+     * 给界面看的。secret 一律打码。
+     * <p>
+     * 不提供「查看真值」的接口：真要看去数据库看。做一个能在浏览器里把密钥显示出来的按钮，
+     * 等于给这份密钥多开一条泄露路径，而它换来的只是省一次登数据库。
+     */
+    public List<ApiTestVariable> listMasked(String environment) {
+        List<ApiTestVariable> out = new ArrayList<>();
+        for (ApiTestVariable v : mapper.findByEnvironment(TestEnvironment.normalize(environment))) {
+            if (Boolean.TRUE.equals(v.getSecret()) && v.getValue() != null && !v.getValue().isEmpty()) {
+                v.setValue(MASK);
+            }
+            out.add(v);
+        }
+        return out;
+    }
+
+    /** 执行时用：只取启用的，值是真值 */
+    public Map<String, String> resolveValues(String environment) {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (ApiTestVariable v : mapper.findByEnvironment(TestEnvironment.normalize(environment))) {
+            if (Boolean.FALSE.equals(v.getEnabled())) {
+                continue;
+            }
+            if (v.getName() != null && !v.getName().isBlank()) {
+                out.put(v.getName().trim(), v.getValue() == null ? "" : v.getValue());
+            }
+        }
+        return out;
+    }
+
+    public ApiTestVariable save(ApiTestVariable row) {
+        if (row == null || row.getName() == null || row.getName().isBlank()) {
+            throw new IllegalArgumentException("变量名不能为空");
+        }
+        String name = row.getName().trim();
+        if (!name.matches("[A-Za-z_][\\w.\\-]*")) {
+            // 变量名会被写进 {{}} 里做正则匹配，允许任意字符会出现「配了但永远匹配不上」的哑巴故障
+            throw new IllegalArgumentException("变量名只能是字母/数字/下划线/点/横线，且不能以数字开头：" + name);
+        }
+        if (name.startsWith("$")) {
+            throw new IllegalArgumentException("$ 开头是内置变量（$timestamp/$randomInt/$guid），不能自定义");
+        }
+        row.setName(name);
+        row.setEnvironment(TestEnvironment.normalize(row.getEnvironment()));
+        if (row.getSecret() == null) {
+            row.setSecret(false);
+        }
+        if (row.getEnabled() == null) {
+            row.setEnabled(true);
+        }
+        if (row.getSortOrder() == null) {
+            row.setSortOrder(100);
+        }
+        // 前端把掩码原样提交回来（人只改了描述没动值）时，不能把真值覆盖成一串点
+        if (Boolean.TRUE.equals(row.getSecret()) && MASK.equals(row.getValue())) {
+            ApiTestVariable old = mapper.findOne(row.getEnvironment(), name);
+            row.setValue(old == null ? "" : old.getValue());
+        }
+        mapper.upsert(row);
+        return row;
+    }
+
+    public void delete(String environment, String name) {
+        mapper.delete(TestEnvironment.normalize(environment), name);
+    }
+}

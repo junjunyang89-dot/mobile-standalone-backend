@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiTestRunMapper">
+
+    <insert id="insertRun">
+        INSERT INTO api_test_runs
+        (id, environment, total, passed, failed, duration_ms, ok, message, created_by, created_at)
+        VALUES
+        (#{id}, #{environment}, #{total}, #{passed}, #{failed}, #{durationMs}, #{ok}, #{message},
+         #{createdBy}, #{createdAt})
+    </insert>
+
+    <insert id="insertRunCase">
+        INSERT INTO api_test_run_cases
+        (id, run_id, case_id, name, method, path, url, status, http_status, duration_ms, error, created_at)
+        VALUES
+        (#{id}, #{runId}, #{caseId}, #{name}, #{method}, #{path}, #{url}, #{status},
+         #{httpStatus}, #{durationMs}, #{error}, #{createdAt})
+    </insert>
+
+    <select id="findRecentCases" resultType="com.mobile.standalone.entity.ApiTestRunCase">
+        SELECT id, run_id AS runId, case_id AS caseId, name, method, path, url, status,
+               http_status AS httpStatus, duration_ms AS durationMs, error,
+               created_at AS createdAt
+        FROM api_test_run_cases
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countCasesCreatedSince" resultType="long">
+        SELECT COUNT(1) FROM api_test_cases
+        WHERE created_at &gt;= #{since}
+    </select>
+
+    <select id="aggregateCaseResults" resultType="map">
+        SELECT
+            COUNT(1) AS total,
+            SUM(CASE WHEN status = 'PASSED' THEN 1 ELSE 0 END) AS passed,
+            SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+            AVG(duration_ms) AS avgLatencyMs
+        FROM api_test_run_cases
+        WHERE created_at &gt;= #{since}
+        <if test="until != null">
+            AND created_at &lt; #{until}
+        </if>
+    </select>
+
+    <select id="aggregateByProject" resultType="map">
+        SELECT
+            COALESCE(NULLIF(TRIM(c.project), ''), '(未分组)') AS project,
+            COUNT(DISTINCT c.id) AS caseCount,
+            COUNT(r.id) AS runCount,
+            SUM(CASE WHEN r.status = 'PASSED' THEN 1 ELSE 0 END) AS passed,
+            SUM(CASE WHEN r.status = 'FAILED' THEN 1 ELSE 0 END) AS failed
+        FROM api_test_cases c
+        LEFT JOIN api_test_run_cases r
+            ON r.case_id = c.id
+           AND r.created_at &gt;= #{since}
+        GROUP BY COALESCE(NULLIF(TRIM(c.project), ''), '(未分组)')
+        ORDER BY caseCount DESC, project ASC
+    </select>
+</mapper>

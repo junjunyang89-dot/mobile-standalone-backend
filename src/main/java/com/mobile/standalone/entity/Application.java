@@ -17,6 +17,18 @@ public class Application {
     private String config;
     
     public enum Platform {
-        ANDROID, IOS, HARMONYOS, POG_ANDROID, POG_IOS
+        ANDROID, IOS, HARMONYOS,
+        /**
+         * @deprecated 产品线混进平台的历史值，保留仅为让存量数据反序列化；
+         * 跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POG_ANDROID,
+        /**
+         * @deprecated 产品线混进平台的历史值，保留仅为让存量数据反序列化；
+         * 跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POG_IOS
     }
 }

@@ -195,6 +195,26 @@ public class AutomationEngine {
         // 1. resource-id: com.example:id/button
         // 2. text: 登录
         // 3. xpath: //android.widget.Button[@text='登录']
+        // 4. coordinate:540,1200 （弹窗无障碍树不可见时）
+        if (selector.startsWith("coordinate:") || selector.startsWith("coord:")
+                || selector.startsWith("tap:") || selector.startsWith("point:")) {
+            String raw = selector.substring(selector.indexOf(':') + 1).trim();
+            String[] parts = raw.split(",");
+            if (parts.length == 2) {
+                try {
+                    int x = Integer.parseInt(parts[0].trim());
+                    int y = Integer.parseInt(parts[1].trim());
+                    return clickAndroid(deviceId, x, y);
+                } catch (NumberFormatException e) {
+                    log.warn("无效坐标选择器: {}", selector);
+                    return false;
+                }
+            }
+        }
+        if (selector.matches("^-?\\d+\\s*,\\s*-?\\d+$")) {
+            String[] parts = selector.split(",");
+            return clickAndroid(deviceId, Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()));
+        }
         
         if (selector.startsWith("resource-id:") || selector.startsWith("id:")) {
             String resourceId = selector.contains(":") ? selector.split(":", 2)[1] : selector;
@@ -212,23 +232,69 @@ public class AutomationEngine {
     }
     
     private boolean clickByResourceId(String deviceId, String resourceId) throws IOException, InterruptedException {
-        // TODO: 实现完整的 uiautomator 集成
-        // 方案1: 使用 uiautomator dump 获取元素坐标，然后点击
-        // 方案2: 集成 UiAutomator2，通过 HTTP API 调用
-        // 方案3: 集成 Appium
-        
-        log.warn("资源ID点击功能尚未完全实现: {}", resourceId);
-        return false;
+        String pageSource = getPageSourceAndroid(deviceId);
+        if (pageSource == null || pageSource.isBlank()) {
+            return false;
+        }
+        int[] center = findBoundsCenter(pageSource, "resource-id=\"" + resourceId + "\"");
+        if (center == null) {
+            center = findBoundsCenter(pageSource, "resource-id='" + resourceId + "'");
+        }
+        if (center == null) {
+            // 短 id 兜底：如 sideView
+            String shortId = resourceId.contains("/") ? resourceId.substring(resourceId.lastIndexOf('/') + 1) : resourceId;
+            if (!shortId.equals(resourceId)) {
+                int idx = pageSource.indexOf(":id/" + shortId + "\"");
+                if (idx < 0) idx = pageSource.indexOf("id/" + shortId);
+                if (idx > 0) {
+                    center = findBoundsCenterNear(pageSource, idx);
+                }
+            }
+        }
+        if (center == null) {
+            log.warn("未在 dump 中找到 resource-id 坐标: {}", resourceId);
+            return false;
+        }
+        return clickAndroid(deviceId, center[0], center[1]);
     }
-    
+
     private boolean clickByText(String deviceId, String text) throws IOException, InterruptedException {
-        // TODO: 实现文本查找和点击
-        // 方案1: 使用 uiautomator dump 查找包含文本的元素，获取坐标后点击
-        // 方案2: 集成 UiAutomator2，通过 HTTP API 调用
-        // 方案3: 集成 Appium
-        
-        log.warn("文本点击功能尚未完全实现: {}", text);
-        return false;
+        String pageSource = getPageSourceAndroid(deviceId);
+        if (pageSource == null || pageSource.isBlank()) {
+            return false;
+        }
+        int[] center = findBoundsCenter(pageSource, "text=\"" + text + "\"");
+        if (center == null) {
+            center = findBoundsCenter(pageSource, "content-desc=\"" + text + "\"");
+        }
+        if (center == null) {
+            log.warn("未在 dump 中找到文本坐标: {}", text);
+            return false;
+        }
+        return clickAndroid(deviceId, center[0], center[1]);
+    }
+
+    /** 在含 marker 的节点附近解析 bounds="[l,t][r,b]" 并返回中心点 */
+    private static int[] findBoundsCenter(String xml, String marker) {
+        int idx = xml.indexOf(marker);
+        if (idx < 0) return null;
+        return findBoundsCenterNear(xml, idx);
+    }
+
+    private static int[] findBoundsCenterNear(String xml, int aroundIdx) {
+        int nodeStart = xml.lastIndexOf('<', aroundIdx);
+        int nodeEnd = xml.indexOf('>', aroundIdx);
+        if (nodeStart < 0 || nodeEnd < 0 || nodeEnd <= nodeStart) return null;
+        String node = xml.substring(nodeStart, nodeEnd + 1);
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"")
+                .matcher(node);
+        if (!m.find()) return null;
+        int l = Integer.parseInt(m.group(1));
+        int t = Integer.parseInt(m.group(2));
+        int r = Integer.parseInt(m.group(3));
+        int b = Integer.parseInt(m.group(4));
+        return new int[]{(l + r) / 2, (t + b) / 2};
     }
     
     private boolean clickByXPath(String deviceId, String xpath) throws IOException, InterruptedException {
@@ -281,36 +347,53 @@ public class AutomationEngine {
     }
     
     private String getPageSourceAndroid(String deviceId) throws IOException, InterruptedException {
-        // 使用 uiautomator dump 获取页面 XML
-        Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "uiautomator", "dump", "/dev/tty")
+        // 写入设备文件再 pull：MiUI 上 dump /dev/tty 常把异常栈混进 XML，导致永远匹配不到元素
+        String remote = "/sdcard/ms_uidump.xml";
+        Process dump = new ProcessBuilder("adb", "-s", deviceId, "shell", "uiautomator", "dump", remote)
                 .redirectErrorStream(true)
                 .start();
-        
-        StringBuilder output = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(dump.getInputStream()))) {
+            while (reader.readLine() != null) { /* drain */ }
+        }
+        dump.waitFor();
+
+        java.nio.file.Path local = java.nio.file.Files.createTempFile("ms_uidump_", ".xml");
+        try {
+            Process pull = new ProcessBuilder("adb", "-s", deviceId, "pull", remote, local.toString())
+                    .redirectErrorStream(true)
+                    .start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(pull.getInputStream()))) {
+                while (reader.readLine() != null) { /* drain */ }
+            }
+            pull.waitFor();
+            if (!java.nio.file.Files.isRegularFile(local) || java.nio.file.Files.size(local) == 0) {
+                log.warn("uiautomator dump pull 失败或为空: deviceId={}", deviceId);
+                return null;
+            }
+            return java.nio.file.Files.readString(local, java.nio.charset.StandardCharsets.UTF_8);
+        } finally {
+            try {
+                java.nio.file.Files.deleteIfExists(local);
+            } catch (Exception ignored) {
             }
         }
-        
-        process.waitFor();
-        return output.toString();
     }
     
     private boolean isElementPresentAndroid(String deviceId, String selector) throws IOException, InterruptedException {
         String pageSource = getPageSourceAndroid(deviceId);
-        if (pageSource == null) {
+        if (pageSource == null || pageSource.isBlank()) {
             return false;
         }
         
         // 根据选择器类型检查元素是否存在
         if (selector.startsWith("resource-id:") || selector.startsWith("id:")) {
             String resourceId = selector.contains(":") ? selector.split(":", 2)[1] : selector;
-            return pageSource.contains("resource-id=\"" + resourceId + "\"");
+            return pageSource.contains("resource-id=\"" + resourceId + "\"")
+                    || pageSource.contains("resource-id='" + resourceId + "'");
         } else if (selector.startsWith("text:")) {
             String text = selector.split(":", 2)[1];
-            return pageSource.contains("text=\"" + text + "\"");
+            return pageSource.contains("text=\"" + text + "\"")
+                    || pageSource.contains("text='" + text + "'");
         }
         
         return false;

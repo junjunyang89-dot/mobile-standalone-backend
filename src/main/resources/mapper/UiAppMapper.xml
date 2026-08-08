@@ -9,6 +9,9 @@
         <result property="description" column="description"/>
         <result property="androidPackage" column="android_package"/>
         <result property="iosBundleId" column="ios_bundle_id"/>
+        <result property="pgyerAppKeyAndroid" column="pgyer_app_key_android"/>
+        <result property="pgyerAppKeyIos" column="pgyer_app_key_ios"/>
+        <result property="channelUrls" column="channel_urls"/>
         <result property="enabled" column="enabled"/>
         <result property="sortOrder" column="sort_order"/>
         <result property="createdAt" column="created_at"/>
@@ -29,9 +32,10 @@
 
     <insert id="insert">
         INSERT INTO ui_apps
-        (id, name_zh, description, android_package, ios_bundle_id, enabled, sort_order, created_at, updated_at)
+        (id, name_zh, description, android_package, ios_bundle_id, pgyer_app_key_android, pgyer_app_key_ios, channel_urls, enabled, sort_order, created_at, updated_at)
         VALUES
-        (#{id}, #{nameZh}, #{description}, #{androidPackage}, #{iosBundleId}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+        (#{id}, #{nameZh}, #{description}, #{androidPackage}, #{iosBundleId}, #{pgyerAppKeyAndroid}, #{pgyerAppKeyIos}, #{channelUrls},
+         #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -40,6 +44,9 @@
             description = #{description},
             android_package = #{androidPackage},
             ios_bundle_id = #{iosBundleId},
+            pgyer_app_key_android = #{pgyerAppKeyAndroid},
+            pgyer_app_key_ios = #{pgyerAppKeyIos},
+            channel_urls = #{channelUrls},
             enabled = #{enabled},
             sort_order = #{sortOrder},
             updated_at = #{updatedAt}

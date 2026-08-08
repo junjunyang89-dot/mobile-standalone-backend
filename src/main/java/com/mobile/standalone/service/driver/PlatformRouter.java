@@ -42,8 +42,7 @@ public class PlatformRouter {
      */
     public PlatformDriver getDriver(Device.Platform platform) {
         if (appiumEnabled && appiumDriverAdapter != null
-                && (Device.usesAndroidAutomation(platform) && platform != Device.Platform.HARMONYOS
-                    || Device.usesIosAutomation(platform))) {
+                && (Device.usesAndroidAutomation(platform) || Device.usesIosAutomation(platform))) {
             return appiumDriverAdapter;
         }
         switch (platform) {

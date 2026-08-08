@@ -1,0 +1,17 @@
+{
+  "name": "h5-playwright",
+  "private": true,
+  "version": "0.1.0",
+  "description": "国内 H5 / 网站 Playwright 冒烟（与 Appium 分离）",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.2",
+    "dotenv": "^16.6.1"
+  }
+}

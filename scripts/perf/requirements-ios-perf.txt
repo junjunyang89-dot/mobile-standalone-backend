@@ -1,0 +1,2 @@
+# iOS Tidevice sidecar (pin for exec nodes). iOS 17+ may be unstable.
+tidevice==0.12.10

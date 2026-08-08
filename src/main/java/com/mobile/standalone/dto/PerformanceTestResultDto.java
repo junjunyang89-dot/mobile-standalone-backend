@@ -38,6 +38,13 @@ public class PerformanceTestResultDto {
     private ResourceSummary resourceSummary;
     /** 按操作类型统计的问题数（响应时延、完成时延、卡顿等） */
     private IssueSummary issueSummary;
+    /** 实际生效的采集引擎：ADB | SOLOX | TIDEVICE | NONE */
+    private String collectorEngineUsed;
+    /**
+     * iOS MetricKit 测试包上报摘要（由 POST .../metrickit 写入后，读报告时合并；
+     * 也可能在任务结束时已写入 result_data）。
+     */
+    private Object metricKitSummary;
     /** 资源采样序列（时间点 + CPU/内存），用于画曲线 */
     private List<ResourceSample> resourceSamples;
     /** 操作明细（步骤索引、类型、耗时、关联资源），用于操作详情与峰值步骤 */
@@ -57,8 +64,10 @@ public class PerformanceTestResultDto {
         private MetricStat networkRxBytes;
         /** 网络发送字节数（整机） */
         private MetricStat networkTxBytes;
-        /** 电池温度（单位：0.1℃），可展示为 ℃ */
+        /** 电池温度（单位：℃ 汇总时已换算），可展示为 ℃ */
         private MetricStat temperature;
+        /** 帧率 FPS（dumpsys gfxinfo） */
+        private MetricStat fps;
     }
 
     @Data
@@ -81,6 +90,10 @@ public class PerformanceTestResultDto {
         private Long networkTxBytes;
         /** 电池温度，单位 0.1℃（如 250 表示 25.0℃） */
         private Integer temperatureTenthsC;
+        /** 估算 FPS */
+        private Double fps;
+        /** 卡顿帧占比 % */
+        private Double jankPercent;
     }
 
     @Data

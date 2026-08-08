@@ -91,7 +91,7 @@ public class HealthController {
             return "appium.enabled 可能被覆盖为 false，或 AppiumDriverAdapter 未加载。请检查 application.yml 与启动日志。";
         }
         if (!serverReachable) {
-            return "Appium Server 不可达。请启动 Appium（如 appium -a 127.0.0.1 -p 4723），并确认 server-url 正确。";
+            return "Appium Server 不可达。配置了 appium.auto-start=true 时，执行流程会尝试自动拉起；也可手动：appium -a 127.0.0.1 -p 4723";
         }
         return "Appium 已启用且 Server 可达。登录/设置测试将使用 Appium 驱动，截图来自 WebDriver（需 launchApp 建立会话后有效）。";
     }

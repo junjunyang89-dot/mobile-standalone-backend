@@ -1,13 +1,19 @@
 package com.mobile.standalone.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mobile.standalone.service.AgentDocumentParseService;
 import com.mobile.standalone.service.AgentStorageService;
 import com.mobile.standalone.service.CodeWordsService;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -19,8 +25,11 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class CodeWordsController {
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     private final CodeWordsService codeWordsService;
     private final AgentStorageService agentStorageService;
+    private final AgentDocumentParseService documentParseService;
 
     /** 配置状态（不返回密钥） */
     @GetMapping("/status")
@@ -127,6 +136,98 @@ public class CodeWordsController {
         } catch (Exception e) {
             return ResponseEntity.internalServerError()
                     .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "调用失败"));
+        }
+    }
+
+    /**
+     * 测试用例生成器 v2（JSON）：
+     * images 可为 data URI，或 /agent-uploads/xxx（服务端读盘转 base64，避免 ngrok/公网拉不到图）。
+     */
+    @PostMapping("/test-cases/generate")
+    public ResponseEntity<?> generateTestCases(@RequestBody Map<String, Object> body) {
+        try {
+            if (body == null) {
+                return ResponseEntity.badRequest().body(Map.of("message", "请求体不能为空"));
+            }
+            Object pageObj = body.get("page_name") != null ? body.get("page_name") : body.get("pageName");
+            String pageName = pageObj == null ? null : String.valueOf(pageObj);
+            Object elementsObj = body.get("elements");
+            JsonNode elements = elementsObj == null ? null : JSON.valueToTree(elementsObj);
+            Object imagesObj = body.get("images");
+            JsonNode images = imagesObj == null ? null : JSON.valueToTree(imagesObj);
+            String screenshotUrl = body.get("screenshot_url") != null
+                    ? String.valueOf(body.get("screenshot_url"))
+                    : (body.get("screenshotUrl") != null ? String.valueOf(body.get("screenshotUrl")) : null);
+            String requirements = body.get("requirements") != null ? String.valueOf(body.get("requirements")) : null;
+            Object textObj = body.get("text_content") != null ? body.get("text_content") : body.get("textContent");
+            String textContent = textObj == null ? null : String.valueOf(textObj);
+            JsonNode result = codeWordsService.generateTestCases(
+                    pageName, elements, screenshotUrl, requirements, textContent, images);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "生成失败"));
+        }
+    }
+
+    /**
+     * 测试用例生成器：multipart 上传。
+     * form: page_name, text_content?, requirements?, files（图片→base64；文档→抽文字）
+     */
+    @PostMapping(value = "/test-cases/generate-upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> generateTestCasesUpload(
+            @RequestParam(value = "page_name", required = false) String pageName,
+            @RequestParam(value = "pageName", required = false) String pageNameCamel,
+            @RequestParam(value = "text_content", required = false) String textContent,
+            @RequestParam(value = "requirements", required = false) String requirements,
+            @RequestParam(value = "files", required = false) MultipartFile[] files,
+            @RequestParam(value = "file", required = false) MultipartFile file
+    ) {
+        try {
+            String page = pageName != null && !pageName.isBlank() ? pageName : pageNameCamel;
+            List<MultipartFile> all = new ArrayList<>();
+            if (files != null) {
+                for (MultipartFile f : files) {
+                    if (f != null && !f.isEmpty()) all.add(f);
+                }
+            }
+            if (file != null && !file.isEmpty()) all.add(file);
+
+            StringBuilder text = new StringBuilder();
+            if (textContent != null && !textContent.isBlank()) {
+                text.append(textContent.trim());
+            }
+            List<MultipartFile> imageFiles = new ArrayList<>();
+            for (MultipartFile f : all) {
+                String name = f.getOriginalFilename() == null ? "file" : f.getOriginalFilename();
+                if (AgentDocumentParseService.isImage(f)
+                        || AgentDocumentParseService.isImageContentType(f.getContentType())) {
+                    imageFiles.add(f);
+                } else if (AgentDocumentParseService.isSupported(name)) {
+                    String extracted = documentParseService.extractText(f);
+                    if (extracted != null && !extracted.isBlank()) {
+                        if (text.length() > 0) text.append("\n\n");
+                        text.append(extracted);
+                    }
+                } else {
+                    imageFiles.add(f);
+                }
+            }
+
+            JsonNode result = codeWordsService.generateTestCasesFromUpload(
+                    page,
+                    text.length() == 0 ? null : text.toString(),
+                    requirements,
+                    imageFiles.toArray(new MultipartFile[0])
+            );
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "生成失败"));
         }
     }
 

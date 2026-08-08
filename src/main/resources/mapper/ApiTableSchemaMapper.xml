@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiTableSchemaMapper">
+
+    <resultMap id="Map" type="com.mobile.standalone.entity.ApiTableSchema">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="tableName" column="table_name"/>
+        <result property="ddl" column="ddl"/>
+        <result property="remark" column="remark"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 项目留空的是全局通用表结构，任何项目都能用上 -->
+    <select id="findByProject" resultMap="Map">
+        SELECT * FROM api_table_schemas
+        <where>
+            <if test="project != null and project != ''">
+                AND (project = #{project} OR project IS NULL OR project = '')
+            </if>
+        </where>
+        ORDER BY table_name ASC
+    </select>
+
+    <select id="findById" resultMap="Map">
+        SELECT * FROM api_table_schemas WHERE id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO api_table_schemas (project, table_name, ddl, remark, created_at, updated_at)
+        VALUES (#{project}, #{tableName}, #{ddl}, #{remark}, NOW(), NOW())
+        ON DUPLICATE KEY UPDATE ddl = VALUES(ddl), remark = VALUES(remark), updated_at = NOW()
+    </insert>
+
+    <update id="update">
+        UPDATE api_table_schemas
+        SET project = #{project}, table_name = #{tableName}, ddl = #{ddl},
+            remark = #{remark}, updated_at = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM api_table_schemas WHERE id = #{id}
+    </delete>
+</mapper>

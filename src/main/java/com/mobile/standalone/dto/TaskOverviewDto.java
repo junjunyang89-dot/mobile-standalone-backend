@@ -59,4 +59,15 @@ public class TaskOverviewDto {
     private String executionStatus;
     /** 失败时的错误信息，便于详情页展示失败原因 */
     private String errorMessage;
+
+    /** 执行环境：TEST / PROD。两个环境的报告混在一起时，靠它区分 */
+    private String environment;
+    private String environmentLabel;
+
+    /**
+     * 当前失败归因结论（人工优先）。为 null 表示还没归因过。
+     * <p>
+     * 跟着概览一起返回，前端不用再多打一次接口——排查失败时人本来就在这个页面上。
+     */
+    private com.mobile.standalone.entity.TaskFailureDiagnosis failureDiagnosis;
 }

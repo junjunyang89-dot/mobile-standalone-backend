@@ -200,31 +200,22 @@ public class ApplicationService {
                 }
             }
             } else if (platform == Device.Platform.HARMONYOS) {
-                // HarmonyOS 也使用 ADB，类似 Android
-                log.info("使用 ADB 扫描 HarmonyOS 应用...");
-                List<String> packages = deviceManager.getAndroidInstalledPackages(deviceId);
+                log.info("使用 hdc 扫描鸿蒙应用...");
+                List<String> packages = deviceManager.getHarmonyInstalledPackages(deviceId);
                 log.info("获取到 {} 个包名", packages.size());
-                
-                // 使用批量方法获取应用信息（优化性能）
-                long startTime = System.currentTimeMillis();
-                List<DeviceManager.AppInfo> appInfos = deviceManager.getAndroidAppsInfoBatch(deviceId, packages);
-                long endTime = System.currentTimeMillis();
-                log.info("批量获取应用信息耗时: {} ms", (endTime - startTime));
-                
-                // 转换为 Application 对象
-                for (DeviceManager.AppInfo appInfo : appInfos) {
+                for (String packageName : packages) {
                     try {
                         Application app = new Application();
                         app.setId(UUID.randomUUID().toString());
-                        app.setName(appInfo.getName());
-                        app.setPackageName(appInfo.getPackageName());
-                        app.setVersion(appInfo.getVersion());
+                        app.setName(packageName);
+                        app.setPackageName(packageName);
+                        app.setVersion("");
                         app.setDeviceId(deviceId);
                         app.setPlatform(Application.Platform.HARMONYOS);
                         app.setInstalledAt(LocalDateTime.now());
                         applications.add(app);
                     } catch (Exception e) {
-                        log.warn("处理应用 {} 时出错: {}", appInfo.getPackageName(), e.getMessage());
+                        log.warn("处理鸿蒙应用 {} 时出错: {}", packageName, e.getMessage());
                     }
                 }
             } else {

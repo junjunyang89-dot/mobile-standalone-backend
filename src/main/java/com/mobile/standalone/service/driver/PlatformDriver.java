@@ -1,7 +1,5 @@
 package com.mobile.standalone.service.driver;
 
-import com.mobile.standalone.entity.PageObject;
-
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -74,11 +72,6 @@ public interface PlatformDriver {
      * 获取元素文本
      */
     String getElementText(String deviceId, String selector);
-    
-    /**
-     * 使用页面对象模型操作元素
-     */
-    boolean clickByPageObject(String deviceId, PageObject pageObject, String elementName);
     
     /**
      * 获取元素属性

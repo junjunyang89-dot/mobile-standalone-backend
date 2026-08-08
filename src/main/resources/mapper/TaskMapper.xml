@@ -24,6 +24,13 @@
         SELECT * FROM tasks ORDER BY created_at DESC
     </select>
     
+    <select id="findLatestByFlowId" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        WHERE config LIKE CONCAT('%"flowId":"', #{flowId}, '"%')
+        ORDER BY COALESCE(updated_at, created_at) DESC
+        LIMIT 1
+    </select>
+
     <select id="findById" resultMap="TaskResultMap">
         SELECT * FROM tasks WHERE id = #{id}
     </select>

@@ -14,6 +14,14 @@ public interface TaskMapper {
     Task findById(@Param("id") String id);
     
     List<Task> findByStatus(@Param("status") String status);
+
+    /**
+     * 某条流程最近一次执行。
+     * <p>
+     * flowId 存在 config 的 JSON 里，没有独立列——单跑和批量执行都会建 Task，
+     * 查这一张就能覆盖两种入口，不用分别去查回归批次表。
+     */
+    Task findLatestByFlowId(@Param("flowId") String flowId);
     
     List<Task> findByPlatform(@Param("platform") String platform);
 

@@ -117,6 +117,51 @@ public class PgyerAppService {
     }
 
     /**
+     * 取某个应用的最新一个版本。
+     * <p>
+     * buildKey 每次发版都变，写死在流程里意味着每次发版前都要先去改一遍流程——
+     * 那正好是自动化该消掉的人工负担。按 appKey 取最新，流程一次配好就不用再动。
+     *
+     * @param platform 传 ANDROID / IOS 时只取该平台的包（同一个 appKey 下可能两个平台都有）
+     */
+    public PgyerBuildVo latestBuild(String appKey, String platform) {
+        List<PgyerBuildVo> builds = listBuilds(appKey, 1);
+        if (builds.isEmpty()) {
+            throw new IllegalStateException("蒲公英上没有找到任何版本: appKey=" + appKey);
+        }
+        Integer wantType = wantedBuildType(platform);
+        // buildType 实测常为 0（列表接口不一定返回）。缺这个字段时不过滤——
+        // 宁可装上去让 adb 判平台对不对，也不要因为一个可选字段没返回就说「找不到包」，
+        // 那个报错会把人引到完全错误的方向
+        List<PgyerBuildVo> candidates = builds.stream()
+                .filter(b -> wantType == null || b.getBuildType() <= 0 || b.getBuildType() == wantType)
+                .toList();
+        if (candidates.isEmpty()) {
+            throw new IllegalStateException("蒲公英上没有 " + platform + " 平台的包: appKey=" + appKey
+                    + "（该应用下共 " + builds.size() + " 个版本，均标记为其它平台）");
+        }
+        // 接口按时间倒序返回，但不去依赖它——按构建号取最大，拿不到构建号时才回退到第一条
+        return candidates.stream()
+                .max(java.util.Comparator.comparingInt(PgyerBuildVo::getBuildBuildVersion))
+                .orElse(candidates.get(0));
+    }
+
+    /** 蒲公英 buildType：1=iOS，2=Android */
+    private static Integer wantedBuildType(String platform) {
+        if (platform == null || platform.isBlank()) {
+            return null;
+        }
+        String p = platform.trim().toUpperCase(java.util.Locale.ROOT);
+        if (p.contains("IOS")) {
+            return 1;
+        }
+        if (p.contains("ANDROID") || p.contains("HARMONY")) {
+            return 2;
+        }
+        return null;
+    }
+
+    /**
      * 下载指定 build 并安装到设备；可选先卸载同包名。
      */
     public InstallResult downloadAndInstall(String deviceId, String buildKey, boolean uninstallFirst) {

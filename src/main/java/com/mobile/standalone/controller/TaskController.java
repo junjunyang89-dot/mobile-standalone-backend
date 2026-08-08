@@ -155,11 +155,17 @@ public class TaskController {
     
     @PostMapping("/{id}/run")
     public ResponseEntity<Map<String, Object>> runTask(@PathVariable String id) {
-        boolean success = taskService.runTask(id);
-        if (success) {
-            return ResponseEntity.ok(Map.of("success", true, "message", "任务已提交执行"));
+        try {
+            boolean success = taskService.runTask(id);
+            if (success) {
+                return ResponseEntity.ok(Map.of("success", true, "message", "任务已提交执行"));
+            }
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", "任务不存在或已在运行"));
+        } catch (IllegalStateException ex) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", ex.getMessage() != null ? ex.getMessage() : "无法启动任务"));
         }
-        return ResponseEntity.badRequest().body(Map.of("success", false, "message", "任务不存在或已在运行"));
     }
     
     /**

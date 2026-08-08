@@ -1,0 +1,34 @@
+-- 线上回归种子流程与关键字（可重复执行）
+UPDATE ui_flows SET enabled=0, updated_at=NOW() WHERE id='uif-57561670-3b73-43cd-a2d2-e96fba03cfaa';
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-login-logout-android','登录退出｜账号登录与退出','启动后侧边栏退出登录（需已登录）；冒烟/回归用','DOMESTIC_ESPORTS','ANDROID','SHARED',0,'[{"keywordCode":"LAUNCH_APP","params":{"appId":"DOMESTIC_ESPORTS","packageName":"com.pwrd.steam.esports","activity":".ui.activity.launcher.LauncherActivity"}},{"keywordCode":"WAIT_ELEMENT","elementKey":"home_side_menu","params":{"waitType":"Visible","timeoutSec":10}},{"keywordCode":"CLICK","elementKey":"home_side_menu","params":{"clickMethod":"AUTO","waitAfterMs":0}},{"keywordCode":"IF_ELEMENT_EXISTS","elementKey":"community_title_bar","params":{"timeoutSec":6,"elseMessage":"您未登录，执行登录流程","thenSteps":[{"keywordCode":"IF_ELEMENT_EXISTS","elementKey":"side_drawer_settings","params":{"timeoutSec":3,"elseMessage":"","thenSteps":[{"keywordCode":"CLICK","elementKey":"side_drawer_settings","params":{"clickMethod":"AUTO","waitAfterMs":6}},{"keywordCode":"SWIPE","params":{"direction":"up","times":1}},{"keywordCode":"IF_ELEMENT_EXISTS","elementKey":"el_e3b4","params":{"timeoutSec":10,"elseMessage":"","thenSteps":[{"keywordCode":"CLICK","elementKey":"el_e3b4","params":{"clickMethod":"AUTO","waitAfterMs":20}},{"keywordCode":"IF_ELEMENT_EXISTS","elementKey":"el_bcf9","params":{"timeoutSec":10,"elseMessage":"","thenSteps":[{"keywordCode":"CLICK","elementKey":"logout_confirm","params":{"clickMethod":"AUTO","waitAfterMs":10}}],"elseSteps":[{"keywordCode":"BACK","params":{}}]}}],"elseSteps":[{"keywordCode":"RETURN_MESSAGE","params":{"message":"未进入设置-退出登录页面，或滑动失败"}}]}}],"elseSteps":[{"keywordCode":"RETURN_MESSAGE","params":{"message":"未进入设置页面"}}]}}],"elseSteps":[{"keywordCode":"RETURN_MESSAGE","params":{"message":"您未登录，请先执行登录流程"}}]}}]',1,30,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE name=VALUES(name),description=VALUES(description),catalog=VALUES(catalog),steps=VALUES(steps),enabled=1,sort_order=VALUES(sort_order),is_component=0,updated_at=NOW();
+-- app_id 空 + SHARED = 通用：电竞/Pog 回归均可见；卸装/启动跟 job 的 uiAppId，步骤内勿写死包名
+-- 注意：空 app_id + ONLINE 仅国内可见，海外不会列出；海外用例请写 app_id=OVERSEAS_POGPOG
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-install-verify-android','安装验证｜卸装启动','通用：卸→渠道页安装→启动；跟回归所选 APP（步骤不写死包名）',NULL,'ANDROID','SHARED',0,'[{"keywordCode":"UNINSTALL_APP","params":{}},{"keywordCode":"INSTALL_APP","params":{"installMode":"CHANNEL_PAGE"}},{"keywordCode":"LAUNCH_APP","params":{}}]',1,90,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE name=VALUES(name),description=VALUES(description),app_id=NULL,steps=VALUES(steps),enabled=1,sort_order=VALUES(sort_order),catalog='SHARED',is_component=0,updated_at=NOW();
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-browse-match-android','赛事浏览（CS / DOTA2 当天）','编排未完成前不启用，回归页不展示','DOMESTIC_ESPORTS','ANDROID','ONLINE',0,'[{"keywordCode": "RETURN_MESSAGE", "params": {"message": "浏览类流程尚未编排完成，请在流程编排中补步骤后启用"}}]',0,41,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE description=VALUES(description),updated_at=NOW();
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-browse-activity-android','活动登录与查看','编排未完成前不启用，回归页不展示','DOMESTIC_ESPORTS','ANDROID','ONLINE',0,'[{"keywordCode": "RETURN_MESSAGE", "params": {"message": "浏览类流程尚未编排完成，请在流程编排中补步骤后启用"}}]',0,42,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE description=VALUES(description),updated_at=NOW();
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-browse-news-android','发现-资讯页浏览','编排未完成前不启用，回归页不展示','DOMESTIC_ESPORTS','ANDROID','ONLINE',0,'[{"keywordCode": "RETURN_MESSAGE", "params": {"message": "浏览类流程尚未编排完成，请在流程编排中补步骤后启用"}}]',0,44,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE description=VALUES(description),updated_at=NOW();
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-browse-comment-android','互动发评论','编排未完成前不启用，回归页不展示','DOMESTIC_ESPORTS','ANDROID','ONLINE',0,'[{"keywordCode": "RETURN_MESSAGE", "params": {"message": "浏览类流程尚未编排完成，请在流程编排中补步骤后启用"}}]',0,40,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE description=VALUES(description),updated_at=NOW();
+INSERT INTO ui_flows (id, name, description, app_id, platform, catalog, is_component, steps, enabled, sort_order, created_by, created_at, updated_at)
+VALUES ('flow-browse-square-android','广场信息流浏览','编排未完成前不启用，回归页不展示','DOMESTIC_ESPORTS','ANDROID','ONLINE',0,'[{"keywordCode": "RETURN_MESSAGE", "params": {"message": "浏览类流程尚未编排完成，请在流程编排中补步骤后启用"}}]',0,43,'seed',NOW(),NOW())
+ON DUPLICATE KEY UPDATE description=VALUES(description),updated_at=NOW();
+INSERT INTO ui_keywords (id, code, name_zh, description, category, needs_element, param_schema, builtin, enabled, sort_order, created_at, updated_at)
+SELECT 'uik-uninstall_app','UNINSTALL_APP','卸载应用','卸载目标应用；未安装则跳过','DEVICE',0,'[{"name": "appId", "label": "应用字典ID", "type": "string", "required": false}, {"name": "packageName", "label": "包名/BundleId", "type": "string", "required": false}]',1,1,6,NOW(),NOW()
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM ui_keywords WHERE code='UNINSTALL_APP');
+INSERT INTO ui_keywords (id, code, name_zh, description, category, needs_element, param_schema, builtin, enabled, sort_order, created_at, updated_at)
+SELECT 'uik-install_app','INSTALL_APP','安装应用','多方式安装：PGYER/CHANNEL_PAGE/LOCAL_APK/QR_ASSIST','DEVICE',0,'[{"name":"installMode","label":"安装方式","type":"string","default":"CHANNEL_PAGE"},{"name":"channelUrl","label":"渠道页URL","type":"string"},{"name":"pgyerBuildKey","label":"蒲公英buildKey","type":"string"},{"name":"pgyerUrl","label":"下载URL","type":"string"},{"name":"apkArtifactId","label":"已上传应用ID","type":"string"},{"name":"qrPayload","label":"扫码安装页URL","type":"string"}]',1,1,7,NOW(),NOW()
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM ui_keywords WHERE code='INSTALL_APP');
+INSERT INTO ui_keywords (id, code, name_zh, description, category, needs_element, param_schema, builtin, enabled, sort_order, created_at, updated_at)
+SELECT 'uik-install_from_store','INSTALL_FROM_STORE','商店安装(兼容)','兼容旧名，默认 CHANNEL_PAGE','DEVICE',0,'[{"name":"installMode","label":"安装方式","type":"string","default":"CHANNEL_PAGE"}]',1,1,8,NOW(),NOW()
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM ui_keywords WHERE code='INSTALL_FROM_STORE');

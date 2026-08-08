@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.AiTestCaseMapper">
+
+    <resultMap id="AiTestCaseMap" type="com.mobile.standalone.entity.AiTestCase">
+        <id property="id" column="id"/>
+        <result property="caseId" column="case_id"/>
+        <result property="pageName" column="page_name"/>
+        <result property="category" column="category"/>
+        <result property="module" column="module"/>
+        <result property="subModule" column="sub_module"/>
+        <result property="testItem" column="test_item"/>
+        <result property="testPoint" column="test_point"/>
+        <result property="title" column="title"/>
+        <result property="priority" column="priority"/>
+        <result property="type" column="type"/>
+        <result property="precondition" column="precondition"/>
+        <result property="stepsJson" column="steps_json"/>
+        <result property="expectedResult" column="expected_result"/>
+        <result property="flowId" column="flow_id"/>
+        <result property="automationAdvice" column="automation_advice"/>
+        <result property="remark" column="remark"/>
+        <result property="screenshotUrl" column="screenshot_url"/>
+        <result property="platform" column="platform"/>
+        <result property="appId" column="app_id"/>
+        <result property="source" column="source"/>
+        <result property="status" column="status"/>
+        <result property="batchId" column="batch_id"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="filterWhere">
+        <where>
+            <if test="category != null and category != ''">
+                AND category = #{category}
+            </if>
+            <if test="pageName != null and pageName != ''">
+                AND page_name = #{pageName}
+            </if>
+            <if test="priority != null and priority != ''">
+                AND priority = #{priority}
+            </if>
+            <if test="status != null and status != ''">
+                AND status = #{status}
+            </if>
+            <if test="platform != null and platform != ''">
+                AND platform = #{platform}
+            </if>
+            <if test="batchId != null and batchId != ''">
+                AND batch_id = #{batchId}
+            </if>
+            <if test="automationAdvice != null and automationAdvice != ''">
+                AND automation_advice = #{automationAdvice}
+            </if>
+        </where>
+    </sql>
+
+    <select id="findById" resultMap="AiTestCaseMap">
+        SELECT * FROM ai_test_cases WHERE id = #{id}
+    </select>
+
+    <select id="findByFilters" resultMap="AiTestCaseMap">
+        SELECT * FROM ai_test_cases
+        <include refid="filterWhere"/>
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByFilters" resultType="int">
+        SELECT COUNT(*) FROM ai_test_cases
+        <include refid="filterWhere"/>
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_test_cases (
+            case_id, page_name, category, module, sub_module, test_item, test_point,
+            title, priority, type, precondition, steps_json, expected_result, flow_id,
+            automation_advice, remark,
+            screenshot_url, platform, app_id, source, status, batch_id, created_by,
+            created_at, updated_at
+        ) VALUES (
+            #{caseId}, #{pageName}, #{category}, #{module}, #{subModule}, #{testItem}, #{testPoint},
+            #{title}, #{priority}, #{type}, #{precondition},
+            CAST(#{stepsJson} AS JSON), #{expectedResult}, #{flowId}, #{automationAdvice}, #{remark},
+            #{screenshotUrl}, #{platform}, #{appId}, #{source}, #{status}, #{batchId}, #{createdBy},
+            NOW(), NOW()
+        )
+    </insert>
+
+    <update id="update">
+        UPDATE ai_test_cases
+        SET case_id = #{caseId},
+            page_name = #{pageName},
+            category = #{category},
+            module = #{module},
+            sub_module = #{subModule},
+            test_item = #{testItem},
+            test_point = #{testPoint},
+            title = #{title},
+            priority = #{priority},
+            type = #{type},
+            precondition = #{precondition},
+            steps_json = CAST(#{stepsJson} AS JSON),
+            expected_result = #{expectedResult},
+            flow_id = #{flowId},
+            automation_advice = #{automationAdvice},
+            remark = #{remark},
+            screenshot_url = #{screenshotUrl},
+            platform = #{platform},
+            app_id = #{appId},
+            source = #{source},
+            status = #{status},
+            batch_id = #{batchId},
+            updated_at = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ai_test_cases WHERE id = #{id}
+    </delete>
+</mapper>

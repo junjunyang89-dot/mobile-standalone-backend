@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -132,15 +133,45 @@ public class DeviceService {
         public List<Device> getDevices() { return devices; }
     }
 
+    /** 详情/应用短时缓存，避免连点反复打 adb/hdc */
+    private static final long DETAIL_CACHE_TTL_MS = 60_000L;
+    private static final long APPS_CACHE_TTL_MS = 60_000L;
+    private final ConcurrentHashMap<String, TimedCache<DeviceDetail>> detailCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, TimedCache<List<InstalledAppItem>>> appsCache = new ConcurrentHashMap<>();
+
+    private static final class TimedCache<T> {
+        final T value;
+        final long expireAtMs;
+
+        TimedCache(T value, long ttlMs) {
+            this.value = value;
+            this.expireAtMs = System.currentTimeMillis() + ttlMs;
+        }
+
+        boolean alive() {
+            return System.currentTimeMillis() < expireAtMs;
+        }
+    }
+
     /**
-     * 获取设备详情：设备名称、电量、安装应用列表；iOS 额外返回 ideviceinfo 详细数据（类似 iMazing 概览）。
-     * 前端点击设备后调用此接口展示详情。
+     * 获取设备详情。默认不含已安装应用、不含 getprop 全文（首屏更快）。
      */
     public DeviceDetail getDeviceDetail(String deviceId) {
+        return getDeviceDetail(deviceId, false, false);
+    }
+
+    public DeviceDetail getDeviceDetail(String deviceId, boolean includeApps, boolean includeRaw) {
         Device device = deviceMapper.findById(deviceId);
         if (device == null || !isValidDeviceRecord(device)) {
             return null;
         }
+
+        String cacheKey = deviceId + "|apps=" + includeApps + "|raw=" + includeRaw;
+        TimedCache<DeviceDetail> cached = detailCache.get(cacheKey);
+        if (cached != null && cached.alive()) {
+            return cached.value;
+        }
+
         Integer batteryLevel = null;
         List<InstalledAppItem> installedApplications = List.of();
         Map<String, String> iosDetail = new LinkedHashMap<>();
@@ -153,28 +184,42 @@ public class DeviceService {
                 batteryLevel = deviceManager.getAndroidBatteryLevel(deviceId);
             } else if (Device.usesIosAutomation(device.getPlatform())) {
                 batteryLevel = deviceManager.getIOSBatteryLevel(deviceId);
+            } else if (Device.usesHdcAutomation(device.getPlatform())) {
+                batteryLevel = deviceManager.getHarmonyBatteryLevel(deviceId);
             }
         } catch (Exception e) {
             log.warn("获取电量失败: deviceId={}", deviceId, e);
         }
 
-        try {
-            installedApplications = buildInstalledApps(deviceId, device.getPlatform());
-        } catch (Exception e) {
-            log.warn("获取安装应用列表失败: deviceId={}", deviceId, e);
+        if (includeApps) {
+            try {
+                List<InstalledAppItem> apps = getInstalledApps(deviceId);
+                installedApplications = apps != null ? apps : List.of();
+            } catch (Exception e) {
+                log.warn("获取安装应用列表失败: deviceId={}", deviceId, e);
+            }
         }
 
         try {
             if (Device.usesIosAutomation(device.getPlatform())) {
                 DeviceManager.IOSDetailResult iosResult = deviceManager.getIOSDeviceDetailWithRaw(deviceId);
                 iosDetail = iosResult.parsed != null ? iosResult.parsed : new LinkedHashMap<>();
-                iosDetailRaw = iosResult.rawOutput != null ? iosResult.rawOutput : "";
+                if (includeRaw) {
+                    iosDetailRaw = iosResult.rawOutput != null ? iosResult.rawOutput : "";
+                }
             } else if (Device.usesAndroidAutomation(device.getPlatform())) {
                 androidDetail = deviceManager.getAndroidDeviceDetail(deviceId);
                 if (androidDetail == null) androidDetail = new LinkedHashMap<>();
-                androidDetailRaw = buildAndroidDetailRaw(deviceId);
-                if (androidDetailRaw == null || androidDetailRaw.isEmpty()) {
-                    androidDetailRaw = "[未获取到 adb 输出] 请确认：1) 设备已通过 USB 连接并开启 USB 调试  2) 本机已安装 adb";
+                if (includeRaw) {
+                    androidDetailRaw = buildAndroidDetailRaw(deviceId);
+                    if (androidDetailRaw == null || androidDetailRaw.isEmpty()) {
+                        androidDetailRaw = "[未获取到 adb 输出] 请确认：1) 设备已通过 USB 连接并开启 USB 调试  2) 本机已安装 adb";
+                    }
+                }
+            } else if (Device.usesHdcAutomation(device.getPlatform())) {
+                androidDetail = buildHarmonyDeviceDetail(deviceId);
+                if (includeRaw) {
+                    androidDetailRaw = buildHarmonyDetailRaw(deviceId);
                 }
             }
         } catch (Exception e) {
@@ -182,12 +227,41 @@ public class DeviceService {
             String err = "获取详细数据异常: " + (e.getMessage() != null ? e.getMessage() : e.toString());
             if (Device.usesIosAutomation(device.getPlatform())) {
                 iosDetailRaw = err;
-            } else {
+            } else if (includeRaw) {
                 androidDetailRaw = err;
             }
         }
 
-        return new DeviceDetail(device, batteryLevel, installedApplications, iosDetail, iosDetailRaw, androidDetail, androidDetailRaw);
+        DeviceDetail detail = new DeviceDetail(
+                device, batteryLevel, installedApplications, iosDetail, iosDetailRaw, androidDetail, androidDetailRaw);
+        detailCache.put(cacheKey, new TimedCache<>(detail, DETAIL_CACHE_TTL_MS));
+        return detail;
+    }
+
+    /**
+     * 已安装应用列表（独立接口，带短时缓存）。设备不存在返回 null。
+     */
+    public List<InstalledAppItem> getInstalledApps(String deviceId) {
+        Device device = deviceMapper.findById(deviceId);
+        if (device == null || !isValidDeviceRecord(device)) {
+            return null;
+        }
+        TimedCache<List<InstalledAppItem>> cached = appsCache.get(deviceId);
+        if (cached != null && cached.alive()) {
+            return cached.value;
+        }
+        List<InstalledAppItem> apps;
+        try {
+            apps = buildInstalledApps(deviceId, device.getPlatform());
+        } catch (Exception e) {
+            log.warn("获取安装应用列表失败: deviceId={}", deviceId, e);
+            apps = List.of();
+        }
+        if (apps == null) {
+            apps = List.of();
+        }
+        appsCache.put(deviceId, new TimedCache<>(List.copyOf(apps), APPS_CACHE_TTL_MS));
+        return apps;
     }
 
     /** Android 设备完整原始信息（getprop 全量 + 常用 dumpsys 摘要），供前端完整展示 */
@@ -202,6 +276,37 @@ public class DeviceService {
             sb.append("=== dumpsys battery ===\n").append(battery).append("\n");
         }
         return sb.length() > 0 ? sb.toString() : "";
+    }
+
+    private String safeHdcParam(String deviceId, String key) {
+        try {
+            String v = deviceManager.getHarmonyParam(deviceId, key);
+            return v != null ? v : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String buildHarmonyDetailRaw(String deviceId) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== hdc connector ===\n");
+        for (String key : List.of(
+                "const.product.name",
+                "const.product.model",
+                "const.product.software.version",
+                "const.ohos.apiversion")) {
+            String v = safeHdcParam(deviceId, key);
+            sb.append(key).append("=").append(v).append("\n");
+        }
+        String uname = deviceManager.runHdcShell(deviceId, "uname -a");
+        if (uname != null && !uname.isBlank()) {
+            sb.append("=== uname ===\n").append(uname).append("\n");
+        }
+        String battery = deviceManager.runHdcShell(deviceId, "hidumper -s 3302 -a -i");
+        if (battery != null && !battery.isBlank()) {
+            sb.append("=== hidumper BatteryService ===\n").append(battery).append("\n");
+        }
+        return sb.toString();
     }
 
     private List<InstalledAppItem> buildInstalledApps(String deviceId, Device.Platform platform) {
@@ -220,7 +325,46 @@ public class DeviceService {
                     .map(a -> new InstalledAppItem(a.getName(), a.getPackageName(), a.getVersion()))
                     .collect(Collectors.toList());
         }
+        if (Device.usesHdcAutomation(platform)) {
+            // bm dump -a -l 拿名称，并行 bm dump -n 补版本
+            List<DeviceManager.AppInfo> infos = deviceManager.listHarmonyAppsViaHdc(deviceId);
+            if (infos.isEmpty()) return List.of();
+            return infos.stream()
+                    .map(a -> new InstalledAppItem(
+                            a.getName() != null ? a.getName() : a.getPackageName(),
+                            a.getPackageName(),
+                            a.getVersion() != null ? a.getVersion() : ""))
+                    .collect(Collectors.toList());
+        }
         return List.of();
+    }
+
+    /** 鸿蒙详情：拼成前端 androidDetail 能认的分层结构 */
+    private Map<String, Object> buildHarmonyDeviceDetail(String deviceId) {
+        Map<String, Object> root = new LinkedHashMap<>();
+        Map<String, String> systemInfo = new LinkedHashMap<>();
+        systemInfo.put("connector", "hdc");
+        systemInfo.put("productName", safeHdcParam(deviceId, "const.product.name"));
+        systemInfo.put("model", safeHdcParam(deviceId, "const.product.model"));
+        systemInfo.put("softwareVersion", safeHdcParam(deviceId, "const.product.software.version"));
+        systemInfo.put("apiVersion", safeHdcParam(deviceId, "const.ohos.apiversion"));
+        systemInfo.put("serialNumber", deviceId);
+        root.put("systemInfo", systemInfo);
+
+        Map<String, String> hardwareInfo = new LinkedHashMap<>();
+        String uname = deviceManager.runHdcShell(deviceId, "uname -a");
+        if (uname != null && !uname.isBlank()) {
+            hardwareInfo.put("uname", uname.trim());
+        }
+        if (!hardwareInfo.isEmpty()) {
+            root.put("hardwareInfo", hardwareInfo);
+        }
+
+        Map<String, String> batteryInfo = deviceManager.getHarmonyBatteryInfo(deviceId);
+        if (batteryInfo != null && !batteryInfo.isEmpty()) {
+            root.put("batteryInfo", batteryInfo);
+        }
+        return root;
     }
 
     /**
@@ -330,18 +474,23 @@ public class DeviceService {
         LocalDateTime now = LocalDateTime.now();
         for (Device scannedDevice : scannedDevices) {
             Device existingDevice = deviceMapper.findById(scannedDevice.getId());
-            
+            Device.DeviceStatus status = scannedDevice.getStatus() != null
+                    ? scannedDevice.getStatus()
+                    : Device.DeviceStatus.CONNECTED;
+
             if (existingDevice != null) {
                 existingDevice.setName(scannedDevice.getName());
                 existingDevice.setVersion(scannedDevice.getVersion());
-                existingDevice.setStatus(Device.DeviceStatus.CONNECTED);
+                existingDevice.setPlatform(scannedDevice.getPlatform());
+                existingDevice.setStatus(status);
+                // 未授权/离线也更新 lastSeen，避免被误判成「彻底消失」
                 existingDevice.setLastSeen(now);
                 deviceMapper.update(existingDevice);
             } else {
-                scannedDevice.setStatus(Device.DeviceStatus.CONNECTED);
+                scannedDevice.setStatus(status);
                 scannedDevice.setLastSeen(now);
                 deviceMapper.insert(scannedDevice);
-                log.info("发现新设备: {} ({})", scannedDevice.getName(), scannedDevice.getId());
+                log.info("发现新设备: {} ({}) status={}", scannedDevice.getName(), scannedDevice.getId(), status);
             }
         }
     }

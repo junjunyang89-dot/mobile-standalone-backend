@@ -11,9 +11,11 @@ import com.mobile.standalone.dto.TaskOverviewDto;
 import com.mobile.standalone.service.FunctionalTestScenarioService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mobile.standalone.service.TaskNameGenerator;
+import com.mobile.standalone.service.MetricKitIngestService;
+import com.mobile.standalone.service.ScreenshotDiscoveryService;
 import com.mobile.standalone.service.TaskOverviewService;
 import com.mobile.standalone.service.TaskService;
+import com.mobile.standalone.util.ExecutionLogJson;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -23,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -31,154 +34,41 @@ import java.util.List;
 @RequiredArgsConstructor
 public class FunctionalTestController {
 
+    private static final Path TMP_SCREENSHOTS_DIR = Paths.get("/tmp/screenshots").normalize().toAbsolutePath();
+    private static final Path FLOW_SCREENSHOTS_DIR = Paths.get(System.getProperty("user.home"), ".mobile-standalone", "screenshots")
+            .normalize().toAbsolutePath();
+
     private final TaskService taskService;
-    private final TaskNameGenerator taskNameGenerator;
     private final FunctionalTestScenarioService scenarioService;
     private final TaskExecutionMapper executionMapper;
     private final DeviceMapper deviceMapper;
     private final TaskOverviewService taskOverviewService;
+    private final MetricKitIngestService metricKitIngestService;
 
-    /**
-     * 获取「自动化测试列表」：可点击执行的场景（如登录测试）。
-     * 前端展示此列表，用户选择设备/应用后点击「执行」调用 POST /execute。
-     */
-    /** 获取所有可执行场景（含兼容性、安装卸载等） */
-    @GetMapping("/scenarios")
-    public ResponseEntity<List<ScenarioItem>> listScenarios() {
-        return ResponseEntity.ok(
-                scenarioService.listScenarios().stream()
-                        .map(s -> new ScenarioItem(s.getId(), s.getName(), s.getPlatform(), s.getTaskType().name(), s.getDescription(), s.getScenarioKey()))
-                        .toList()
-        );
-    }
-
-    /** 仅获取「功能基础质量测试」下的场景（启动应用程序、登录、搜索），供创建任务时「测试场景」下拉用 */
-    @GetMapping("/scenarios/functional-quality")
-    public ResponseEntity<List<ScenarioItem>> listFunctionalQualityScenarios(
+    /** 场景化性能测试场景列表（已空：业务路径统一走流程编排 flowId） */
+    @GetMapping("/scenarios/scenario-performance")
+    public ResponseEntity<List<ScenarioItem>> listScenarioPerformanceScenarios(
             @RequestParam(required = false) String platform) {
         return ResponseEntity.ok(
-                scenarioService.listFunctionalQualityScenarios(platform).stream()
+                scenarioService.listScenarioPerformanceScenarios(platform).stream()
                         .map(s -> new ScenarioItem(s.getId(), s.getName(), s.getPlatform(), s.getTaskType().name(), s.getDescription(), s.getScenarioKey()))
                         .toList()
         );
     }
 
     /**
-     * 一键执行：根据场景创建任务并立即执行。
-     * Body: scenarioId, deviceId, appId, config(可选)。返回任务 ID，前端可轮询 GET /tasks/{id} 查状态。
+     * @deprecated 功能基础质量硬编码已下线；请改用流程编排创建 UI_FLOW_TEST。
      */
-    @PostMapping("/execute")
-    public ResponseEntity<ExecuteResponse> executeScenario(@RequestBody ExecuteRequest request) {
-        if (request.getScenarioId() == null || request.getScenarioId().isBlank()) {
-            return ResponseEntity.badRequest().build();
-        }
-        if (request.getDeviceId() == null || request.getDeviceId().isBlank()) {
-            return ResponseEntity.badRequest().build();
-        }
-        if (request.getApplicationId() == null || request.getApplicationId().isBlank()) {
-            return ResponseEntity.badRequest().build();
-        }
-        var def = scenarioService.getScenario(request.getScenarioId().trim());
-        if (def == null) {
-            return ResponseEntity.badRequest().build();
-        }
-        Task task = new Task();
-        task.setName(def.getName());
-        task.setPlatform(Task.Platform.valueOf(def.getPlatform()));
-        task.setDeviceId(request.getDeviceId());
-        task.setAppId(request.getApplicationId());
-        task.setTaskType(def.getTaskType());
-        task.setScenarioKey(def.getScenarioKey());
-        task.setStatus(Task.TaskStatus.PENDING);
-        if (request.getConfig() != null && !request.getConfig().isBlank()) {
-            task.setConfig(request.getConfig().trim());
-        }
-        Task created = taskService.createTask(task);
-        boolean started = taskService.runTask(created.getId());
-        Task after = taskService.getTaskById(created.getId());
-        ExecuteResponse resp = new ExecuteResponse();
-        resp.setTaskId(created.getId());
-        resp.setStatus(after != null ? after.getStatus().name() : created.getStatus().name());
-        resp.setMessage(started ? "任务已提交执行" : "任务创建成功，但启动失败（可能已在运行中）");
-        return ResponseEntity.ok(resp);
-    }
-
-    /**
-     * 创建功能质量体验测试任务
-     */
+    @Deprecated
     @PostMapping("/tasks")
-    public ResponseEntity<TaskResponse> createTask(@RequestBody CreateTaskRequest request) {
-        // 验证必填字段
-        if (request.getPlatform() == null) {
-            return ResponseEntity.badRequest().build();
-        }
-        if (request.getDeviceId() == null || request.getDeviceId().isEmpty()) {
-            return ResponseEntity.badRequest().build();
-        }
-        if (request.getApplicationId() == null || request.getApplicationId().isEmpty()) {
-            return ResponseEntity.badRequest().build();
-        }
-        
-        // 生成任务名称（如果未提供）
-        String taskName = request.getTaskName();
-        if (taskName == null || taskName.trim().isEmpty()) {
-            taskName = taskNameGenerator.generateTaskName(Task.TaskType.FUNCTIONAL_QUALITY_TEST);
-        }
-        
-        // 验证任务名称长度
-        if (taskName.length() < 1 || taskName.length() > 60) {
-            return ResponseEntity.badRequest().build();
-        }
-        
-        // 验证备注长度
-        if (request.getRemarks() != null && request.getRemarks().length() > 80) {
-            return ResponseEntity.badRequest().build();
-        }
-        
-        // 创建任务实体
-        Task task = new Task();
-        task.setName(taskName);
-        task.setDescription(request.getRemarks());
-        task.setPlatform(parsePlatform(request.getPlatform()));
-        task.setDeviceId(request.getDeviceId());
-        task.setAppId(request.getApplicationId());
-        task.setTaskType(Task.TaskType.FUNCTIONAL_QUALITY_TEST);
-        // 规范化 scenarioKey：trim + 小写，便于执行时匹配（launch_app / login / search / settings）
-        String sk = request.getScenarioKey();
-        if (sk != null && !sk.isBlank()) {
-            sk = sk.trim().toLowerCase();
-            task.setScenarioKey(sk);
-        } else {
-            task.setScenarioKey(null);
-        }
-        task.setStatus(Task.TaskStatus.PENDING);
-        if (request.getConfig() != null && !request.getConfig().isBlank()) {
-            task.setConfig(request.getConfig().trim());
-        }
-        
-        // 保存任务
-        Task createdTask = taskService.createTask(task);
-        
-        // 构建响应
-        TaskResponse response = new TaskResponse();
-        response.setId(createdTask.getId());
-        response.setTaskName(createdTask.getName());
-        response.setRemarks(createdTask.getDescription());
-        response.setPlatform(createdTask.getPlatform().name());
-        response.setDeviceId(createdTask.getDeviceId());
-        response.setApplicationId(createdTask.getAppId());
-        response.setStatus(createdTask.getStatus().name());
-        response.setCreatedAt(createdTask.getCreatedAt());
-        response.setScenarioKey(createdTask.getScenarioKey());
-        response.setScenarioName(scenarioService.getScenarioDisplayNameOrFallback(createdTask));
-
-        return ResponseEntity.ok(response);
+    public ResponseEntity<?> createTask(@RequestBody CreateTaskRequest request) {
+        return ResponseEntity.status(410).body(java.util.Map.of(
+                "message", "功能基础质量硬编码场景已下线，请改用「流程编排」创建并执行流程任务"));
     }
 
     /**
-     * 获取功能质量体验测试任务列表（分页，支持筛选：全部/近三天/近一周、任务名或备注、状态）
+     * 获取功能/兼容/流程等任务列表（分页）
      * 返回字段含 deviceName，便于前端卡片展示「设备名称」。
-     * 不传 page/size 时默认第 1 页、每页 10 条，兼容前端未加分页前的调用。
      */
     @GetMapping("/tasks")
     public ResponseEntity<PageResult<TaskResponse>> listTasks(
@@ -218,7 +108,8 @@ public class FunctionalTestController {
         }
         Task.TaskType type = task.getTaskType();
         if (type != Task.TaskType.FUNCTIONAL_QUALITY_TEST && type != Task.TaskType.COMPATIBILITY_TEST
-                && type != Task.TaskType.INSTALL_UNINSTALL_UPGRADE_TEST && type != Task.TaskType.UI_ADAPTATION_TEST) {
+                && type != Task.TaskType.INSTALL_UNINSTALL_UPGRADE_TEST && type != Task.TaskType.UI_ADAPTATION_TEST
+                && type != Task.TaskType.UI_FLOW_TEST) {
             return ResponseEntity.notFound().build();
         }
         TaskResponse response = toResponse(task);
@@ -252,24 +143,41 @@ public class FunctionalTestController {
         if (executions.isEmpty()) {
             return ResponseEntity.notFound().build();
         }
-        String reportPath = executions.get(0).getReportPath();
-        if (reportPath == null || reportPath.isBlank()) {
+        TaskExecution latest = executions.get(0);
+        String reportPath = latest.getReportPath();
+        if (reportPath != null && !reportPath.isBlank()) {
+            ResponseEntity<byte[]> body = readAllowedScreenshot(Paths.get(reportPath));
+            if (body.getStatusCode().is2xxSuccessful()) {
+                return body;
+            }
+        }
+        // 流程任务等可能只在步骤里留了截图：取执行日志/磁盘扫描中最后一张
+        String fallback = lastScreenshotPathFromLog(latest.getExecutionLog());
+        if (fallback == null) {
+            List<ExecutionLogEntryDto> discovered = ScreenshotDiscoveryService.discoverStepScreenshots(id);
+            if (!discovered.isEmpty()) {
+                ExecutionLogEntryDto last = discovered.get(discovered.size() - 1);
+                fallback = last != null ? last.getScreenshotPath() : null;
+            }
+        }
+        if (fallback == null || fallback.isBlank()) {
             return ResponseEntity.notFound().build();
         }
-        Path path = Paths.get(reportPath).normalize().toAbsolutePath();
-        Path screenshotsDir = Paths.get("/tmp/screenshots").normalize().toAbsolutePath();
-        if (!path.startsWith(screenshotsDir)) {
-            return ResponseEntity.notFound().build();
+        return readAllowedScreenshot(Paths.get(fallback));
+    }
+
+    private String lastScreenshotPathFromLog(String executionLogJson) {
+        List<ExecutionLogEntryDto> log = parseExecutionLog(executionLogJson);
+        if (log == null || log.isEmpty()) {
+            return null;
         }
-        if (!path.toFile().exists() || !path.toFile().isFile()) {
-            return ResponseEntity.notFound().build();
+        for (int i = log.size() - 1; i >= 0; i--) {
+            ExecutionLogEntryDto entry = log.get(i);
+            if (entry != null && entry.getScreenshotPath() != null && !entry.getScreenshotPath().isBlank()) {
+                return entry.getScreenshotPath();
+            }
         }
-        try {
-            byte[] bytes = Files.readAllBytes(path);
-            return ResponseEntity.ok().body(bytes);
-        } catch (Exception e) {
-            return ResponseEntity.notFound().build();
-        }
+        return null;
     }
 
     /**
@@ -281,32 +189,52 @@ public class FunctionalTestController {
         if (stepIndex < 0) {
             return ResponseEntity.badRequest().build();
         }
-        List<TaskExecution> executions = executionMapper.findByTaskIdOrderByStartTimeDesc(id);
-        if (executions.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-        List<ExecutionLogEntryDto> log = parseExecutionLog(executions.get(0).getExecutionLog());
-        if (log == null || stepIndex >= log.size()) {
-            return ResponseEntity.notFound().build();
-        }
-        String screenshotPath = log.get(stepIndex).getScreenshotPath();
+        String screenshotPath = resolveStepScreenshotPath(id, stepIndex);
         if (screenshotPath == null || screenshotPath.isBlank()) {
             return ResponseEntity.notFound().build();
         }
-        Path path = Paths.get(screenshotPath).normalize().toAbsolutePath();
-        Path screenshotsDir = Paths.get("/tmp/screenshots").normalize().toAbsolutePath();
-        if (!path.startsWith(screenshotsDir)) {
+        return readAllowedScreenshot(Paths.get(screenshotPath));
+    }
+
+    /**
+     * 任务截图列表：按 taskId 扫描 /tmp/screenshots，或回退到执行日志中带截图的步骤。
+     * 任务不存在返回 404；无截图返回空数组。
+     */
+    @GetMapping("/tasks/{id}/screenshot-list")
+    public ResponseEntity<List<ScreenshotListItem>> getTaskScreenshotList(@PathVariable String id) {
+        Task task = taskService.getTaskById(id);
+        if (task == null) {
             return ResponseEntity.notFound().build();
         }
-        if (!path.toFile().exists() || !path.toFile().isFile()) {
-            return ResponseEntity.notFound().build();
+        List<ScreenshotListItem> items = new ArrayList<>();
+        List<ExecutionLogEntryDto> discovered = ScreenshotDiscoveryService.discoverStepScreenshots(id);
+        if (!discovered.isEmpty()) {
+            for (int i = 0; i < discovered.size(); i++) {
+                ExecutionLogEntryDto entry = discovered.get(i);
+                items.add(new ScreenshotListItem(i,
+                        "functional-test/tasks/" + id + "/screenshots/" + i,
+                        entry.getStep() != null ? entry.getStep() : ("步骤 " + i)));
+            }
+            return ResponseEntity.ok(items);
         }
-        try {
-            byte[] bytes = Files.readAllBytes(path);
-            return ResponseEntity.ok().body(bytes);
-        } catch (Exception e) {
-            return ResponseEntity.notFound().build();
+        List<TaskExecution> executions = executionMapper.findByTaskIdOrderByStartTimeDesc(id);
+        if (executions.isEmpty()) {
+            return ResponseEntity.ok(items);
         }
+        List<ExecutionLogEntryDto> log = parseExecutionLog(executions.get(0).getExecutionLog());
+        if (log == null) {
+            return ResponseEntity.ok(items);
+        }
+        for (int i = 0; i < log.size(); i++) {
+            ExecutionLogEntryDto entry = log.get(i);
+            if (entry == null || entry.getScreenshotPath() == null || entry.getScreenshotPath().isBlank()) {
+                continue;
+            }
+            items.add(new ScreenshotListItem(i,
+                    "functional-test/tasks/" + id + "/screenshots/" + i,
+                    entry.getStep() != null ? entry.getStep() : ("步骤 " + i)));
+        }
+        return ResponseEntity.ok(items);
     }
 
     /**
@@ -325,17 +253,52 @@ public class FunctionalTestController {
         return ResponseEntity.ok(log != null ? log : Collections.emptyList());
     }
 
-    private static final ObjectMapper JSON = new ObjectMapper();
-    private static final TypeReference<List<ExecutionLogEntryDto>> EXECUTION_LOG_TYPE = new TypeReference<>() {};
+    /** 优先执行日志中的 screenshotPath，缺失时回退到磁盘扫描结果（与 overview 一致） */
+    private String resolveStepScreenshotPath(String taskId, int stepIndex) {
+        List<TaskExecution> executions = executionMapper.findByTaskIdOrderByStartTimeDesc(taskId);
+        if (!executions.isEmpty()) {
+            List<ExecutionLogEntryDto> log = parseExecutionLog(executions.get(0).getExecutionLog());
+            if (log != null && stepIndex >= 0 && stepIndex < log.size()) {
+                ExecutionLogEntryDto entry = log.get(stepIndex);
+                if (entry != null && entry.getScreenshotPath() != null && !entry.getScreenshotPath().isBlank()) {
+                    Path path = Paths.get(entry.getScreenshotPath()).normalize().toAbsolutePath();
+                    if (isAllowedScreenshotPath(path) && Files.isRegularFile(path)) {
+                        return path.toString();
+                    }
+                }
+            }
+        }
+        List<ExecutionLogEntryDto> discovered = ScreenshotDiscoveryService.discoverStepScreenshots(taskId);
+        if (stepIndex >= 0 && stepIndex < discovered.size()) {
+            ExecutionLogEntryDto entry = discovered.get(stepIndex);
+            if (entry != null && entry.getScreenshotPath() != null && !entry.getScreenshotPath().isBlank()) {
+                return entry.getScreenshotPath();
+            }
+        }
+        return null;
+    }
+
+    private ResponseEntity<byte[]> readAllowedScreenshot(Path rawPath) {
+        Path path = rawPath.normalize().toAbsolutePath();
+        if (!isAllowedScreenshotPath(path) || !Files.isRegularFile(path)) {
+            return ResponseEntity.notFound().build();
+        }
+        try {
+            return ResponseEntity.ok().body(Files.readAllBytes(path));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    private static boolean isAllowedScreenshotPath(Path path) {
+        return path.startsWith(TMP_SCREENSHOTS_DIR) || path.startsWith(FLOW_SCREENSHOTS_DIR);
+    }
+
+    private static final ObjectMapper JSON = ExecutionLogJson.mapper();
     private static final TypeReference<java.util.Map<String, String>> EXECUTION_VARIABLES_TYPE = new TypeReference<>() {};
 
     private List<ExecutionLogEntryDto> parseExecutionLog(String executionLogJson) {
-        if (executionLogJson == null || executionLogJson.isBlank()) return null;
-        try {
-            return JSON.readValue(executionLogJson, EXECUTION_LOG_TYPE);
-        } catch (Exception e) {
-            return null;
-        }
+        return ExecutionLogJson.parse(executionLogJson);
     }
 
     /** 为执行日志中带截图的步骤填充 screenshotUrl，供前端直接请求步骤截图 */
@@ -383,7 +346,7 @@ public class FunctionalTestController {
             return ResponseEntity.notFound().build();
         }
         Task.TaskType type = task.getTaskType();
-        if (type != Task.TaskType.PERFORMANCE_BASELINE_TEST && type != Task.TaskType.PERFORMANCE_QUALITY_TEST) {
+        if (!isPerformanceReportTaskType(type)) {
             return ResponseEntity.notFound().build();
         }
         List<TaskExecution> executions = executionMapper.findByTaskIdOrderByStartTimeDesc(id);
@@ -396,10 +359,51 @@ public class FunctionalTestController {
         }
         try {
             Object parsed = JSON.readValue(resultData, Object.class);
+            parsed = metricKitIngestService.mergeIntoReport(id, parsed);
             return ResponseEntity.ok(parsed);
         } catch (Exception e) {
             return ResponseEntity.ok(resultData);
         }
+    }
+
+    /**
+     * iOS 测试包 MetricKit 上报入口。App 在收到 MXMetricPayload 后 POST 原始 JSON。
+     * 读 performance-report 时会合并为 metricKitSummary（可晚于任务结束到达）。
+     */
+    @PostMapping("/tasks/{id}/metrickit")
+    public ResponseEntity<?> ingestMetricKit(@PathVariable String id, @RequestBody com.fasterxml.jackson.databind.JsonNode body) {
+        Task task = taskService.getTaskById(id);
+        if (task == null) {
+            return ResponseEntity.notFound().build();
+        }
+        if (!isPerformanceReportTaskType(task.getTaskType())) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("error", "仅性能任务可上报 MetricKit"));
+        }
+        try {
+            metricKitIngestService.ingest(id, body);
+            return ResponseEntity.ok(java.util.Map.of("ok", true, "taskId", id));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/tasks/{id}/metrickit")
+    public ResponseEntity<?> getMetricKit(@PathVariable String id) {
+        Task task = taskService.getTaskById(id);
+        if (task == null) {
+            return ResponseEntity.notFound().build();
+        }
+        var node = metricKitIngestService.get(id);
+        if (node == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(node);
+    }
+
+    private static boolean isPerformanceReportTaskType(Task.TaskType type) {
+        return type == Task.TaskType.PERFORMANCE_BASELINE_TEST
+                || type == Task.TaskType.SCENARIO_PERFORMANCE_TEST
+                || type == Task.TaskType.PERFORMANCE_QUALITY_TEST;
     }
 
     /**
@@ -416,7 +420,7 @@ public class FunctionalTestController {
             return ResponseEntity.notFound().build();
         }
         Task.TaskType type = task.getTaskType();
-        if (type != Task.TaskType.PERFORMANCE_BASELINE_TEST && type != Task.TaskType.PERFORMANCE_QUALITY_TEST) {
+        if (!isPerformanceReportTaskType(type)) {
             return ResponseEntity.notFound().build();
         }
         List<TaskExecution> executions = executionMapper.findByTaskIdOrderByStartTimeDesc(id);
@@ -566,5 +570,14 @@ public class FunctionalTestController {
         private String taskId;
         private String status;
         private String message;
+    }
+
+    @lombok.Data
+    @lombok.AllArgsConstructor
+    @lombok.NoArgsConstructor
+    public static class ScreenshotListItem {
+        private int index;
+        private String screenshotUrl;
+        private String step;
     }
 }

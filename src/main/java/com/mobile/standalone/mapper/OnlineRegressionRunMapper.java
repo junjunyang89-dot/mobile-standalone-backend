@@ -16,4 +16,7 @@ public interface OnlineRegressionRunMapper {
     int insert(OnlineRegressionRun run);
 
     int update(OnlineRegressionRun run);
+
+    /** 清空全部历史批次（jobs/steps 靠外键 CASCADE） */
+    int deleteAll();
 }

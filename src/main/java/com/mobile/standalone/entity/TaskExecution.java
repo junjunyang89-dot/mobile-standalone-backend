@@ -20,6 +20,8 @@ public class TaskExecution {
     private String executionVariables;
 
     public enum ExecutionStatus {
-        RUNNING, COMPLETED, FAILED, STOPPED
+        RUNNING, COMPLETED, FAILED, STOPPED,
+        /** 流程判定为「本次不适用」而提前结束：不算通过也不算失败 */
+        SKIPPED
     }
 }

@@ -11,6 +11,7 @@
         <result property="category" column="category"/>
         <result property="needsElement" column="needs_element"/>
         <result property="paramSchema" column="param_schema"/>
+        <result property="customUi" column="custom_ui"/>
         <result property="builtin" column="builtin"/>
         <result property="enabled" column="enabled"/>
         <result property="sortOrder" column="sort_order"/>
@@ -37,9 +38,9 @@
 
     <insert id="insert">
         INSERT INTO ui_keywords
-        (id, code, name_zh, description, category, needs_element, param_schema, builtin, enabled, sort_order, created_at, updated_at)
+        (id, code, name_zh, description, category, needs_element, param_schema, custom_ui, builtin, enabled, sort_order, created_at, updated_at)
         VALUES
-        (#{id}, #{code}, #{nameZh}, #{description}, #{category}, #{needsElement}, #{paramSchema},
+        (#{id}, #{code}, #{nameZh}, #{description}, #{category}, #{needsElement}, #{paramSchema}, #{customUi},
          #{builtin}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
     </insert>
 
@@ -50,6 +51,7 @@
             category = #{category},
             needs_element = #{needsElement},
             param_schema = #{paramSchema},
+            custom_ui = #{customUi},
             enabled = #{enabled},
             sort_order = #{sortOrder},
             updated_at = #{updatedAt}

@@ -20,6 +20,7 @@ import java.util.Map;
 public class PgyerController {
 
     private final PgyerAppService pgyerAppService;
+    private final com.mobile.standalone.service.UiAppService uiAppService;
 
     /** 列出历史版本；appKey 默认取配置 pgyer.default-app-key */
     @GetMapping("/builds")
@@ -33,6 +34,32 @@ public class PgyerController {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("message", e.getMessage() != null ? e.getMessage() : "查询失败"));
+        }
+    }
+
+    /**
+     * 按「应用字典 + 平台」列最近几个版本，供执行流程时挑一个装。
+     * <p>
+     * 版本选择要发生在<b>执行时</b>而不是编辑流程时：他们的节奏本来就是不同时段装不同包
+     * （发版前测试包、发版后线上老包、下午的 release 包），把 buildKey 写进流程等于
+     * 每次发版前都要先改一遍流程。
+     */
+    @GetMapping("/app-builds")
+    public ResponseEntity<?> appBuilds(@RequestParam String appId,
+                                       @RequestParam(required = false) String platform,
+                                       @RequestParam(required = false, defaultValue = "5") int limit) {
+        try {
+            String appKey = uiAppService.pgyerAppKey(appId, platform);
+            if (appKey == null) {
+                return ResponseEntity.ok(List.of());
+            }
+            List<PgyerBuildVo> list = pgyerAppService.listBuilds(appKey, 1);
+            return ResponseEntity.ok(list.stream().limit(Math.max(1, Math.min(20, limit))).toList());
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(
+                    Map.of("message", e.getMessage() != null ? e.getMessage() : "查询失败"));
         }
     }
 

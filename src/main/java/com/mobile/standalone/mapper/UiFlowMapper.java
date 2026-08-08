@@ -13,7 +13,21 @@ public interface UiFlowMapper {
             @Param("appId") String appId,
             @Param("platform") String platform,
             @Param("catalog") String catalog,
-            @Param("componentOnly") Boolean componentOnly
+            @Param("componentOnly") Boolean componentOnly,
+            @Param("environment") String environment
+    );
+
+    /**
+     * 批量执行的候选用例：启用、非组件、catalog 落在轨道内、环境匹配。
+     * <p>
+     * catalogs 由轨道给（回归 ONLINE/SHARED、自动化 AUTOMATION/SHARED），
+     * environment 传空按 PROD——存量调用与加这两维之前完全一致。
+     */
+    List<UiFlow> findForBatch(
+            @Param("appId") String appId,
+            @Param("platform") String platform,
+            @Param("environment") String environment,
+            @Param("catalogs") List<String> catalogs
     );
 
     UiFlow findById(@Param("id") String id);

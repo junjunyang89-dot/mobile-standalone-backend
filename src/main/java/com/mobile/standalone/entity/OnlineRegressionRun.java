@@ -15,6 +15,10 @@ public class OnlineRegressionRun {
     /** JSON array of ordered step ids */
     private String orderedSteps;
     private Boolean enableOverseasProxy;
+    /** PROD / TEST；存量记录为 NULL，一律按 PROD 解读 */
+    private String environment;
+    /** REGRESSION / AUTOMATION；存量记录为 NULL，一律按 REGRESSION 解读 */
+    private String track;
     private Integer passRate;
     private String errorMessage;
     private LocalDateTime startedAt;

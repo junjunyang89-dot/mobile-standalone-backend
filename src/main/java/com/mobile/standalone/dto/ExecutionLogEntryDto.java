@@ -26,6 +26,15 @@ public class ExecutionLogEntryDto {
     private String message;
     /** 未定位到时的元素定位符，便于排查 */
     private String selector;
+    /**
+     * 该步骤引用的元素 key（ui_elements.name_en），如 login_phone_input。
+     * <p>
+     * selector 只有定位串，而同一串可能被多个元素行共用，也可能因为随机下标展开过而对不上原值——
+     * 事后要判断「是元素定位失效还是功能真坏了」，得靠人回去翻流程才知道说的是哪一行。
+     * 记下 key 之后可以直接回表取定位与备用定位。
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String elementKey;
     /** 时间（ISO 格式） */
     private LocalDateTime timestamp;
     /** 该步骤对应的截图文件路径（服务端保存用） */
@@ -33,12 +42,41 @@ public class ExecutionLogEntryDto {
     /** 前端展示用：该步骤截图的请求地址（由接口层按 stepIndex 填充，不持久化） */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String screenshotUrl;
+    /** 扫码安装页 URL（QR_ASSIST），前端据此生成二维码 */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String qrPayload;
+    /**
+     * 该截图是否为「页面稳定后」拍的最终态。
+     * <p>
+     * 定时连拍会拍到 loading 态和转场动画中间帧，人眼能一扫而过，但交给 AI 做结果比对时
+     * 这些噪声图会造成误判。带此标记的才是这一步的确定结果，供人工/AI 复核时优先看。
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean screenshotSettled;
 
     public static ExecutionLogEntryDto success(String step, String message) {
-        return new ExecutionLogEntryDto(step, "Info", "success", message, null, LocalDateTime.now(), null, null);
+        return new ExecutionLogEntryDto(step, "Info", "success", message, null, null, LocalDateTime.now(),
+                null, null, null, null);
+    }
+
+    /**
+     * 中立事件：既不是通过也不是失败。
+     * <p>
+     * 用户点停止、重试前的那次失败尝试，这些都不该算进不通过——
+     * 否则人为中断会拉低达标率，重试成功的步骤也会同时留下一条红。
+     * 报告里归入「告警」，看得见但不计入失败。
+     */
+    public static ExecutionLogEntryDto neutral(String step, String message) {
+        return new ExecutionLogEntryDto(step, "Warn", "neutral", message, null, null, LocalDateTime.now(),
+                null, null, null, null);
     }
 
     public static ExecutionLogEntryDto fail(String step, String message, String selector) {
-        return new ExecutionLogEntryDto(step, "Error", "fail", message, selector, LocalDateTime.now(), null, null);
+        return fail(step, message, selector, null);
+    }
+
+    public static ExecutionLogEntryDto fail(String step, String message, String selector, String elementKey) {
+        return new ExecutionLogEntryDto(step, "Error", "fail", message, selector, elementKey, LocalDateTime.now(),
+                null, null, null, null);
     }
 }

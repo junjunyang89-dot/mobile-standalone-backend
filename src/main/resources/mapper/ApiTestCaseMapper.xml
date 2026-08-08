@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiTestCaseMapper">
+
+    <resultMap id="ApiTestCaseMap" type="com.mobile.standalone.entity.ApiTestCase">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="environment" column="environment"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="requirementRef" column="requirement_ref"/>
+        <result property="method" column="method"/>
+        <result property="path" column="path"/>
+        <result property="urlId" column="url_id"/>
+        <result property="query" column="query"/>
+        <result property="headers" column="headers"/>
+        <result property="body" column="body"/>
+        <result property="assertions" column="assertions"/>
+        <result property="fieldNotes" column="field_notes"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="FilterWhere">
+        <where>
+            <if test="project != null and project != ''">AND project = #{project}</if>
+            <if test="environment != null and environment != ''">
+                AND (environment = #{environment} OR environment = 'ANY' OR environment IS NULL OR environment = '')
+            </if>
+            <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+            <if test="keyword != null and keyword != ''">
+                AND (name LIKE CONCAT('%', #{keyword}, '%')
+                  OR requirement_ref LIKE CONCAT('%', #{keyword}, '%')
+                  OR path LIKE CONCAT('%', #{keyword}, '%')
+                  OR description LIKE CONCAT('%', #{keyword}, '%')
+                  OR project LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+    </sql>
+
+    <select id="findByFilters" resultMap="ApiTestCaseMap">
+        SELECT * FROM api_test_cases
+        <include refid="FilterWhere"/>
+        ORDER BY project ASC, sort_order ASC, updated_at DESC
+        <if test="limit != null">
+            LIMIT #{limit}
+            <if test="offset != null">OFFSET #{offset}</if>
+        </if>
+    </select>
+
+    <select id="countByFilters" resultType="long">
+        SELECT COUNT(1) FROM api_test_cases
+        <include refid="FilterWhere"/>
+    </select>
+
+    <select id="findById" resultMap="ApiTestCaseMap">
+        SELECT * FROM api_test_cases WHERE id = #{id}
+    </select>
+
+    <select id="countAll" resultType="long">
+        SELECT COUNT(1) FROM api_test_cases
+    </select>
+
+    <select id="countByProject" resultType="long">
+        SELECT COUNT(1) FROM api_test_cases WHERE project = #{project}
+    </select>
+
+    <select id="findDistinctProjects" resultType="string">
+        SELECT DISTINCT project FROM api_test_cases
+        WHERE project IS NOT NULL AND project &lt;&gt; ''
+        ORDER BY project ASC
+    </select>
+
+    <insert id="insert">
+        INSERT INTO api_test_cases
+        (id, project, environment, name, description, requirement_ref, method, path, url_id, query, headers, body,
+         assertions, field_notes, enabled, sort_order, created_by, created_at, updated_at)
+        VALUES
+        (#{id}, #{project}, #{environment}, #{name}, #{description}, #{requirementRef}, #{method}, #{path}, #{urlId},
+         #{query}, #{headers}, #{body},
+         #{assertions}, #{fieldNotes}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE api_test_cases
+        SET project = #{project},
+            environment = #{environment},
+            name = #{name},
+            description = #{description},
+            requirement_ref = #{requirementRef},
+            method = #{method},
+            path = #{path},
+            url_id = #{urlId},
+            query = #{query},
+            headers = #{headers},
+            body = #{body},
+            assertions = #{assertions},
+            field_notes = #{fieldNotes},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM api_test_cases WHERE id = #{id}
+    </delete>
+</mapper>

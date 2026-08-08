@@ -11,73 +11,100 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
- * 从 /tmp/screenshots/ 扫描与 taskId 匹配的截图文件。
- * 文件名格式：{场景英文}_{taskId}_{日期}_step{N}.png 或旧格式 {场景}_{taskId}_step{N}_{日期}.png
- * 只要文件名包含 taskId 即视为该任务的截图，供前端展示。
+ * 扫描任务截图：
+ * 1) 流程执行：{@code ~/.mobile-standalone/screenshots/{taskId}/step-*.png}
+ * 2) 旧功能体验：{@code /tmp/screenshots/*_{taskId}_*_stepN.png}
  */
 public final class ScreenshotDiscoveryService {
 
-    private static final Path SCREENSHOTS_DIR = Paths.get("/tmp/screenshots").normalize().toAbsolutePath();
+    private static final Path TMP_SCREENSHOTS_DIR = Paths.get("/tmp/screenshots").normalize().toAbsolutePath();
+    private static final Path FLOW_SCREENSHOTS_DIR = Paths.get(System.getProperty("user.home"), ".mobile-standalone", "screenshots")
+            .normalize().toAbsolutePath();
     /** 新格式: xxx_taskId_20250221_143052_step0.png */
     private static final Pattern NEW_FORMAT = Pattern.compile("^.+_step(\\d+)\\.png$");
-    /** 旧格式: xxx_taskId_step0_20250221.png 或 xxx_taskId_step0_1234567890.png */
-    private static final Pattern OLD_FORMAT = Pattern.compile("^.+/step(\\d+)_.+\\.png$");
+    /** 旧格式: xxx_taskId_step0_20250221.png */
+    private static final Pattern OLD_FORMAT = Pattern.compile("^.+_step(\\d+)_.+\\.png$");
+    /** 流程: step-1785596987763.png（时间戳，按文件名排序） */
+    private static final Pattern FLOW_STEP = Pattern.compile("^step-(\\d+)\\.png$");
 
     private ScreenshotDiscoveryService() {}
 
-    /**
-     * 扫描任务对应的步骤截图。匹配规则：文件名包含 taskId（如 _taskId_ 或 _taskId.）即视为该任务截图。
-     * 支持 login、search、search_tabs、settings、settings_account 等所有场景。
-     */
     public static List<ExecutionLogEntryDto> discoverStepScreenshots(String taskId) {
         if (taskId == null || taskId.isBlank()) return List.of();
-        if (!Files.isDirectory(SCREENSHOTS_DIR)) return List.of();
-
         String id = taskId.trim();
         List<Entry> entries = new ArrayList<>();
-
-        try {
-            Files.list(SCREENSHOTS_DIR)
-                    .filter(Files::isRegularFile)
-                    .filter(p -> {
-                        String name = p.getFileName().toString();
-                        return name.endsWith(".png") && (name.contains("_" + id + "_") || name.contains("_" + id + "."));
-                    })
-                    .forEach(p -> {
-                        String pathStr = p.toAbsolutePath().normalize().toString();
-                        String fileName = p.getFileName().toString();
-                        int stepNum = parseStepNumber(pathStr, fileName);
-                        entries.add(new Entry(stepNum, pathStr, fileName));
-                    });
-        } catch (IOException e) {
-            return List.of();
-        }
-
+        entries.addAll(discoverFlowDir(id));
+        entries.addAll(discoverTmpDir(id));
         if (entries.isEmpty()) return List.of();
 
         entries.sort(Comparator
-                .comparingInt((Entry e) -> scenarioOrder(e.fileName))
-                .thenComparingInt(e -> e.stepNum)
+                .comparingInt((Entry e) -> e.scenarioOrder)
+                .thenComparingLong(e -> e.sortKey)
                 .thenComparing(e -> e.fileName));
         List<ExecutionLogEntryDto> result = new ArrayList<>(entries.size());
-        for (Entry e : entries) {
+        for (int i = 0; i < entries.size(); i++) {
+            Entry e = entries.get(i);
             ExecutionLogEntryDto dto = new ExecutionLogEntryDto();
-            dto.setStep("步骤 " + e.stepNum);
+            dto.setStep(e.label != null ? e.label : ("截图 " + (i + 1)));
             dto.setLevel("Info");
             dto.setStatus("success");
-            dto.setMessage("截图");
+            dto.setMessage(e.fileName);
             dto.setScreenshotPath(e.path);
             result.add(dto);
         }
         return result;
     }
 
+    /** 流程执行器写入：~/.mobile-standalone/screenshots/{taskId}/step-*.png */
+    private static List<Entry> discoverFlowDir(String taskId) {
+        Path dir = FLOW_SCREENSHOTS_DIR.resolve(taskId);
+        if (!Files.isDirectory(dir)) return List.of();
+        List<Entry> out = new ArrayList<>();
+        try (Stream<Path> stream = Files.list(dir)) {
+            stream.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().endsWith(".png"))
+                    .forEach(p -> {
+                        String name = p.getFileName().toString();
+                        Matcher m = FLOW_STEP.matcher(name);
+                        long sortKey = m.matches() ? Long.parseLong(m.group(1)) : p.toFile().lastModified();
+                        out.add(new Entry(sortKey, 0, p.toAbsolutePath().normalize().toString(), name, "流程截图"));
+                    });
+        } catch (IOException ignored) {
+            return List.of();
+        }
+        return out;
+    }
+
+    private static List<Entry> discoverTmpDir(String taskId) {
+        if (!Files.isDirectory(TMP_SCREENSHOTS_DIR)) return List.of();
+        List<Entry> out = new ArrayList<>();
+        try (Stream<Path> stream = Files.list(TMP_SCREENSHOTS_DIR)) {
+            stream.filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String name = p.getFileName().toString();
+                        return name.endsWith(".png") && (name.contains("_" + taskId + "_") || name.contains("_" + taskId + "."));
+                    })
+                    .forEach(p -> {
+                        String pathStr = p.toAbsolutePath().normalize().toString();
+                        String fileName = p.getFileName().toString();
+                        int stepNum = parseStepNumber(pathStr, fileName);
+                        out.add(new Entry(stepNum, scenarioOrder(fileName), pathStr, fileName, "步骤 " + stepNum));
+                    });
+        } catch (IOException e) {
+            return List.of();
+        }
+        return out;
+    }
+
     private static int parseStepNumber(String pathStr, String fileName) {
-        Matcher m = NEW_FORMAT.matcher(pathStr);
+        Matcher m = NEW_FORMAT.matcher(fileName);
         if (m.matches()) return Integer.parseInt(m.group(1));
-        m = OLD_FORMAT.matcher(pathStr);
+        m = OLD_FORMAT.matcher(fileName);
+        if (m.matches()) return Integer.parseInt(m.group(1));
+        m = NEW_FORMAT.matcher(pathStr);
         if (m.matches()) return Integer.parseInt(m.group(1));
         return 0;
     }
@@ -107,14 +134,18 @@ public final class ScreenshotDiscoveryService {
     }
 
     private static class Entry {
-        final int stepNum;
+        final long sortKey;
+        final int scenarioOrder;
         final String path;
         final String fileName;
+        final String label;
 
-        Entry(int stepNum, String path, String fileName) {
-            this.stepNum = stepNum;
+        Entry(long sortKey, int scenarioOrder, String path, String fileName, String label) {
+            this.sortKey = sortKey;
+            this.scenarioOrder = scenarioOrder;
             this.path = path;
             this.fileName = fileName;
+            this.label = label;
         }
     }
 }

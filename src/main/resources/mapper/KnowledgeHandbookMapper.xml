@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.KnowledgeHandbookMapper">
+
+    <resultMap id="HandbookMap" type="com.mobile.standalone.entity.KnowledgeHandbook">
+        <id property="id" column="id"/>
+        <result property="category" column="category"/>
+        <result property="project" column="project"/>
+        <result property="title" column="title"/>
+        <result property="symptom" column="symptom"/>
+        <result property="cause" column="cause"/>
+        <result property="fix" column="fix"/>
+        <result property="tags" column="tags"/>
+        <result property="imageUrl" column="image_url"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO knowledge_handbook
+        (category, project, title, symptom, cause, fix, tags, image_url, created_at, updated_at)
+        VALUES
+        (#{category}, #{project}, #{title}, #{symptom}, #{cause}, #{fix}, #{tags}, #{imageUrl}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE knowledge_handbook
+        SET category = #{category},
+            project = #{project},
+            title = #{title},
+            symptom = #{symptom},
+            cause = #{cause},
+            fix = #{fix},
+            tags = #{tags},
+            image_url = #{imageUrl},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM knowledge_handbook WHERE id = #{id}
+    </delete>
+
+    <select id="findById" resultMap="HandbookMap">
+        SELECT * FROM knowledge_handbook WHERE id = #{id}
+    </select>
+
+    <select id="search" resultMap="HandbookMap">
+        SELECT * FROM knowledge_handbook
+        <where>
+            <if test="category != null and category != ''">
+                AND category = #{category}
+            </if>
+            <if test="project != null and project != ''">
+                AND project = #{project}
+            </if>
+            <if test="q != null and q != ''">
+                AND (
+                    title LIKE CONCAT('%', #{q}, '%')
+                    OR symptom LIKE CONCAT('%', #{q}, '%')
+                    OR cause LIKE CONCAT('%', #{q}, '%')
+                    OR fix LIKE CONCAT('%', #{q}, '%')
+                    OR IFNULL(tags, '') LIKE CONCAT('%', #{q}, '%')
+                )
+            </if>
+        </where>
+        ORDER BY updated_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countAll" resultType="int">
+        SELECT COUNT(*) FROM knowledge_handbook
+    </select>
+</mapper>

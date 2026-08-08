@@ -1,7 +1,10 @@
 package com.mobile.standalone.service;
 
 import com.mobile.standalone.entity.Device;
+import com.mobile.standalone.service.harmony.HdcClient;
+import com.mobile.standalone.service.harmony.HmdriverBridge;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
@@ -12,6 +15,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -20,15 +24,30 @@ import java.util.regex.Pattern;
 
 /**
  * 设备管理工具类
- * 支持 Android (ADB) 和 iOS (libimobiledevice) 设备管理
+ * 支持 Android (ADB)、iOS (libimobiledevice)、纯鸿蒙 NEXT (hdc)
  */
 @Component
 @Slf4j
 public class DeviceManager {
 
+    /**
+     * 安装超时。包大（60MB）+ 首次安装要优化 dex，几分钟是正常的；
+     * 但必须有上限，否则设备上弹确认框没人点时会永远挂住。
+     */
+    @org.springframework.beans.factory.annotation.Value("${app.install.adb-install-timeout-seconds:300}")
+    private int installTimeoutSeconds = 300;
+
+    @Autowired
+    private HdcClient hdcClient;
+
+    @Autowired
+    private HmdriverBridge hmdriverBridge;
+
     /** 每台设备常挂的 WDA xcodebuild / iproxy（不重装，仅 test-without-building） */
     private final ConcurrentHashMap<String, Process> iosWdaXcodeProcs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Process> iosWdaIproxyProcs = new ConcurrentHashMap<>();
+    /** 最近一次 WDA 拉起失败原因（供真机点选等接口回显） */
+    private final ConcurrentHashMap<String, String> iosWdaLastError = new ConcurrentHashMap<>();
     
     /**
      * 扫描 Android 设备（使用 ADB）
@@ -149,78 +168,322 @@ public class DeviceManager {
     }
     
     /**
-     * 扫描 HarmonyOS 设备（使用 ADB，通过设备特征识别）
+     * 扫描纯鸿蒙 NEXT 设备（仅 hdc，不走 adb）。
+     * 华为/荣耀仍跑 Android 兼容层的机子继续出现在 Android 列表。
+     * 未授权调试的设备也会入库（平台 HARMONYOS，状态未连接），方便在设备管理里看见。
      */
     public List<Device> scanHarmonyOSDevices() {
         List<Device> devices = new ArrayList<>();
-        
+        if (hdcClient == null) {
+            return devices;
+        }
+        if (!hdcClient.available()) {
+            hdcClient.refresh();
+        }
+        if (!hdcClient.available()) {
+            log.debug("hdc 不可用，跳过鸿蒙设备扫描");
+            return devices;
+        }
         try {
-            // HarmonyOS 设备也通过 ADB 连接，但需要特殊识别
-            Process process = new ProcessBuilder("adb", "devices", "-l")
-                    .redirectErrorStream(true)
-                    .start();
-            
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                
-                String line;
-                boolean firstLine = true;
-                
-                while ((line = reader.readLine()) != null) {
-                    if (firstLine) {
-                        firstLine = false;
-                        continue;
+            for (HdcClient.HdcTarget target : hdcClient.listTargetEntries()) {
+                if (target == null || target.serial() == null || target.serial().isBlank()) {
+                    continue;
+                }
+                String deviceId = target.serial().trim();
+                Device device = new Device();
+                device.setId(deviceId);
+                device.setPlatform(Device.Platform.HARMONYOS);
+
+                if (target.authorized()) {
+                    String name = hdcParam(deviceId, "const.product.name");
+                    if (name == null || name.isBlank()) {
+                        name = hdcParam(deviceId, "const.product.model");
                     }
-                    
-                    if (line.trim().isEmpty()) {
-                        continue;
+                    String version = hdcParam(deviceId, "const.product.software.version");
+                    if (version == null || version.isBlank()) {
+                        version = hdcParam(deviceId, "const.ohos.apiversion");
                     }
-                    
-                    // 检查是否是 HarmonyOS 设备（通过设备信息判断）
-                    if (line.contains("device") && !line.contains("offline") && !line.contains("unauthorized")) {
-                        String[] parts = line.split("\\s+");
-                        if (parts.length > 0) {
-                            String deviceId = parts[0].trim();
-                            if (!isValidAdbDeviceId(deviceId)) {
-                                log.debug("跳过无效设备行: {}", line);
-                                continue;
-                            }
-                            // 检查设备品牌，判断是否为 HarmonyOS
-                            String deviceInfo = getDeviceProperty(deviceId, "ro.product.brand");
-                            
-                            // 简单判断：华为设备可能是 HarmonyOS
-                            // 实际应该通过更精确的方式判断
-                            boolean isHarmonyOS = deviceInfo != null && 
-                                (deviceInfo.toLowerCase().contains("huawei") || 
-                                 deviceInfo.toLowerCase().contains("honor") ||
-                                 checkHarmonyOSVersion(deviceId));
-                            
-                            if (isHarmonyOS) {
-                                String deviceName = extractDeviceName(line);
-                                String version = getHarmonyOSVersion(deviceId);
-                                
-                                Device device = new Device();
-                                device.setId(deviceId);
-                                device.setName(deviceName != null ? deviceName : "HarmonyOS Device");
-                                device.setPlatform(Device.Platform.HARMONYOS);
-                                device.setVersion(version);
-                                device.setStatus(Device.DeviceStatus.CONNECTED);
-                                
-                                devices.add(device);
-                                log.info("发现 HarmonyOS 设备: {} ({})", deviceName, deviceId);
-                            }
-                        }
+                    device.setName(name != null && !name.isBlank() ? name : "HarmonyOS Device");
+                    device.setVersion(version);
+                    device.setStatus(Device.DeviceStatus.CONNECTED);
+                    log.info("发现鸿蒙设备(hdc): {} ({})", device.getName(), deviceId);
+                } else {
+                    String reason = target.unauthorized() ? "请点允许USB调试" : "离线";
+                    device.setName("鸿蒙设备(" + reason + ")");
+                    device.setVersion(null);
+                    device.setStatus(Device.DeviceStatus.DISCONNECTED);
+                    log.info("发现鸿蒙设备(hdc未就绪): {} ({})", device.getName(), deviceId);
+                }
+                devices.add(device);
+            }
+        } catch (Exception e) {
+            log.error("扫描鸿蒙设备失败", e);
+        }
+        return devices;
+    }
+
+    private String hdcParam(String deviceId, String key) {
+        try {
+            String out = hdcClient.shell(deviceId, "param get " + key);
+            if (out == null) {
+                return null;
+            }
+            String v = out.trim();
+            // 常见失败回显
+            if (v.isEmpty() || v.toLowerCase(Locale.ROOT).contains("fail")
+                    || v.toLowerCase(Locale.ROOT).contains("error")
+                    || v.contains("not exist")) {
+                return null;
+            }
+            return v;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 读取鸿蒙 param，供设备详情等复用 */
+    public String getHarmonyParam(String deviceId, String key) {
+        return hdcParam(deviceId, key);
+    }
+
+    public String runHdcShell(String deviceId, String command) {
+        if (hdcClient == null || !hdcClient.available()) {
+            return "";
+        }
+        return hdcClient.shell(deviceId, command);
+    }
+
+    /** 鸿蒙已安装三方包名（优先 hmdriver2，其次 hdc bm dump） */
+    public List<String> getHarmonyInstalledPackages(String deviceId) {
+        List<String> packages = new ArrayList<>();
+        if (hmdriverBridge != null && hmdriverBridge.available()) {
+            packages.addAll(hmdriverBridge.listApps(deviceId));
+            if (!packages.isEmpty()) {
+                return packages;
+            }
+        }
+        return listHarmonyPackagesViaHdc(deviceId);
+    }
+
+    /**
+     * 仅经 hdc 快速列包名（不做 version 富化）。
+     */
+    public List<String> listHarmonyPackagesViaHdc(String deviceId) {
+        List<String> packages = new ArrayList<>();
+        if (hdcClient == null || !hdcClient.available()) {
+            return packages;
+        }
+        String labeled = hdcClient.shell(deviceId, "bm dump -a -l");
+        if (labeled != null && labeled.contains("bundleName")) {
+            Matcher m = Pattern.compile("\"bundleName\"\\s*:\\s*\"([^\"]+)\"").matcher(labeled);
+            while (m.find()) {
+                String name = m.group(1);
+                if (name != null && !name.isBlank() && !packages.contains(name)) {
+                    packages.add(name);
+                }
+            }
+            if (!packages.isEmpty()) {
+                return packages;
+            }
+        }
+        String dump = hdcClient.shell(deviceId, "bm dump -a");
+        if (dump == null || dump.isBlank()) {
+            return packages;
+        }
+        Pattern pkgLine = Pattern.compile("^[\\t ]+([A-Za-z0-9][A-Za-z0-9_.]*\\.[A-Za-z0-9_.]+)\\s*$");
+        for (String line : dump.split("\\R")) {
+            Matcher ml = pkgLine.matcher(line);
+            if (ml.find()) {
+                String name = ml.group(1);
+                if (!packages.contains(name)) {
+                    packages.add(name);
+                }
+            }
+        }
+        return packages;
+    }
+
+    /**
+     * 鸿蒙已装应用：优先 {@code bm dump -a -l} 拿包名+显示名，再并行 {@code bm dump -n} 补 versionName。
+     */
+    public List<AppInfo> listHarmonyAppsViaHdc(String deviceId) {
+        List<AppInfo> apps = new ArrayList<>();
+        if (hdcClient == null || !hdcClient.available()) {
+            return apps;
+        }
+        // 1) 包名 + 应用名（快）
+        String labeled = hdcClient.shell(deviceId, "bm dump -a -l");
+        if (labeled != null && labeled.contains("bundleName")) {
+            Pattern pair = Pattern.compile(
+                    "\"bundleName\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"label\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"",
+                    Pattern.DOTALL);
+            Matcher m = pair.matcher(labeled);
+            while (m.find()) {
+                String pkg = m.group(1);
+                String label = m.group(2) == null ? "" : m.group(2).replace("\\\"", "\"");
+                if (pkg == null || pkg.isBlank()) continue;
+                AppInfo info = new AppInfo();
+                info.setPackageName(pkg);
+                info.setName(label.isBlank() ? pkg : label);
+                info.setVersion("");
+                apps.add(info);
+            }
+        }
+        if (apps.isEmpty()) {
+            String dump = hdcClient.shell(deviceId, "bm dump -a");
+            if (dump != null && !dump.isBlank()) {
+                Pattern pkgLine = Pattern.compile("^[\\t ]+([A-Za-z0-9][A-Za-z0-9_.]*\\.[A-Za-z0-9_.]+)\\s*$");
+                for (String line : dump.split("\\R")) {
+                    Matcher ml = pkgLine.matcher(line);
+                    if (ml.find()) {
+                        String name = ml.group(1);
+                        AppInfo info = new AppInfo();
+                        info.setPackageName(name);
+                        info.setName(name);
+                        info.setVersion("");
+                        apps.add(info);
                     }
                 }
             }
-            
-            process.waitFor();
-            
-        } catch (IOException | InterruptedException e) {
-            log.error("扫描 HarmonyOS 设备失败", e);
         }
-        
-        return devices;
+        if (apps.isEmpty()) {
+            return apps;
+        }
+        if (apps.size() > 200) {
+            apps = new ArrayList<>(apps.subList(0, 200));
+        }
+        // 2) 并行补版本（单包 bm dump -n）；限制并发避免打爆 hdc
+        enrichHarmonyAppVersions(deviceId, apps);
+        return apps;
+    }
+
+    private void enrichHarmonyAppVersions(String deviceId, List<AppInfo> apps) {
+        if (apps == null || apps.isEmpty()) return;
+        int threads = Math.min(12, Math.max(4, Runtime.getRuntime().availableProcessors()));
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        try {
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+            for (AppInfo app : apps) {
+                futures.add(pool.submit(() -> {
+                    String ver = readHarmonyAppVersion(deviceId, app.getPackageName());
+                    if (ver != null && !ver.isBlank()) {
+                        app.setVersion(ver);
+                    }
+                }));
+            }
+            for (java.util.concurrent.Future<?> f : futures) {
+                try {
+                    f.get(90, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    // 单包失败忽略
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /** 从 bm dump -n 解析第一个非空 versionName */
+    private String readHarmonyAppVersion(String deviceId, String packageName) {
+        if (packageName == null || packageName.isBlank()) return null;
+        String dump = runHdcShell(deviceId, "bm dump -n " + packageName);
+        if (dump == null || dump.isBlank()) return null;
+        Matcher m = Pattern.compile("\"versionName\"\\s*:\\s*\"([^\"]*)\"").matcher(dump);
+        while (m.find()) {
+            String v = m.group(1);
+            if (v != null && !v.isBlank()) {
+                return v.trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 鸿蒙电量百分比（0-100）。来源：{@code hidumper -s 3302 -a -i} 的 capacity。
+     */
+    public Integer getHarmonyBatteryLevel(String deviceId) {
+        Map<String, String> info = getHarmonyBatteryInfo(deviceId);
+        if (info == null || !info.containsKey("level")) {
+            return null;
+        }
+        try {
+            int level = Integer.parseInt(info.get("level").trim());
+            return Math.min(100, Math.max(0, level));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 鸿蒙电池字段（hidumper BatteryService） */
+    public Map<String, String> getHarmonyBatteryInfo(String deviceId) {
+        Map<String, String> batteryInfo = new LinkedHashMap<>();
+        String dump = runHdcShell(deviceId, "hidumper -s 3302 -a -i");
+        if (dump == null || dump.isBlank()) {
+            return batteryInfo;
+        }
+        for (String line : dump.split("\\R")) {
+            String t = line.trim();
+            if (t.startsWith("capacity:")) {
+                batteryInfo.put("level", t.substring("capacity:".length()).trim());
+            } else if (t.startsWith("batteryLevel:")) {
+                batteryInfo.put("batteryLevel", t.substring("batteryLevel:".length()).trim());
+            } else if (t.startsWith("chargingStatus:")) {
+                batteryInfo.put("chargingStatus", t.substring("chargingStatus:".length()).trim());
+            } else if (t.startsWith("pluggedType:")) {
+                batteryInfo.put("pluggedType", t.substring("pluggedType:".length()).trim());
+            } else if (t.startsWith("voltage:")) {
+                batteryInfo.put("voltage", t.substring("voltage:".length()).trim());
+            } else if (t.startsWith("temperature:")) {
+                String raw = t.substring("temperature:".length()).trim();
+                batteryInfo.put("temperatureRaw", raw);
+                try {
+                    double c = Integer.parseInt(raw) / 10.0;
+                    batteryInfo.put("temperature", c + "℃");
+                } catch (NumberFormatException ignored) {
+                    batteryInfo.put("temperature", raw);
+                }
+            } else if (t.startsWith("technology:")) {
+                batteryInfo.put("technology", t.substring("technology:".length()).trim());
+            } else if (t.startsWith("healthState:")) {
+                batteryInfo.put("health", t.substring("healthState:".length()).trim());
+            }
+        }
+        return batteryInfo;
+    }
+
+    public boolean installHarmonyApp(String deviceId, String hapPath) {
+        return installHarmonyAppDetailed(deviceId, hapPath) == null;
+    }
+
+    /** @return null 表示成功，否则为错误信息 */
+    public String installHarmonyAppDetailed(String deviceId, String hapPath) {
+        if (hapPath == null || hapPath.isBlank()) {
+            return "hap 路径为空";
+        }
+        if (!Files.isRegularFile(Path.of(hapPath))) {
+            return "hap 文件不存在: " + hapPath;
+        }
+        if (hmdriverBridge != null && hmdriverBridge.available()) {
+            if (hmdriverBridge.install(deviceId, hapPath)) {
+                return null;
+            }
+            log.warn("hmdriver install 失败，回退 hdc install");
+        }
+        if (hdcClient == null || !hdcClient.available()) {
+            return "hdc 不可用，无法安装 hap";
+        }
+        HdcClient.ExecResult r = hdcClient.install(deviceId, hapPath);
+        if (r.ok()) {
+            return null;
+        }
+        return "hdc install 失败: " + r.combined();
+    }
+
+    public boolean uninstallHarmonyApp(String deviceId, String bundleName) {
+        if (hdcClient == null || !hdcClient.available()) {
+            return false;
+        }
+        return hdcClient.uninstall(deviceId, bundleName).ok();
     }
     
     /**
@@ -382,115 +645,111 @@ public class DeviceManager {
     }
     
     /**
-     * 批量获取 Android 应用信息（优化版本）
-     * 使用单个命令获取所有应用信息，然后解析
+     * 批量获取 Android 应用信息（优化版本）。
+     * 用 {@code dumpsys package packages} 一次拉全量；勿用无参 {@code pm dump}（会报 no package specified）。
      */
     public List<AppInfo> getAndroidAppsInfoBatch(String deviceId, List<String> packageNames) {
         List<AppInfo> appInfos = new ArrayList<>();
-        
+
         if (packageNames == null || packageNames.isEmpty()) {
             return appInfos;
         }
-        
+
         log.info("批量获取 {} 个应用的信息", packageNames.size());
-        
+
         try {
-            // 方法1: 使用 pm dump 批量获取（更快）
-            // 注意：pm dump 可能输出很大，但比逐个调用快得多
-            Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "pm", "dump")
+            Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "dumpsys", "package", "packages")
                     .redirectErrorStream(true)
                     .start();
-            
-            // 解析输出，提取所有应用信息
+
             java.util.Map<String, AppInfo> appInfoMap = new java.util.HashMap<>();
             String currentPackage = null;
             AppInfo currentAppInfo = null;
-            
+            // dumpsys 行通常带缩进："  Package [com.xxx] (hash):"
+            Pattern packageHeader = Pattern.compile("^\\s*Package\\s*\\[([^\\]]+)\\]");
+
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream()))) {
-                
+
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    // 查找包名行: Package [com.example.app]
-                    if (line.startsWith("Package [")) {
-                        // 保存上一个应用
+                    Matcher pkgMatcher = packageHeader.matcher(line);
+                    if (pkgMatcher.find()) {
                         if (currentPackage != null && currentAppInfo != null) {
                             appInfoMap.put(currentPackage, currentAppInfo);
                         }
-                        
-                        // 提取新包名
-                        String packageLine = line.substring(9); // 移除 "Package ["
-                        int endIndex = packageLine.indexOf(']');
-                        if (endIndex > 0) {
-                            currentPackage = packageLine.substring(0, endIndex);
-                            currentAppInfo = new AppInfo();
-                            currentAppInfo.setPackageName(currentPackage);
+                        currentPackage = pkgMatcher.group(1).trim();
+                        currentAppInfo = new AppInfo();
+                        currentAppInfo.setPackageName(currentPackage);
+                        continue;
+                    }
+                    if (currentAppInfo == null) {
+                        continue;
+                    }
+                    String trimmed = line.trim();
+                    if (trimmed.startsWith("applicationLabel=") && currentAppInfo.getName() == null) {
+                        String label = trimmed.substring("applicationLabel=".length()).trim();
+                        if (label.startsWith("'") && label.endsWith("'") && label.length() >= 2) {
+                            label = label.substring(1, label.length() - 1);
                         }
-                    } else if (currentAppInfo != null) {
-                        // 查找应用名称
-                        if (line.contains("applicationLabel=") && currentAppInfo.getName() == null) {
-                            String[] parts = line.split("=");
-                            if (parts.length > 1) {
-                                String label = parts[1].trim();
-                                if (label.startsWith("'") && label.endsWith("'")) {
-                                    label = label.substring(1, label.length() - 1);
-                                }
-                                if (!label.isEmpty()) {
-                                    currentAppInfo.setName(label);
-                                }
-                            }
+                        if (!label.isEmpty()) {
+                            currentAppInfo.setName(label);
                         }
-                        
-                        // 查找版本号
-                        if (line.contains("versionName=") && currentAppInfo.getVersion() == null) {
-                            String[] parts = line.split("=");
-                            if (parts.length > 1) {
-                                String version = parts[1].trim();
-                                version = version.split("\\s")[0];
-                                if (!version.isEmpty()) {
-                                    currentAppInfo.setVersion(version);
-                                }
-                            }
+                    } else if (trimmed.startsWith("versionName=") && currentAppInfo.getVersion() == null) {
+                        String version = trimmed.substring("versionName=".length()).trim();
+                        version = version.split("\\s")[0];
+                        if (!version.isEmpty()) {
+                            currentAppInfo.setVersion(version);
                         }
                     }
                 }
-                
-                // 保存最后一个应用
+
                 if (currentPackage != null && currentAppInfo != null) {
                     appInfoMap.put(currentPackage, currentAppInfo);
                 }
             }
-            
-            process.waitFor();
-            
-            // 为所有包名创建 AppInfo（包括未在dump中找到的）
+
+            boolean finished = process.waitFor(90, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("dumpsys package packages 超时，回退逐个获取");
+                return getAndroidAppsInfoSequential(deviceId, packageNames);
+            }
+
+            int withVersion = 0;
             for (String packageName : packageNames) {
                 AppInfo appInfo = appInfoMap.get(packageName);
                 if (appInfo == null) {
                     appInfo = new AppInfo();
                     appInfo.setPackageName(packageName);
                     appInfo.setName(packageName);
-                    appInfo.setVersion("1.0.0");
+                    appInfo.setVersion("");
                 } else {
-                    // 设置默认值
                     if (appInfo.getName() == null || appInfo.getName().isEmpty()) {
                         appInfo.setName(packageName);
                     }
-                    if (appInfo.getVersion() == null || appInfo.getVersion().isEmpty()) {
-                        appInfo.setVersion("1.0.0");
+                    if (appInfo.getVersion() == null) {
+                        appInfo.setVersion("");
+                    } else {
+                        withVersion++;
                     }
                 }
                 appInfos.add(appInfo);
             }
-            
-            log.info("批量获取完成，成功获取 {} 个应用信息", appInfos.size());
-            
+
+            log.info("批量获取完成：请求 {} 个，dumpsys 命中 {} 个，解析到 versionName {} 个",
+                    packageNames.size(), appInfoMap.size(), withVersion);
+            // 几乎全没解析到版本时，命令/机型格式可能不对，回退逐个 dumpsys package <pkg>
+            if (withVersion == 0 && !packageNames.isEmpty()) {
+                log.warn("批量未解析到任何 versionName，回退逐个获取（较慢）");
+                return getAndroidAppsInfoSequential(deviceId, packageNames);
+            }
+
         } catch (IOException | InterruptedException e) {
             log.warn("批量获取应用信息失败，回退到逐个获取: {}", e.getMessage());
-            // 回退到逐个获取
             return getAndroidAppsInfoSequential(deviceId, packageNames);
         }
-        
+
         return appInfos;
     }
     
@@ -563,12 +822,12 @@ public class DeviceManager {
             log.warn("获取应用信息失败: {}", e.getMessage());
         }
         
-        // 设置默认值
+        // 设置默认值（未知版本不填假的 1.0.0，避免误导）
         if (appInfo.getName() == null || appInfo.getName().isEmpty()) {
             appInfo.setName(packageName);
         }
-        if (appInfo.getVersion() == null || appInfo.getVersion().isEmpty()) {
-            appInfo.setVersion("1.0.0");
+        if (appInfo.getVersion() == null) {
+            appInfo.setVersion("");
         }
         
         return appInfo;
@@ -608,301 +867,58 @@ public class DeviceManager {
     }
     
     /**
-     * 获取 iOS 设备已安装的应用列表
-     * 支持两种输出格式：
-     * 1. CSV格式: CFBundleIdentifier, CFBundleVersion, CFBundleDisplayName
-     * 2. 旧格式: AppName - com.example.app
+     * 获取 iOS 设备已安装的应用 Bundle ID 列表。
+     * 实际解析见 {@link #getIOSInstalledAppsWithInfo(String)}（兼容 ideviceinstaller 1.2 {@code list}）。
      */
     public List<String> getIOSInstalledApps(String deviceId) {
-        List<String> apps = new ArrayList<>();
-        
-        log.info("开始获取 iOS 设备 {} 的应用列表", deviceId);
-        
-        try {
-            Process process = new ProcessBuilder("ideviceinstaller", "-u", deviceId, "-l")
-                    .redirectErrorStream(true)
-                    .start();
-            
-            StringBuilder output = new StringBuilder();
-            StringBuilder errorOutput = new StringBuilder();
-            boolean isCSVFormat = false;
-            boolean isFirstLine = true;
-            
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
-                    
-                    // 检查是否是CSV格式（第一行包含CFBundleIdentifier）
-                    if (isFirstLine) {
-                        isFirstLine = false;
-                        if (line.contains("CFBundleIdentifier") || line.contains("CFBundleVersion") || line.contains("CFBundleDisplayName")) {
-                            isCSVFormat = true;
-                            log.debug("检测到CSV格式输出");
-                            continue; // 跳过标题行
-                        }
-                    }
-                    
-                    // 跳过空行
-                    if (line.trim().isEmpty()) {
-                        continue;
-                    }
-                    
-                    // 跳过标题行（旧格式）
-                    if (line.contains("Total:") || line.trim().isEmpty()) {
-                        log.debug("跳过标题行: {}", line);
-                        continue;
-                    }
-                    
-                    // 检查错误信息
-                    if (line.contains("ERROR") || line.contains("error") || line.contains("failed")) {
-                        errorOutput.append(line).append("\n");
-                        log.warn("检测到错误信息: {}", line);
-                        continue;
-                    }
-                    
-                    if (isCSVFormat) {
-                        // CSV格式: com.tencent.xin, "8.0.67.35", "微信"
-                        // 或者: com.tencent.xin, 8.0.67.35, 微信
-                        String[] parts = line.split(",");
-                        if (parts.length >= 1) {
-                            String bundleId = parts[0].trim();
-                            // 移除可能的引号
-                            if (bundleId.startsWith("\"") && bundleId.endsWith("\"")) {
-                                bundleId = bundleId.substring(1, bundleId.length() - 1);
-                            }
-                            if (!bundleId.isEmpty()) {
-                                apps.add(bundleId);
-                                log.debug("找到应用 (CSV格式): {}", bundleId);
-                            }
-                        }
-                    } else {
-                        // 旧格式: AppName - com.example.app
-                        // 也可能格式为: AppName (Version) - com.example.app
-                        if (line.contains(" - ")) {
-                            String[] parts = line.split(" - ");
-                            if (parts.length >= 2) {
-                                String bundleId = parts[parts.length - 1].trim();
-                                if (!bundleId.isEmpty() && !bundleId.equals("Total:")) {
-                                    apps.add(bundleId);
-                                    log.debug("找到应用 (旧格式): {}", bundleId);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            int exitCode = process.waitFor();
-            
-            if (exitCode != 0) {
-                log.error("ideviceinstaller 命令执行失败，退出码: {}, 设备ID: {}", exitCode, deviceId);
-                log.error("命令输出: {}", output.toString());
-                if (errorOutput.length() > 0) {
-                    log.error("错误输出: {}", errorOutput.toString());
-                }
-            } else {
-                log.info("成功获取 {} 个 iOS 应用", apps.size());
-                if (apps.isEmpty() && output.length() > 0) {
-                    log.warn("未找到应用，但命令执行成功。输出内容: {}", output.toString());
-                }
-            }
-            
-        } catch (IOException e) {
-            log.error("执行 ideviceinstaller 命令失败，设备ID: {}, 错误: {}", deviceId, e.getMessage(), e);
-        } catch (InterruptedException e) {
-            log.error("等待 ideviceinstaller 命令完成时被中断，设备ID: {}", deviceId, e);
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            log.error("获取 iOS 应用列表时发生未知错误，设备ID: {}", deviceId, e);
-        }
-        
-        return apps;
+        return getIOSInstalledAppsWithInfo(deviceId).stream()
+                .map(AppInfo::getPackageName)
+                .filter(p -> p != null && !p.isBlank())
+                .collect(java.util.stream.Collectors.toList());
     }
-    
+
     /**
-     * 获取 iOS 应用信息（名称和版本）
-     * 支持CSV格式和旧格式的输出
+     * 获取单个 iOS 应用信息（从完整列表中匹配）。
      */
     public AppInfo getIOSAppInfo(String deviceId, String bundleId) {
         AppInfo appInfo = new AppInfo();
         appInfo.setPackageName(bundleId);
-        
-        log.debug("获取 iOS 应用信息: deviceId={}, bundleId={}", deviceId, bundleId);
-        
-        try {
-            Process process = new ProcessBuilder("ideviceinstaller", "-u", deviceId, "-l")
-                    .redirectErrorStream(true)
-                    .start();
-            
-            boolean isCSVFormat = false;
-            boolean isFirstLine = true;
-            
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    // 检查是否是CSV格式
-                    if (isFirstLine) {
-                        isFirstLine = false;
-                        if (line.contains("CFBundleIdentifier") || line.contains("CFBundleVersion") || line.contains("CFBundleDisplayName")) {
-                            isCSVFormat = true;
-                            continue; // 跳过标题行
-                        }
-                    }
-                    
-                    if (isCSVFormat) {
-                        // CSV格式: com.tencent.xin, "8.0.67.35", "微信"
-                        // 解析CSV格式
-                        if (line.contains(bundleId)) {
-                            String[] parts = line.split(",");
-                            if (parts.length >= 3) {
-                                String id = parts[0].trim();
-                                // 移除引号
-                                if (id.startsWith("\"") && id.endsWith("\"")) {
-                                    id = id.substring(1, id.length() - 1);
-                                }
-                                
-                                if (id.equals(bundleId)) {
-                                    // 提取版本号（第2列）
-                                    String version = parts[1].trim();
-                                    if (version.startsWith("\"") && version.endsWith("\"")) {
-                                        version = version.substring(1, version.length() - 1);
-                                    }
-                                    appInfo.setVersion(version);
-                                    
-                                    // 提取应用名称（第3列）
-                                    String name = parts[2].trim();
-                                    if (name.startsWith("\"") && name.endsWith("\"")) {
-                                        name = name.substring(1, name.length() - 1);
-                                    }
-                                    appInfo.setName(name);
-                                    
-                                    log.debug("从CSV格式提取: name={}, version={}, bundleId={}", name, version, bundleId);
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        // 旧格式: AppName - com.example.app
-                        // 也可能格式为: AppName (Version) - com.example.app
-                        if (line.contains(" - ") && line.contains(bundleId)) {
-                            String[] parts = line.split(" - ");
-                            if (parts.length >= 2 && parts[parts.length - 1].trim().equals(bundleId)) {
-                                String appNamePart = parts[0].trim();
-                                // 如果包含版本号，格式为: AppName (Version)
-                                if (appNamePart.contains("(") && appNamePart.contains(")")) {
-                                    int startIndex = appNamePart.indexOf("(");
-                                    int endIndex = appNamePart.indexOf(")");
-                                    if (startIndex > 0 && endIndex > startIndex) {
-                                        String appName = appNamePart.substring(0, startIndex).trim();
-                                        String version = appNamePart.substring(startIndex + 1, endIndex).trim();
-                                        appInfo.setName(appName);
-                                        appInfo.setVersion(version);
-                                        log.debug("从旧格式提取: name={}, version={}", appName, version);
-                                        break;
-                                    }
-                                } else {
-                                    appInfo.setName(appNamePart);
-                                    log.debug("从旧格式提取: name={}", appNamePart);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            int exitCode = process.waitFor();
-            if (exitCode != 0) {
-                log.warn("获取 iOS 应用信息时命令执行失败，退出码: {}", exitCode);
-            }
-            
-            // 如果未获取到版本号，尝试其他方法
-            if (appInfo.getVersion() == null || appInfo.getVersion().isEmpty()) {
-                String version = getIOSAppVersion(deviceId, bundleId);
-                if (version != null && !version.isEmpty()) {
-                    appInfo.setVersion(version);
-                }
-            }
-            
-        } catch (IOException | InterruptedException e) {
-            log.warn("获取 iOS 应用信息失败: {}", e.getMessage(), e);
+        if (bundleId == null || bundleId.isBlank()) {
+            return appInfo;
         }
-        
-        // 设置默认值
-        if (appInfo.getName() == null || appInfo.getName().isEmpty()) {
-            appInfo.setName(bundleId);
-            log.debug("使用 bundleId 作为应用名称: {}", bundleId);
+        for (AppInfo a : getIOSInstalledAppsWithInfo(deviceId)) {
+            if (bundleId.equals(a.getPackageName())) {
+                return a;
+            }
         }
-        if (appInfo.getVersion() == null || appInfo.getVersion().isEmpty()) {
-            log.warn("无法获取 iOS 应用 {} 的版本号，使用默认值", bundleId);
-            appInfo.setVersion("1.0.0");
-        }
-        
-        log.debug("最终应用信息: name={}, version={}, bundleId={}", 
-                appInfo.getName(), appInfo.getVersion(), appInfo.getPackageName());
-        
+        appInfo.setName(bundleId);
+        appInfo.setVersion("");
         return appInfo;
     }
-    
-    /**
-     * 获取 iOS 应用版本号
-     * 尝试多种方法获取版本信息
-     * 注意：iOS 应用版本获取受限于系统权限，可能需要越狱设备或特殊配置
-     */
+
     private String getIOSAppVersion(String deviceId, String bundleId) {
-        // 方法1: 尝试使用 ideviceinstaller 的详细信息
-        // 注意：标准 ideviceinstaller 可能不支持直接获取版本，需要其他工具
-        try {
-            // 尝试使用 ideviceinstaller 获取应用列表的详细信息
-            // 某些版本的 ideviceinstaller 可能支持 -o xml 或 -o list 格式
-            ProcessBuilder pb = new ProcessBuilder("ideviceinstaller", "-u", deviceId, "-l");
-            Process process = pb.redirectErrorStream(true).start();
-            
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    // 标准输出格式: AppName - com.example.app
-                    // 某些版本可能包含版本信息，格式可能为: AppName (1.0.0) - com.example.app
-                    if (line.contains(bundleId)) {
-                        // 尝试从括号中提取版本号
-                        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\(([\\d\\.]+)\\)");
-                        java.util.regex.Matcher matcher = pattern.matcher(line);
-                        if (matcher.find()) {
-                            return matcher.group(1);
-                        }
-                    }
-                }
-            }
-            
-            process.waitFor();
-        } catch (Exception e) {
-            log.debug("方法1获取iOS版本失败: {}", e.getMessage());
-        }
-        
-        // 方法2: 尝试使用 plistutil 或 plutil 解析应用包信息
-        // 这需要访问应用包的 Info.plist 文件，通常需要越狱或特殊权限
-        // 暂时不实现，因为需要文件系统访问权限
-        
-        // 方法3: 如果以上方法都失败，返回 null，让调用者使用默认值
-        // 在实际使用中，可以考虑：
-        // 1. 使用第三方工具如 libimobiledevice 的其他命令
-        // 2. 从已安装的 IPA 文件中提取版本信息（如果有本地缓存）
-        // 3. 使用 iTunes/App Store API 查询版本（需要网络）
-        
-        log.debug("无法从设备获取 iOS 应用 {} 的版本号", bundleId);
-        return null;
+        AppInfo info = getIOSAppInfo(deviceId, bundleId);
+        String v = info != null ? info.getVersion() : null;
+        return (v == null || v.isBlank()) ? null : v;
     }
-    
+
     /**
      * 安装 APK 到 Android 设备
      */
     public boolean installAndroidApp(String deviceId, String apkPath) {
+        return installAndroidAppDetailed(deviceId, apkPath) == null;
+    }
+
+    /**
+     * 安装 APK，失败时返回 adb 的原始输出。
+     * <p>
+     * 只回一个 boolean 的话，{@code INSTALL_FAILED_UPDATE_INCOMPATIBLE}（签名不一致）、
+     * {@code INSTALL_PARSE_FAILED_NOT_APK}（下载到的不是安装包）、存储不足这些原因全被吞掉，
+     * 上层只能报一句「安装失败」——人和归因都只能并列猜五种可能。实测踩过一次。
+     *
+     * @return 成功返回 null；失败返回 adb 输出（已裁剪）
+     */
+    public String installAndroidAppDetailed(String deviceId, String apkPath) {
         try {
             Process process = new ProcessBuilder("adb", "-s", deviceId, "install", "-r", apkPath)
                     .redirectErrorStream(true)
@@ -918,26 +934,156 @@ public class DeviceManager {
                     log.debug("ADB install: {}", line);
                 }
                 
-                int exitCode = process.waitFor();
+                // 必须有超时：设备上弹出安装确认框而没人点时，adb install 会一直等下去，
+                // 执行线程和设备锁跟着挂住，整条任务永远不结束。无人值守跑必然踩。
+                if (!process.waitFor(installTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                    log.error("APK 安装超时({}s): {}", installTimeoutSeconds, apkPath);
+                    return "安装超时 " + installTimeoutSeconds + " 秒。设备上可能弹出了安装确认框——"
+                            + "请在手机「开发者选项」里打开「USB 安装 / 通过 USB 调试安装应用」，"
+                            + "打开后每台机只需设置这一次。";
+                }
+                int exitCode = process.exitValue();
                 
                 if (exitCode == 0 || output.toString().contains("Success")) {
                     log.info("APK 安装成功: {}", apkPath);
-                    return true;
-                } else {
-                    log.error("APK 安装失败: {}", output.toString());
-                    return false;
+                    return null;
                 }
+                String reason = output.toString().trim();
+                log.error("APK 安装失败: {}", reason);
+                return reason.isEmpty() ? ("adb install 退出码 " + exitCode) : clipAdbOutput(reason);
             }
             
         } catch (IOException | InterruptedException e) {
             log.error("安装 APK 失败", e);
-            return false;
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return "安装 APK 异常: " + e.getMessage();
         }
     }
 
     /**
      * 卸载 Android 应用。未安装也视为成功（便于「先卸再装」）。
      */
+    /**
+     * 设备是否允许 adb 直接安装（不弹确认框）。
+     * <p>
+     * 小米/vivo/oppo 这类 ROM 默认要求手动确认每一次 USB 安装，无人值守跑必然卡住。
+     * 这是每台机<b>一次性</b>的开发者选项，不是每次安装都要点——但不主动检查的话，
+     * 人只会看到任务卡住五分钟然后超时，根本想不到是这个开关。
+     *
+     * @return null 表示看起来没问题；非 null 是给人看的提示
+     */
+    public String checkAdbInstallReady(String deviceId) {
+        // 各家 ROM 的键名不统一，逐个探；任何一个明确为关闭状态就提示
+        for (String[] probe : new String[][]{
+                {"secure", "install_non_market_apps"},
+                {"global", "install_non_market_apps"},
+                {"secure", "adb_install_need_confirm"},
+                {"global", "adb_install_need_confirm"}}) {
+            String v = readSetting(deviceId, probe[0], probe[1]);
+            if (v == null) {
+                continue;
+            }
+            boolean needConfirm = probe[1].contains("need_confirm") ? "1".equals(v) : "0".equals(v);
+            if (needConfirm) {
+                return "设备 " + deviceId + " 需要手动确认 USB 安装（" + probe[1] + "=" + v + "）。"
+                        + "请在手机「开发者选项」里打开「USB 安装 / 通过 USB 调试安装应用」，"
+                        + "每台机只需设置这一次。";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 安装失败后，按 ROM 给一句能直接照着做的提示。
+     * <p>
+     * 只在<b>失败时</b>调用：不同于 {@link #checkAdbInstallReady}，这里给的是「这类机型常见原因」，
+     * 装成功了就不该拿它去打扰人。
+     */
+    public String installFailureHint(String deviceId, String failure) {
+        String f = failure == null ? "" : failure;
+        if (f.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE")) {
+            return "签名与已装版本不一致，请先卸载再装（流程里可勾「安装前卸载」）。";
+        }
+        if (f.contains("INSTALL_FAILED_VERSION_DOWNGRADE")) {
+            return "版本号低于机上已装的版本，请先卸载再装。";
+        }
+        if (f.contains("INSTALL_FAILED_INSUFFICIENT_STORAGE")) {
+            return "设备存储不足。";
+        }
+        if (isMiui(deviceId)) {
+            // MIUI/HyperOS 这道确认是安全中心拦下来的，不落在 install_non_market_apps
+            // 这类 settings 键上——所以 checkAdbInstallReady 探不到，只能按机型提示。
+            // 弹窗里「拒绝」是默认按钮且带倒计时，没人点就自动拒绝，表现就是安装莫名失败。
+            return "小米/红米（MIUI/HyperOS）会在 adb 安装时弹出「USB安装提示」，"
+                    + "而且默认按钮是「拒绝」并带倒计时——没人点就自动拒绝。"
+                    + "请在该机「开发者选项」里打开「USB安装」（需登录小米账号），"
+                    + "并关闭「安装前进行安全检查」之类的安装监控；每台机只需设置这一次。"
+                    + "华为/荣耀没有这一层，所以同一条流程在那边不会卡。";
+        }
+        return null;
+    }
+
+    /** 只看厂商标识，不做版本比较：各代 MIUI/HyperOS 的属性名不统一，认准是小米即可 */
+    private boolean isMiui(String deviceId) {
+        for (String key : new String[]{"ro.miui.ui.version.name", "ro.mi.os.version.name"}) {
+            if (readProp(deviceId, key) != null) {
+                return true;
+            }
+        }
+        String brand = readProp(deviceId, "ro.product.manufacturer");
+        if (brand == null) {
+            brand = readProp(deviceId, "ro.product.brand");
+        }
+        if (brand == null) {
+            return false;
+        }
+        String b = brand.trim().toLowerCase(java.util.Locale.ROOT);
+        return b.contains("xiaomi") || b.contains("redmi") || b.contains("poco");
+    }
+
+    private String readProp(String deviceId, String key) {
+        return runShellLine(deviceId, "getprop", key);
+    }
+
+    private String readSetting(String deviceId, String namespace, String key) {
+        return runShellLine(deviceId, "settings", "get", namespace, key);
+    }
+
+    /** 取 adb shell 一行输出；探测类调用失败一律返回 null，不该影响安装本身 */
+    private String runShellLine(String deviceId, String... args) {
+        try {
+            java.util.List<String> cmd = new java.util.ArrayList<>(
+                    java.util.List.of("adb", "-s", deviceId, "shell"));
+            cmd.addAll(java.util.Arrays.asList(args));
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            String out;
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                out = r.readLine();
+            }
+            if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            if (out == null) {
+                return null;
+            }
+            out = out.trim();
+            return out.isEmpty() || "null".equalsIgnoreCase(out) ? null : out;
+        } catch (Exception e) {
+            // 探测失败不该影响安装：这只是一层提示，真装不上还有超时兜底
+            return null;
+        }
+    }
+
+    /** adb 有时会把整段 help 一起吐出来，报错文案只留有用的部分 */
+    private static String clipAdbOutput(String raw) {
+        String s = raw.replaceAll("\\s+", " ").trim();
+        return s.length() <= 300 ? s : s.substring(0, 300) + "…";
+    }
+
     public boolean uninstallAndroidApp(String deviceId, String packageName) {
         if (packageName == null || packageName.isBlank()) {
             return false;
@@ -1074,6 +1220,117 @@ public class DeviceManager {
             log.warn("adb tap 失败: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * 通过 uiautomator dump 按可见文案/content-desc 精确匹配并点击（渠道商店「安装」等）。
+     * @return 命中并点击成功的文案；未找到或点击失败返回 null
+     */
+    public String clickAndroidByExactTexts(String deviceId, List<String> texts) {
+        if (deviceId == null || texts == null || texts.isEmpty()) {
+            return null;
+        }
+        try {
+            String xml = dumpAndroidUiHierarchy(deviceId);
+            if (xml == null || xml.isBlank()) {
+                return null;
+            }
+            for (String text : texts) {
+                if (text == null || text.isBlank()) {
+                    continue;
+                }
+                int[] center = findNodeCenterByAttr(xml, "text", text.trim());
+                if (center == null) {
+                    center = findNodeCenterByAttr(xml, "content-desc", text.trim());
+                }
+                if (center == null) {
+                    continue;
+                }
+                if (adbTap(deviceId, center[0], center[1])) {
+                    log.info("按文案点击成功: deviceId={}, text={}, xy=({},{})",
+                            deviceId, text, center[0], center[1]);
+                    return text.trim();
+                }
+                log.warn("找到文案但 tap 失败: text={}, xy=({},{})", text, center[0], center[1]);
+            }
+        } catch (Exception e) {
+            log.warn("按文案点击失败: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private String dumpAndroidUiHierarchy(String deviceId) {
+        String remote = "/sdcard/ms_store_uidump.xml";
+        try {
+            Process dump = new ProcessBuilder("adb", "-s", deviceId, "shell", "uiautomator", "dump", remote)
+                    .redirectErrorStream(true)
+                    .start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(dump.getInputStream()))) {
+                while (reader.readLine() != null) { /* drain */ }
+            }
+            dump.waitFor(20, java.util.concurrent.TimeUnit.SECONDS);
+
+            Path local = Files.createTempFile("ms_store_uidump_", ".xml");
+            try {
+                Process pull = new ProcessBuilder("adb", "-s", deviceId, "pull", remote, local.toString())
+                        .redirectErrorStream(true)
+                        .start();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(pull.getInputStream()))) {
+                    while (reader.readLine() != null) { /* drain */ }
+                }
+                pull.waitFor(20, java.util.concurrent.TimeUnit.SECONDS);
+                if (!Files.isRegularFile(local) || Files.size(local) == 0) {
+                    log.warn("商店安装 uiautomator dump 为空: deviceId={}", deviceId);
+                    return null;
+                }
+                return Files.readString(local, java.nio.charset.StandardCharsets.UTF_8);
+            } finally {
+                try {
+                    Files.deleteIfExists(local);
+                } catch (Exception ignored) {
+                    // ignore
+                }
+            }
+        } catch (Exception e) {
+            log.warn("uiautomator dump 失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 在 dump XML 中找 attr="exactValue" 节点的 bounds 中心 */
+    private static int[] findNodeCenterByAttr(String xml, String attr, String exactValue) {
+        if (xml == null || exactValue == null) {
+            return null;
+        }
+        String marker = attr + "=\"" + exactValue + "\"";
+        int idx = xml.indexOf(marker);
+        if (idx < 0) {
+            marker = attr + "='" + exactValue + "'";
+            idx = xml.indexOf(marker);
+        }
+        if (idx < 0) {
+            return null;
+        }
+        int nodeStart = xml.lastIndexOf('<', idx);
+        int nodeEnd = xml.indexOf('>', idx);
+        if (nodeStart < 0 || nodeEnd < 0 || nodeEnd <= nodeStart) {
+            return null;
+        }
+        String node = xml.substring(nodeStart, nodeEnd + 1);
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"")
+                .matcher(node);
+        if (!m.find()) {
+            return null;
+        }
+        int l = Integer.parseInt(m.group(1));
+        int t = Integer.parseInt(m.group(2));
+        int r = Integer.parseInt(m.group(3));
+        int b = Integer.parseInt(m.group(4));
+        if (r <= l || b <= t) {
+            return null;
+        }
+        return new int[]{(l + r) / 2, (t + b) / 2};
     }
 
     /** 回桌面（KEYCODE_HOME=3） */
@@ -1230,11 +1487,20 @@ public class DeviceManager {
      * <p>
      * 只跑 {@code xcodebuild test-without-building} + {@code iproxy}，不重装手机上的 WDA，避免反复信任。
      */
+    /** 最近一次确保 WDA 失败的可读原因；成功时清空。 */
+    public String getLastIosWdaError(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return null;
+        }
+        return iosWdaLastError.get(deviceId.trim());
+    }
+
     public synchronized boolean ensureIosWdaRunning(String deviceId, int localPort) {
         if (deviceId == null || deviceId.isBlank() || localPort <= 0) {
             return false;
         }
         if (isWdaStatusOk(localPort)) {
+            iosWdaLastError.remove(deviceId);
             log.info("WDA 已就绪: deviceId={}, port={}", deviceId, localPort);
             return true;
         }
@@ -1242,21 +1508,30 @@ public class DeviceManager {
                 + "/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent";
         Path project = Path.of(wdaDir, "WebDriverAgent.xcodeproj");
         if (!Files.isDirectory(project)) {
-            log.warn("未找到 WDA 工程: {}", project);
+            String msg = "未找到 WDA 工程: " + project;
+            log.warn(msg);
+            iosWdaLastError.put(deviceId, msg);
             return false;
         }
+
+        Path logFile = Path.of(System.getProperty("java.io.tmpdir"),
+                "wda-" + deviceId.replaceAll("[^A-Za-z0-9_-]", "_") + ".log");
 
         // 1) xcodebuild test-without-building（复用已装 Runner）
         Process xcode = iosWdaXcodeProcs.get(deviceId);
         if (xcode == null || !xcode.isAlive()) {
             try {
-                Path logFile = Path.of(System.getProperty("java.io.tmpdir"),
-                        "wda-" + deviceId.replaceAll("[^A-Za-z0-9_-]", "_") + ".log");
+                // 新一轮启动前清空旧日志，便于诊断本次失败
+                try {
+                    Files.writeString(logFile, "");
+                } catch (Exception ignored) {
+                }
                 List<String> cmd = List.of(
                         "xcodebuild", "test-without-building",
                         "-project", project.toString(),
                         "-scheme", "WebDriverAgentRunner",
                         "-destination", "id=" + deviceId,
+                        "-allowProvisioningUpdates",
                         "IPHONEOS_DEPLOYMENT_TARGET=17.6",
                         "DEVELOPMENT_TEAM=37ZX3X6QJY",
                         "CODE_SIGN_IDENTITY=Apple Development",
@@ -1285,10 +1560,14 @@ public class DeviceManager {
                     Thread.sleep(1000);
                 }
                 if (!ready) {
-                    log.warn("等待 WDA ServerURLHere 超时: deviceId={}", deviceId);
+                    String reason = diagnoseWdaLog(logFile);
+                    iosWdaLastError.put(deviceId, reason);
+                    log.warn("等待 WDA ServerURLHere 超时: deviceId={}, reason={}", deviceId, reason);
                 }
             } catch (Exception e) {
-                log.error("启动 WDA xcodebuild 失败: {}", e.getMessage());
+                String msg = "启动 WDA xcodebuild 失败: " + e.getMessage();
+                log.error(msg);
+                iosWdaLastError.put(deviceId, msg);
                 return false;
             }
         }
@@ -1306,13 +1585,16 @@ public class DeviceManager {
                 log.info("已启动 iproxy: {} -> device:8100, deviceId={}", localPort, deviceId);
                 Thread.sleep(1500);
             } catch (Exception e) {
-                log.error("启动 iproxy 失败: {}", e.getMessage());
+                String msg = "启动 iproxy 失败: " + e.getMessage();
+                log.error(msg);
+                iosWdaLastError.put(deviceId, msg);
                 return false;
             }
         }
 
         for (int i = 0; i < 20; i++) {
             if (isWdaStatusOk(localPort)) {
+                iosWdaLastError.remove(deviceId);
                 log.info("WDA 就绪: deviceId={}, http://127.0.0.1:{}/status", deviceId, localPort);
                 return true;
             }
@@ -1323,8 +1605,42 @@ public class DeviceManager {
                 return false;
             }
         }
-        log.warn("WDA status 仍不可达: deviceId={}, port={}", deviceId, localPort);
+        String reason = diagnoseWdaLog(logFile);
+        iosWdaLastError.put(deviceId, reason);
+        log.warn("WDA status 仍不可达: deviceId={}, port={}, reason={}", deviceId, localPort, reason);
         return false;
+    }
+
+    /** 从 xcodebuild 日志提炼可读失败原因（描述文件过期等）。 */
+    private static String diagnoseWdaLog(Path logFile) {
+        String text = "";
+        try {
+            if (logFile != null && Files.exists(logFile)) {
+                text = Files.readString(logFile);
+            }
+        } catch (Exception ignored) {
+        }
+        if (text.contains("0xe8008011") || text.toLowerCase(Locale.ROOT).contains("provisioning profile has expired")) {
+            return "WDA 描述文件已过期(0xe8008011)：请用 Xcode 打开 WebDriverAgent，选中真机重新签名并安装 WebDriverAgentRunner（Team=37ZX3X6QJY / Bundle=com.travYang.wda.Runner）";
+        }
+        if (text.contains("Developer App Certificate is not trusted")
+                || text.contains("VPN & Device Management")
+                || text.contains("has not been explicitly trusted")) {
+            return "手机未信任开发者证书：请到 iPhone「设置 → 通用 → VPN与设备管理」里信任 Apple Development（trav_yang），再点刷新截图";
+        }
+        if (text.contains("Timed out while enabling automation mode")) {
+            return "启用自动化模式超时：请解锁手机，确认「设置 → 隐私与安全性 → 开发者模式」已开启，并允许启用 UI Automation";
+        }
+        if (text.contains("无法安装") || text.contains("Failed to install")) {
+            return "WDA 无法安装到真机：请在 Xcode 重新签名 WebDriverAgentRunner，并在手机上信任开发者证书";
+        }
+        if (text.contains("Timed out waiting for") || text.contains("not paired")) {
+            return "WDA 启动失败：请确认手机已解锁、已信任本机，且 USB 连接正常";
+        }
+        if (text.isBlank()) {
+            return "WDA 未就绪：xcodebuild 未拉起（日志为空）";
+        }
+        return "WDA 未就绪：请查看日志 " + logFile;
     }
 
     private static boolean isWdaStatusOk(int localPort) {
@@ -1873,83 +2189,164 @@ public class DeviceManager {
     }
 
     /**
-     * 获取 iOS 已安装应用列表（含名称、版本、bundleId），一次 ideviceinstaller -l 解析。
+     * 获取 iOS 已安装应用列表（含名称、版本、bundleId）。
+     * <p>
+     * ideviceinstaller ≥1.2 已去掉 {@code -l}，改为子命令 {@code list}；旧版仍回退 {@code -l}。
+     * 输出一般为 CSV：CFBundleIdentifier, CFBundleShortVersionString/CFBundleVersion, CFBundleDisplayName
      */
     public List<AppInfo> getIOSInstalledAppsWithInfo(String deviceId) {
         List<AppInfo> result = new ArrayList<>();
-        try {
-            Process process = new ProcessBuilder("ideviceinstaller", "-u", deviceId, "-l")
-                    .redirectErrorStream(true)
-                    .start();
-            boolean isCSVFormat = false;
-            boolean isFirstLine = true;
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (isFirstLine) {
-                        isFirstLine = false;
-                        if (line.contains("CFBundleIdentifier") || line.contains("CFBundleDisplayName")) {
-                            isCSVFormat = true;
-                            continue;
-                        }
-                    }
-                    if (line.trim().isEmpty() || line.contains("Total:")) continue;
-                    if (isCSVFormat) {
-                        String[] parts = line.split(",");
-                        if (parts.length >= 1) {
-                            String bundleId = parts[0].trim();
-                            if (bundleId.startsWith("\"")) bundleId = bundleId.substring(1);
-                            if (bundleId.endsWith("\"")) bundleId = bundleId.substring(0, bundleId.length() - 1);
-                            if (bundleId.isEmpty()) continue;
-                            AppInfo info = new AppInfo();
-                            info.setPackageName(bundleId);
-                            if (parts.length >= 2) {
-                                String ver = parts[1].trim();
-                                if (ver.startsWith("\"")) ver = ver.substring(1);
-                                if (ver.endsWith("\"")) ver = ver.substring(0, ver.length() - 1);
-                                info.setVersion(ver);
-                            } else {
-                                info.setVersion("1.0.0");
-                            }
-                            if (parts.length >= 3) {
-                                String name = parts[2].trim();
-                                if (name.startsWith("\"")) name = name.substring(1);
-                                if (name.endsWith("\"")) name = name.substring(0, name.length() - 1);
-                                info.setName(name);
-                            } else {
-                                info.setName(bundleId);
-                            }
-                            result.add(info);
-                        }
-                    } else {
-                        if (line.contains(" - ")) {
-                            String[] parts = line.split(" - ");
-                            if (parts.length >= 2) {
-                                String bundleId = parts[parts.length - 1].trim();
-                                if (bundleId.isEmpty() || "Total:".equals(bundleId)) continue;
-                                String namePart = parts[0].trim();
-                                AppInfo info = new AppInfo();
-                                info.setPackageName(bundleId);
-                                info.setName(namePart);
-                                info.setVersion("1.0.0");
-                                if (namePart.contains("(") && namePart.contains(")")) {
-                                    int s = namePart.indexOf("("), e = namePart.indexOf(")");
-                                    if (e > s) {
-                                        info.setName(namePart.substring(0, s).trim());
-                                        info.setVersion(namePart.substring(s + 1, e).trim());
-                                    }
-                                }
-                                result.add(info);
-                            }
-                        }
-                    }
+        if (deviceId == null || deviceId.isBlank()) {
+            return result;
+        }
+        String output = runIdeviceInstallerList(deviceId);
+        if (output == null || output.isBlank()) {
+            return result;
+        }
+        if (looksLikeIdeviceInstallerUsage(output)) {
+            log.warn("ideviceinstaller 返回的是帮助/用法文本而非应用列表，设备可能未连接或命令不兼容: {}", deviceId);
+            return result;
+        }
+        boolean isCSVFormat = false;
+        boolean headerSeen = false;
+        for (String rawLine : output.split("\\R")) {
+            String line = rawLine == null ? "" : rawLine.trim();
+            if (line.isEmpty()) continue;
+            if (line.contains("Total:")) continue;
+            if (line.startsWith("ERROR") || line.toLowerCase(Locale.ROOT).contains("no device found")) {
+                log.warn("ideviceinstaller 列表错误: {}", line);
+                continue;
+            }
+            if (!headerSeen) {
+                headerSeen = true;
+                if (line.contains("CFBundleIdentifier") || line.contains("CFBundleDisplayName")
+                        || line.contains("CFBundleVersion") || line.contains("CFBundleShortVersionString")) {
+                    isCSVFormat = true;
+                    continue;
                 }
             }
-            process.waitFor();
-        } catch (Exception e) {
-            log.warn("获取 iOS 应用列表(含信息)失败: {}", e.getMessage());
+            if (isCSVFormat || line.contains(",")) {
+                List<String> parts = splitCsvRespectingQuotes(line);
+                if (parts.isEmpty()) continue;
+                String bundleId = unquote(parts.get(0));
+                if (bundleId.isEmpty() || !bundleId.contains(".")) continue;
+                // 过滤误把 Usage 行当应用
+                if (bundleId.startsWith("-") || bundleId.contains(" ")) continue;
+                AppInfo info = new AppInfo();
+                info.setPackageName(bundleId);
+                if (parts.size() >= 2) {
+                    info.setVersion(unquote(parts.get(1)));
+                } else {
+                    info.setVersion("");
+                }
+                if (parts.size() >= 3) {
+                    String name = unquote(parts.get(2));
+                    info.setName(name.isEmpty() ? bundleId : name);
+                } else {
+                    info.setName(bundleId);
+                }
+                result.add(info);
+            } else if (line.contains(" - ")) {
+                String[] parts = line.split(" - ");
+                if (parts.length >= 2) {
+                    String bundleId = parts[parts.length - 1].trim();
+                    if (bundleId.isEmpty() || "Total:".equals(bundleId) || !bundleId.contains(".")) continue;
+                    String namePart = parts[0].trim();
+                    AppInfo info = new AppInfo();
+                    info.setPackageName(bundleId);
+                    info.setName(namePart);
+                    info.setVersion("");
+                    if (namePart.contains("(") && namePart.contains(")")) {
+                        int s = namePart.indexOf('('), e = namePart.indexOf(')');
+                        if (e > s) {
+                            info.setName(namePart.substring(0, s).trim());
+                            info.setVersion(namePart.substring(s + 1, e).trim());
+                        }
+                    }
+                    result.add(info);
+                }
+            }
         }
+        log.info("iOS 应用列表: deviceId={}, count={}", deviceId, result.size());
         return result;
+    }
+
+    /** 先试新语法 list --user，再回退旧 -l */
+    private String runIdeviceInstallerList(String deviceId) {
+        String out = runProcessCapture(List.of("ideviceinstaller", "-u", deviceId, "list", "--user"));
+        if (out != null && !out.isBlank() && !looksLikeIdeviceInstallerUsage(out)
+                && !out.toLowerCase(Locale.ROOT).contains("invalid option")) {
+            return out;
+        }
+        // 兼容旧版 ideviceinstaller
+        String legacy = runProcessCapture(List.of("ideviceinstaller", "-u", deviceId, "-l"));
+        if (legacy != null && !looksLikeIdeviceInstallerUsage(legacy)) {
+            return legacy;
+        }
+        // 返回较有信息的一份，便于日志
+        return (out != null && !out.isBlank()) ? out : legacy;
+    }
+
+    private boolean looksLikeIdeviceInstallerUsage(String text) {
+        if (text == null) return true;
+        String t = text.toLowerCase(Locale.ROOT);
+        return t.contains("usage: ideviceinstaller")
+                || t.contains("invalid option")
+                || t.contains("manage apps on ios devices")
+                || t.contains("commands:");
+    }
+
+    private String runProcessCapture(List<String> cmd) {
+        try {
+            Process process = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append('\n');
+                }
+            }
+            boolean finished = process.waitFor(90, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("命令超时: {}", String.join(" ", cmd));
+                return "";
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("执行失败 {}: {}", String.join(" ", cmd), e.getMessage());
+            return "";
+        }
+    }
+
+    private static String unquote(String s) {
+        if (s == null) return "";
+        String v = s.trim();
+        if (v.length() >= 2 && v.startsWith("\"") && v.endsWith("\"")) {
+            v = v.substring(1, v.length() - 1);
+        }
+        return v.trim();
+    }
+
+    /** 简单 CSV 拆分，支持双引号字段内逗号 */
+    private static List<String> splitCsvRespectingQuotes(String line) {
+        List<String> parts = new ArrayList<>();
+        if (line == null) return parts;
+        StringBuilder cur = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"') {
+                inQuotes = !inQuotes;
+                cur.append(c);
+            } else if (c == ',' && !inQuotes) {
+                parts.add(cur.toString());
+                cur.setLength(0);
+            } else {
+                cur.append(c);
+            }
+        }
+        parts.add(cur.toString());
+        return parts;
     }
 }

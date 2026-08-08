@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiUrlMapper">
+
+    <resultMap id="ApiUrlMap" type="com.mobile.standalone.entity.ApiUrlEntry">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="name" column="name"/>
+        <result property="environment" column="environment"/>
+        <result property="baseUrl" column="base_url"/>
+        <result property="description" column="description"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByFilters" resultMap="ApiUrlMap">
+        SELECT * FROM api_url_entries
+        <where>
+            <if test="project != null and project != ''">AND project = #{project}</if>
+            <if test="environment != null and environment != ''">
+                AND (environment = #{environment} OR environment = 'ANY')
+            </if>
+            <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+        </where>
+        ORDER BY project ASC, sort_order ASC, updated_at DESC
+    </select>
+
+    <select id="findById" resultMap="ApiUrlMap">
+        SELECT * FROM api_url_entries WHERE id = #{id}
+    </select>
+
+    <select id="countByProject" resultType="long">
+        SELECT COUNT(1) FROM api_url_entries WHERE project = #{project}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO api_url_entries
+        (id, project, name, environment, base_url, description, enabled, sort_order, created_at, updated_at)
+        VALUES
+        (#{id}, #{project}, #{name}, #{environment}, #{baseUrl}, #{description}, #{enabled}, #{sortOrder},
+         #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE api_url_entries
+        SET project = #{project},
+            name = #{name},
+            environment = #{environment},
+            base_url = #{baseUrl},
+            description = #{description},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM api_url_entries WHERE id = #{id}
+    </delete>
+</mapper>

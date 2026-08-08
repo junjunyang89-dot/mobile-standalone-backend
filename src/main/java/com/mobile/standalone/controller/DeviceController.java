@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/devices")
@@ -25,16 +26,32 @@ public class DeviceController {
     }
 
     /**
-     * 设备详情：设备名称、电量、已安装应用列表；iOS 返回 iosDetail/iosDetailRaw，Android 返回 androidDetail/androidDetailRaw。
-     * 前端务必展示 iosDetailRaw 或 androidDetailRaw（如用 &lt;pre&gt;），有数据时会完整显示，失败时会显示错误提示。
+     * 设备详情：设备名称、电量、系统信息；已安装应用默认不含（很慢），见 {@code /devices/{id}/installed-apps}。
+     * <p>
+     * {@code includeApps=true} 兼容旧调用；{@code includeRaw=true} 才拉 getprop/ideviceinfo 全文（较慢）。
+     * 结果短时缓存约 60s，重复点开会快很多。
      */
     @GetMapping("/{id}/detail")
-    public ResponseEntity<DeviceService.DeviceDetail> getDeviceDetail(@PathVariable String id) {
-        DeviceService.DeviceDetail detail = deviceService.getDeviceDetail(id);
+    public ResponseEntity<DeviceService.DeviceDetail> getDeviceDetail(
+            @PathVariable String id,
+            @RequestParam(required = false, defaultValue = "false") boolean includeApps,
+            @RequestParam(required = false, defaultValue = "false") boolean includeRaw
+    ) {
+        DeviceService.DeviceDetail detail = deviceService.getDeviceDetail(id, includeApps, includeRaw);
         if (detail == null) {
             return ResponseEntity.notFound().build();
         }
         return ResponseEntity.ok(detail);
+    }
+
+    /** 已安装应用（单独接口，避免拖慢详情首屏） */
+    @GetMapping("/{id}/installed-apps")
+    public ResponseEntity<?> getInstalledApps(@PathVariable String id) {
+        List<DeviceService.InstalledAppItem> apps = deviceService.getInstalledApps(id);
+        if (apps == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(Map.of("installedApplications", apps));
     }
 
     @GetMapping

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiTestVariableMapper">
+
+    <resultMap id="varMap" type="com.mobile.standalone.entity.ApiTestVariable">
+        <result property="environment" column="environment"/>
+        <result property="name" column="name"/>
+        <result property="value" column="value"/>
+        <result property="secret" column="secret"/>
+        <result property="enabled" column="enabled"/>
+        <result property="description" column="description"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="cols">environment, name, value, secret, enabled, description, sort_order, updated_at</sql>
+
+    <select id="findByEnvironment" resultMap="varMap">
+        SELECT <include refid="cols"/> FROM api_test_variables
+        WHERE environment = #{environment}
+        ORDER BY sort_order, name
+    </select>
+
+    <select id="findOne" resultMap="varMap">
+        SELECT <include refid="cols"/> FROM api_test_variables
+        WHERE environment = #{environment} AND name = #{name}
+    </select>
+
+    <insert id="upsert">
+        INSERT INTO api_test_variables (environment, name, value, secret, enabled, description, sort_order)
+        VALUES (#{environment}, #{name}, #{value}, #{secret}, #{enabled}, #{description}, #{sortOrder})
+        ON DUPLICATE KEY UPDATE
+            value = VALUES(value),
+            secret = VALUES(secret),
+            enabled = VALUES(enabled),
+            description = VALUES(description),
+            sort_order = VALUES(sort_order)
+    </insert>
+
+    <delete id="delete">
+        DELETE FROM api_test_variables WHERE environment = #{environment} AND name = #{name}
+    </delete>
+</mapper>

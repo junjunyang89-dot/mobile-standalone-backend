@@ -2,7 +2,9 @@ package com.mobile.standalone.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.mobile.standalone.dto.ExecutionLogEntryDto;
 import com.mobile.standalone.dto.FunctionalTestExecutionResult;
 import com.mobile.standalone.dto.PageResult;
 import com.mobile.standalone.entity.Device;
@@ -33,7 +35,9 @@ import java.util.concurrent.Executors;
 @Slf4j
 public class TaskService {
 
-    private static final ObjectMapper JSON = new ObjectMapper().registerModule(new JavaTimeModule());
+    private static final ObjectMapper JSON = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     /** 用于异步线程内通过代理调用，保证 executeTestTask 在独立事务中提交，前端能及时读到完成状态与日志/截图 */
     @Lazy
@@ -43,11 +47,13 @@ public class TaskService {
     private final TaskMapper taskMapper;
     private final TaskExecutionMapper executionMapper;
     private final TaskNameGenerator taskNameGenerator;
-    private final TestScriptExecutor testScriptExecutor;
     private final CompatibilityTestService compatibilityTestService;
-    private final LoginTestService loginTestService;
     private final PerformanceTestService performanceTestService;
+    private final UiFlowExecutor uiFlowExecutor;
     private final DeviceMapper deviceMapper;
+    private final DeviceLockService deviceLockService;
+    private final ExecutionCancelRegistry cancelRegistry;
+    private final FailureDiagnosisRunner diagnosisRunner;
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, Process> runningTasks = new ConcurrentHashMap<>();
 
@@ -56,7 +62,8 @@ public class TaskService {
             Task.TaskType.FUNCTIONAL_QUALITY_TEST,
             Task.TaskType.COMPATIBILITY_TEST,
             Task.TaskType.INSTALL_UNINSTALL_UPGRADE_TEST,
-            Task.TaskType.UI_ADAPTATION_TEST
+            Task.TaskType.UI_ADAPTATION_TEST,
+            Task.TaskType.UI_FLOW_TEST
     );
     
     public List<Task> getAllTasks() {
@@ -150,6 +157,10 @@ public class TaskService {
      * 创建任务。对瞬时锁冲突（如设备扫描短暂更新 devices 导致外键校验等待）自动重试。
      */
     public Task createTask(Task task) {
+        if (task.getTaskType() == Task.TaskType.FUNCTIONAL_QUALITY_TEST) {
+            throw new IllegalArgumentException(
+                    "功能基础质量硬编码场景已下线，请改用「流程编排」创建 UI_FLOW_TEST 任务");
+        }
         if (task.getId() == null || task.getId().isBlank()) {
             task.setId(UUID.randomUUID().toString());
         }
@@ -228,46 +239,96 @@ public class TaskService {
     
     @Transactional
     public boolean runTask(String taskId) {
+        return runTask(taskId, null);
+    }
+
+    /**
+     * 提交任务执行。
+     *
+     * @param parentRefId 上级执行链标识（如线上回归的 runId）。父级已持有该设备时子任务可重入，
+     *                    不会被自己所属的回归挡住，也不会在子任务结束时提前释放父锁。
+     */
+    @Transactional
+    public boolean runTask(String taskId, String parentRefId) {
         Task task = taskMapper.findById(taskId);
         if (task == null || task.getStatus() == Task.TaskStatus.RUNNING) {
             return false;
         }
-        
-        // 更新任务状态
-        task.setStatus(Task.TaskStatus.RUNNING);
-        task.setUpdatedAt(LocalDateTime.now());
-        taskMapper.update(task);
-        
-        // 创建执行记录
-        TaskExecution execution = new TaskExecution();
-        execution.setId(UUID.randomUUID().toString());
-        execution.setTaskId(taskId);
-        execution.setStatus(TaskExecution.ExecutionStatus.RUNNING);
-        execution.setStartTime(LocalDateTime.now());
-        executionMapper.insert(execution);
-        
-        // 异步执行任务（通过 self 调用使 executeTestTask 走 Spring 代理，在独立事务中提交，前端轮询能拿到完成状态与日志/截图）
-        executorService.submit(() -> {
-            try {
-                self.executeTestTask(task, execution);
-            } catch (Exception e) {
-                log.error("任务执行失败: taskId={}, name={}, error={}", taskId, task.getName(), e.getMessage(), e);
-                task.setStatus(Task.TaskStatus.FAILED);
-                task.setUpdatedAt(LocalDateTime.now());
-                taskMapper.update(task);
-                execution.setStatus(TaskExecution.ExecutionStatus.FAILED);
-                execution.setEndTime(LocalDateTime.now());
-                execution.setErrorMessage(e.getMessage() != null ? e.getMessage() : e.toString());
-                executionMapper.update(execution);
+
+        // 同一设备互斥：功能 / 性能 / 流程 / 采集不能同时占一台机，避免互相干扰
+        String deviceId = task.getDeviceId() != null && !task.getDeviceId().isBlank()
+                ? task.getDeviceId().trim() : null;
+        if (deviceId != null) {
+            DeviceLockService.Holder blocker = deviceLockService.tryAcquire(
+                    deviceId, DeviceLockService.Kind.TASK, taskId,
+                    task.getName() != null ? task.getName() : taskId, parentRefId);
+            if (blocker != null) {
+                // 已收到停止请求但线程还在收尾时给出更准确的提示，避免用户以为「明明已停止却说被占用」
+                String hint = cancelRegistry.isCancelled(blocker.refId())
+                        ? "正在停止中，请稍候重试。"
+                        : "请先等其结束或停止后再跑（功能与性能不要并行抢同一台机）。";
+                throw new IllegalStateException(
+                        "设备 " + deviceId + " 正被占用：" + blocker.describe() + "。" + hint);
             }
-        });
-        
+        }
+
+        try {
+            // 更新任务状态
+            task.setStatus(Task.TaskStatus.RUNNING);
+            task.setUpdatedAt(LocalDateTime.now());
+            taskMapper.update(task);
+
+            // 创建执行记录
+            TaskExecution execution = new TaskExecution();
+            execution.setId(UUID.randomUUID().toString());
+            execution.setTaskId(taskId);
+            execution.setStatus(TaskExecution.ExecutionStatus.RUNNING);
+            execution.setStartTime(LocalDateTime.now());
+            executionMapper.insert(execution);
+
+            cancelRegistry.register(taskId);
+
+            // 异步执行任务（通过 self 调用使 executeTestTask 走 Spring 代理，在独立事务中提交，前端轮询能拿到完成状态与日志/截图）
+            executorService.submit(() -> {
+                try {
+                    self.executeTestTask(task, execution);
+                } catch (Exception e) {
+                    log.error("任务执行失败: taskId={}, name={}, error={}", taskId, task.getName(), e.getMessage(), e);
+                    task.setStatus(Task.TaskStatus.FAILED);
+                    task.setUpdatedAt(LocalDateTime.now());
+                    taskMapper.update(task);
+                    execution.setStatus(TaskExecution.ExecutionStatus.FAILED);
+                    execution.setEndTime(LocalDateTime.now());
+                    execution.setErrorMessage(e.getMessage() != null ? e.getMessage() : e.toString());
+                    executionMapper.update(execution);
+                } finally {
+                    cancelRegistry.clear(taskId);
+                    if (deviceId != null) {
+                        deviceLockService.release(deviceId, taskId);
+                    }
+                    // 放在设备锁释放之后：环境问题判定要自动重跑时，得能立刻拿到这台机。
+                    // parentRefId 非空说明是线上回归编排在驱动，那边有自己的状态机，不能背着它重跑。
+                    diagnosisRunner.onTaskFinished(taskId, parentRefId == null);
+                }
+            });
+        } catch (RuntimeException e) {
+            // 提交失败时别把设备锁留在原地
+            cancelRegistry.clear(taskId);
+            if (deviceId != null) {
+                deviceLockService.release(deviceId, taskId);
+            }
+            throw e;
+        }
+
         return true;
     }
     
     /**
-     * 停止任务：若有进程则销毁；若任务状态为 RUNNING 则更新为 STOPPED 并返回成功。
-     * 登录测试等任务在异步线程中执行，未存入 runningTasks，仍将任务标记为已停止并返回 true，避免前端收到 400 报「Network error」。
+     * 停止任务：下发取消标记让执行线程在下一步中断，同时销毁外部进程（若有）。
+     * <p>
+     * 流程/性能任务跑在应用线程里，只改数据库状态是停不掉的——必须走
+     * {@link ExecutionCancelRegistry}，由 {@link UiFlowExecutor} 在每步前检查。
+     * 设备锁由执行线程收尾时释放，这里不主动放，避免误放给下一个任务后两条流程同时操作同一台机。
      */
     @Transactional
     public boolean stopTask(String taskId) {
@@ -275,12 +336,17 @@ public class TaskService {
         if (task == null) {
             return false;
         }
+        boolean signalled = cancelRegistry.cancel(taskId);
         Process process = runningTasks.get(taskId);
         if (process != null && process.isAlive()) {
             process.destroy();
             runningTasks.remove(taskId);
         }
         if (task.getStatus() == Task.TaskStatus.RUNNING) {
+            if (!signalled && process == null) {
+                // 没有在跑的执行线程（服务重启等残留 RUNNING），直接置为已停止
+                log.warn("任务标记为 RUNNING 但无在跑的执行线程，直接置为 STOPPED: taskId={}", taskId);
+            }
             task.setStatus(Task.TaskStatus.STOPPED);
             task.setUpdatedAt(LocalDateTime.now());
             taskMapper.update(task);
@@ -300,44 +366,66 @@ public class TaskService {
         }
         
         String reportPath = null;
+        // 流程提前返回（如「元素不存在，结束流程」）时的判定，决定任务算完成/失败/跳过
+        String earlyReturn = null;
+        String earlyReturnMessage = null;
         boolean executionAlreadySaved = false; // 性能测试分支内已单独更新状态并保存 execution 时置为 true，避免下方重复更新
         try {
-            // 若 DB 未存 task_type 或为 null，按功能体验基础质量测试处理，确保能产出执行日志
+            // 若 DB 未存 task_type 或为 null，按流程任务处理（旧 FUNCTIONAL 硬编码已下线）
             Task.TaskType taskType = normalizeTaskType(task.getTaskType());
             if (taskType == null) {
-                taskType = Task.TaskType.FUNCTIONAL_QUALITY_TEST;
-                log.debug("任务 taskId={} 的 taskType 为空，按 FUNCTIONAL_QUALITY_TEST 执行以产出执行日志", task.getId());
+                taskType = Task.TaskType.UI_FLOW_TEST;
+                log.debug("任务 taskId={} 的 taskType 为空，按 UI_FLOW_TEST 执行", task.getId());
             }
-            if (taskType == Task.TaskType.FUNCTIONAL_QUALITY_TEST) {
-                FunctionalTestExecutionResult result = testScriptExecutor.executeFunctionalQualityTest(task, device);
+            if (taskType == Task.TaskType.UI_FLOW_TEST) {
+                FunctionalTestExecutionResult result = uiFlowExecutor.execute(task, device);
                 reportPath = result != null ? result.getReportPath() : null;
+                earlyReturn = result != null ? result.getEarlyReturnOutcome() : null;
+                earlyReturnMessage = result != null ? result.getEarlyReturnMessage() : null;
                 if (result != null) {
                     if (result.getExecutionLog() != null) {
                         try {
                             execution.setExecutionLog(JSON.writeValueAsString(result.getExecutionLog()));
-                            log.info("任务执行成功，已写入执行日志: taskId={}, 条数={}", task.getId(), result.getExecutionLog().size());
+                            log.info("流程任务执行完成: taskId={}, 日志条数={}", task.getId(), result.getExecutionLog().size());
                         } catch (JsonProcessingException e) {
-                            log.warn("序列化执行日志失败", e);
+                            log.warn("序列化流程执行日志失败", e);
                         }
                     }
                     if (result.getExecutionVariables() != null && !result.getExecutionVariables().isEmpty()) {
                         try {
                             execution.setExecutionVariables(JSON.writeValueAsString(result.getExecutionVariables()));
                         } catch (JsonProcessingException e) {
-                            log.warn("序列化执行变量失败", e);
+                            log.warn("序列化流程执行变量失败", e);
                         }
                     }
                 }
+            } else if (taskType == Task.TaskType.FUNCTIONAL_QUALITY_TEST) {
+                String msg = "功能基础质量硬编码已下线，请改用流程编排（UI_FLOW_TEST）";
+                log.warn("拒绝执行已下线任务类型: taskId={}, {}", task.getId(), msg);
+                List<ExecutionLogEntryDto> retired = new ArrayList<>();
+                retired.add(ExecutionLogEntryDto.fail("功能基础质量", msg, null));
+                try {
+                    execution.setExecutionLog(JSON.writeValueAsString(retired));
+                } catch (JsonProcessingException e) {
+                    log.warn("序列化下线提示日志失败", e);
+                }
+                throw new IllegalStateException(msg);
             } else if (taskType == Task.TaskType.STABILITY_QUALITY_TEST) {
                 // 稳定性质量测试
                 // TODO: 实现稳定性测试
                 log.warn("稳定性质量测试尚未实现");
-            } else if (taskType == Task.TaskType.PERFORMANCE_BASELINE_TEST) {
-                PerformanceTestService.PerformanceTestExecutionResult perfResult = performanceTestService.runPerformanceTest(task, device);
+            } else if (taskType == Task.TaskType.PERFORMANCE_BASELINE_TEST
+                    || taskType == Task.TaskType.SCENARIO_PERFORMANCE_TEST
+                    || taskType == Task.TaskType.PERFORMANCE_QUALITY_TEST) {
+                PerformanceTestService.PerformanceTestExecutionResult perfResult =
+                        taskType == Task.TaskType.SCENARIO_PERFORMANCE_TEST
+                                ? performanceTestService.runScenarioPerformanceTest(task, device)
+                                : performanceTestService.runPerformanceTest(task, device);
                 if (perfResult.getExecutionLog() != null) {
                     try {
                         execution.setExecutionLog(JSON.writeValueAsString(perfResult.getExecutionLog()));
-                        log.info("性能测试执行完成，已写入执行日志: taskId={}, 条数={}", task.getId(), perfResult.getExecutionLog().size());
+                        log.info("性能测试执行完成，已写入执行日志: taskId={}, type={}, 条数={}",
+                                task.getId(), taskType, perfResult.getExecutionLog().size());
                     } catch (JsonProcessingException e) {
                         log.warn("序列化性能测试执行日志失败", e);
                     }
@@ -346,11 +434,25 @@ public class TaskService {
                     execution.setResultData(perfResult.getResultDataJson());
                 }
                 // 性能测试结果 JSON 可能很大（长遍历+采样+截图时间轴），若 result_data 仍为 TEXT(64KB) 会写入失败导致整次被标为失败
-                task.setStatus(Task.TaskStatus.COMPLETED);
+                // 中途被停止时保留已采到的样本，但状态不能记成「完成」；
+                // 流程没跑通时同理——采样只覆盖了一半路径，记「完成」会让性能数据失去可信度
+                boolean perfCancelled = cancelRegistry.isCancelled(task.getId());
+                Task.TaskStatus perfStatus;
+                if (perfCancelled) {
+                    perfStatus = Task.TaskStatus.STOPPED;
+                } else if (perfResult.isFailed()) {
+                    perfStatus = Task.TaskStatus.FAILED;
+                } else {
+                    perfStatus = Task.TaskStatus.COMPLETED;
+                }
+                task.setStatus(perfStatus);
                 task.setUpdatedAt(LocalDateTime.now());
                 taskMapper.update(task);
-                execution.setStatus(TaskExecution.ExecutionStatus.COMPLETED);
+                execution.setStatus(TaskExecution.ExecutionStatus.valueOf(perfStatus.name()));
                 execution.setEndTime(LocalDateTime.now());
+                if (perfResult.isFailed() && perfResult.getErrorMessage() != null) {
+                    execution.setErrorMessage(perfResult.getErrorMessage());
+                }
                 try {
                     executionMapper.update(execution);
                 } catch (Exception saveEx) {
@@ -380,39 +482,126 @@ public class TaskService {
             
             // 测试执行成功（性能测试已在分支内单独更新并保存，此处跳过）
             if (!executionAlreadySaved) {
-                task.setStatus(Task.TaskStatus.COMPLETED);
+                // 流程没跑完就提前返回时，按编排里声明的判定收尾，而不是一律算通过
+                Task.TaskStatus finalStatus = resolveEarlyReturnStatus(earlyReturn);
+                task.setStatus(finalStatus);
                 task.setUpdatedAt(LocalDateTime.now());
                 taskMapper.update(task);
-                execution.setStatus(TaskExecution.ExecutionStatus.COMPLETED);
+                execution.setStatus(TaskExecution.ExecutionStatus.valueOf(finalStatus.name()));
                 execution.setEndTime(LocalDateTime.now());
+                if (finalStatus != Task.TaskStatus.COMPLETED && earlyReturnMessage != null) {
+                    execution.setErrorMessage(earlyReturnMessage);
+                }
                 if (reportPath != null) {
                     execution.setReportPath(reportPath);
                 }
-                executionMapper.update(execution);
-            }
-            
-        } catch (Exception e) {
-            log.error("测试执行失败", e);
-            Task.TaskType t = normalizeTaskType(task.getTaskType());
-            if (t == null) t = Task.TaskType.FUNCTIONAL_QUALITY_TEST;
-            if (t == Task.TaskType.FUNCTIONAL_QUALITY_TEST) {
-                var partialLog = loginTestService.getAndClearExecutionLog();
-                if (partialLog != null && !partialLog.isEmpty()) {
+                try {
+                    executionMapper.update(execution);
+                } catch (Exception saveEx) {
+                    log.warn("保存执行记录失败，尝试去掉超长日志再存: taskId={}, err={}",
+                            task.getId(), saveEx.getMessage());
+                    // 截图已在磁盘，详情页可按 taskId 扫描；日志过大时保底状态
+                    execution.setExecutionLog(compactExecutionLog(execution.getExecutionLog()));
                     try {
-                        execution.setExecutionLog(JSON.writeValueAsString(partialLog));
-                    } catch (JsonProcessingException ex) {
-                        log.warn("序列化失败时的执行日志失败", ex);
+                        executionMapper.update(execution);
+                    } catch (Exception ignore) {
+                        log.error("二次保存执行记录仍失败: taskId={}", task.getId(), ignore);
                     }
                 }
             }
-            task.setStatus(Task.TaskStatus.FAILED);
+            
+        } catch (Exception e) {
+            if (e instanceof UiFlowCancelledException) {
+                log.info("任务已按用户请求停止: taskId={}", task.getId());
+            } else {
+                log.error("测试执行失败", e);
+            }
+            Task.TaskType t = normalizeTaskType(task.getTaskType());
+            if (t == null) t = Task.TaskType.UI_FLOW_TEST;
+            if (e instanceof UiFlowExecutionException ufe && ufe.getExecutionLog() != null) {
+                try {
+                    execution.setExecutionLog(JSON.writeValueAsString(ufe.getExecutionLog()));
+                } catch (JsonProcessingException ex) {
+                    log.warn("序列化流程失败日志失败", ex);
+                }
+                String flowShot = null;
+                for (int i = ufe.getExecutionLog().size() - 1; i >= 0; i--) {
+                    var entry = ufe.getExecutionLog().get(i);
+                    if (entry != null && entry.getScreenshotPath() != null && !entry.getScreenshotPath().isBlank()) {
+                        flowShot = entry.getScreenshotPath();
+                        break;
+                    }
+                }
+                if (flowShot != null) {
+                    execution.setReportPath(flowShot);
+                }
+            }
+            // 用户主动停止不是失败：状态归 STOPPED，避免污染通过率统计
+            boolean cancelled = e instanceof UiFlowCancelledException || cancelRegistry.isCancelled(task.getId());
+            task.setStatus(cancelled ? Task.TaskStatus.STOPPED : Task.TaskStatus.FAILED);
             task.setUpdatedAt(LocalDateTime.now());
             taskMapper.update(task);
-            execution.setStatus(TaskExecution.ExecutionStatus.FAILED);
+            execution.setStatus(cancelled
+                    ? TaskExecution.ExecutionStatus.STOPPED
+                    : TaskExecution.ExecutionStatus.FAILED);
             execution.setEndTime(LocalDateTime.now());
             execution.setErrorMessage(e.getMessage());
-            executionMapper.update(execution);
+            try {
+                executionMapper.update(execution);
+            } catch (Exception saveEx) {
+                log.warn("保存失败态执行记录失败，压缩日志重试: taskId={}, err={}",
+                        task.getId(), saveEx.getMessage());
+                execution.setExecutionLog(compactExecutionLog(execution.getExecutionLog()));
+                try {
+                    executionMapper.update(execution);
+                } catch (Exception ignore) {
+                    log.error("失败态执行记录仍无法保存: taskId={}", task.getId(), ignore);
+                }
+            }
             // 不再 rethrow，保证本事务提交，前端能拿到 FAILED 状态与部分日志
+        }
+    }
+
+    /**
+     * 流程提前返回的判定 → 任务状态。
+     * <p>
+     * 「判断元素存在才往下走」是主力编排写法，元素没出现时流程会提前返回。默认按 FAIL 处理：
+     * 必现页面没出来就是缺陷，不该记成通过。可选弹窗请在该步骤把「判定」改成 PASS。
+     */
+    private static Task.TaskStatus resolveEarlyReturnStatus(String earlyReturnOutcome) {
+        if (earlyReturnOutcome == null || earlyReturnOutcome.isBlank()) {
+            return Task.TaskStatus.COMPLETED;
+        }
+        return switch (earlyReturnOutcome.trim().toUpperCase()) {
+            case "PASS" -> Task.TaskStatus.COMPLETED;
+            case "SKIP" -> Task.TaskStatus.SKIPPED;
+            default -> Task.TaskStatus.FAILED;
+        };
+    }
+
+    /** 日志过大无法入库时：去掉截图绝对路径（磁盘仍可按 taskId 扫描），尽量保住步骤文案 */
+    private static String compactExecutionLog(String executionLogJson) {
+        if (executionLogJson == null || executionLogJson.isBlank()) {
+            return "[{\"step\":\"截图\",\"status\":\"success\",\"level\":\"Info\",\"message\":\"日志过长已省略路径，请按任务截图列表查看\"}]";
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode arr = JSON.readTree(executionLogJson);
+            if (!arr.isArray()) {
+                return "[{\"step\":\"执行日志\",\"status\":\"success\",\"level\":\"Info\",\"message\":\"日志已压缩\"}]";
+            }
+            for (com.fasterxml.jackson.databind.JsonNode n : arr) {
+                if (n instanceof com.fasterxml.jackson.databind.node.ObjectNode obj) {
+                    obj.remove("screenshotPath");
+                    obj.remove("screenshotUrl");
+                }
+            }
+            String compact = JSON.writeValueAsString(arr);
+            if (compact.length() > 12_000_000) {
+                return "[{\"step\":\"执行日志\",\"status\":\"success\",\"level\":\"Info\",\"message\":\"日志过长，请查看任务截图列表\"}]";
+            }
+            return compact;
+        } catch (Exception e) {
+            return "[{\"step\":\"执行日志\",\"status\":\"success\",\"level\":\"Info\",\"message\":\"日志压缩失败，请查看任务截图列表\"}]";
         }
     }
 

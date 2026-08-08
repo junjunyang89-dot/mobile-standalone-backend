@@ -6,7 +6,9 @@ import com.mobile.standalone.dto.ResultDistributionItemDto;
 import com.mobile.standalone.dto.TaskOverviewDto;
 import com.mobile.standalone.dto.TestResultItemDto;
 import com.mobile.standalone.entity.Application;
+import com.mobile.standalone.dto.FailureDiagnosisDtos;
 import com.mobile.standalone.entity.Task;
+import com.mobile.standalone.entity.TaskFailureDiagnosis;
 import com.mobile.standalone.entity.TaskExecution;
 import com.mobile.standalone.mapper.ApplicationMapper;
 import com.mobile.standalone.mapper.DeviceMapper;
@@ -15,7 +17,10 @@ import com.mobile.standalone.mapper.TaskMapper;
 import com.mobile.standalone.entity.Device;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mobile.standalone.util.ExecutionLogJson;
+import com.mobile.standalone.util.TestEnvironment;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -32,22 +37,21 @@ import java.util.Map;
  * 支持功能基础质量测试、兼容性测试、性能基础质量测试。
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class TaskOverviewService {
 
     private static final String EXECUTOR_FIXED = "杨俊俊";
     private static final String RESULT_PASS = "通过";
     private static final String RESULT_FAIL = "不通过";
+    private static final String RESULT_WARN = "告警";
     private static final String RESULT_NOT_RUN = "未执行";
     private static final String RESULT_DEVICE_DEPENDENT = "设备依赖";
-    /** 功能基础质量测试时，概览统计区块标题 */
-    private static final String SUMMARY_TITLE_FUNCTIONAL_QUALITY = "功能质量达标率";
     /** 兼容性测试时，概览统计区块标题 */
     private static final String SUMMARY_TITLE_COMPATIBILITY = "兼容性满足度";
 
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = ExecutionLogJson.mapper();
     private static final TypeReference<Map<String, String>> MAP_STRING_STRING = new TypeReference<>() {};
-    private static final TypeReference<List<ExecutionLogEntryDto>> EXECUTION_LOG_TYPE = new TypeReference<>() {};
 
     private final TaskMapper taskMapper;
     private final TaskExecutionMapper executionMapper;
@@ -55,10 +59,12 @@ public class TaskOverviewService {
     private final DeviceMapper deviceMapper;
     private final DeviceManager deviceManager;
     private final FunctionalTestScenarioService scenarioService;
+    private final FailureDiagnosisService diagnosisService;
 
     /**
      * 获取任务详情概览，用于前端任务详情页展示。
-     * 支持 FUNCTIONAL_QUALITY_TEST、COMPATIBILITY_TEST、PERFORMANCE_BASELINE_TEST；其他类型返回 null。
+     * 支持 FUNCTIONAL_QUALITY_TEST、COMPATIBILITY_TEST、PERFORMANCE_BASELINE_TEST、
+     * SCENARIO_PERFORMANCE_TEST、UI_FLOW_TEST；其他类型返回 null。
      */
     public TaskOverviewDto getOverview(String taskId) {
         Task task = taskMapper.findById(taskId);
@@ -66,7 +72,11 @@ public class TaskOverviewService {
             return null;
         }
         Task.TaskType type = task.getTaskType();
-        if (type != Task.TaskType.FUNCTIONAL_QUALITY_TEST && type != Task.TaskType.COMPATIBILITY_TEST && type != Task.TaskType.PERFORMANCE_BASELINE_TEST) {
+        if (type != Task.TaskType.FUNCTIONAL_QUALITY_TEST
+                && type != Task.TaskType.COMPATIBILITY_TEST
+                && type != Task.TaskType.PERFORMANCE_BASELINE_TEST
+                && type != Task.TaskType.SCENARIO_PERFORMANCE_TEST
+                && type != Task.TaskType.UI_FLOW_TEST) {
             return null;
         }
 
@@ -101,7 +111,9 @@ public class TaskOverviewService {
             dto.setExecutionStatus(dto.getStatus());
             dto.setErrorMessage(latest.getErrorMessage());
             List<ExecutionLogEntryDto> discovery = ScreenshotDiscoveryService.discoverStepScreenshots(taskId);
-            List<ExecutionLogEntryDto> executionLog = !discovery.isEmpty() ? discovery : parseExecutionLog(latest.getExecutionLog());
+            List<ExecutionLogEntryDto> fromDb = parseExecutionLog(latest.getExecutionLog());
+            // 优先用库内步骤日志（含 status/message）；磁盘发现仅补截图。旧逻辑「有截图就整表替换」会导致步骤结果丢失。
+            List<ExecutionLogEntryDto> executionLog = mergeExecutionLogWithDiscovery(fromDb, discovery);
             if (executionLog != null) {
                 fillScreenshotUrls(executionLog, taskId);
             }
@@ -110,28 +122,61 @@ public class TaskOverviewService {
             dto.setStartTime(null);
             dto.setDuration(null);
             dto.setReportPath(null);
-            dto.setExecutionLog(java.util.Collections.emptyList());
+            // 无 execution 行时仍展示磁盘上的流程截图（此前会整页「暂无截图」）
+            List<ExecutionLogEntryDto> discovery = ScreenshotDiscoveryService.discoverStepScreenshots(taskId);
+            if (!discovery.isEmpty()) {
+                fillScreenshotUrls(discovery, taskId);
+                dto.setExecutionLog(discovery);
+            } else {
+                dto.setExecutionLog(java.util.Collections.emptyList());
+            }
             dto.setStatus(task.getStatus() != null ? task.getStatus().name() : null);
             dto.setExecutionStatus(dto.getStatus());
             dto.setErrorMessage(null);
         }
 
-        if (type == Task.TaskType.FUNCTIONAL_QUALITY_TEST) {
-            dto.setSummarySectionTitle(SUMMARY_TITLE_FUNCTIONAL_QUALITY);
-            Boolean passed = latest == null ? null : (latest.getStatus() == TaskExecution.ExecutionStatus.COMPLETED);
+        String environment = readEnvironment(task.getConfig());
+        dto.setEnvironment(environment);
+        dto.setEnvironmentLabel(TestEnvironment.label(environment));
+
+        TaskFailureDiagnosis diagnosis = safeCurrentDiagnosis(taskId);
+        dto.setFailureDiagnosis(diagnosis);
+
+        if (type == Task.TaskType.UI_FLOW_TEST) {
+            dto.setSummarySectionTitle("流程步骤通过率");
+            dto.setTestType(type.getDisplayName());
+            List<ExecutionLogEntryDto> executionLog = dto.getExecutionLog();
+            if (executionLog == null || executionLog.isEmpty()) {
+                executionLog = parseExecutionLog(latest != null ? latest.getExecutionLog() : null);
+            }
+            List<TestResultItemDto> items = buildUiFlowResultItems(executionLog);
+            dto.setTestResultItems(items);
+            dto.setCompatibilitySummary(withFunctionalHealth(buildSummaryFromItems(items), isFlaky(diagnosis)));
+            dto.setResultDistribution(buildDistributionFromItems(items));
             Map<String, String> executionVariables = parseExecutionVariables(latest != null ? latest.getExecutionVariables() : null);
             dto.setExecutionVariables(executionVariables);
-            List<ExecutionLogEntryDto> executionLog = parseExecutionLog(latest != null ? latest.getExecutionLog() : null);
-            List<TestResultItemDto> items = buildFunctionalQualityResultItems(task, passed, executionVariables, executionLog);
+        } else if (type == Task.TaskType.FUNCTIONAL_QUALITY_TEST) {
+            // 硬编码场景已下线：历史任务仅按执行日志通用展示
+            dto.setSummarySectionTitle("功能基础质量(已下线)");
+            dto.setTestType(type.getDisplayName());
+            List<ExecutionLogEntryDto> executionLog = dto.getExecutionLog();
+            if (executionLog == null || executionLog.isEmpty()) {
+                executionLog = parseExecutionLog(latest != null ? latest.getExecutionLog() : null);
+            }
+            List<TestResultItemDto> items = buildUiFlowResultItems(executionLog);
+            if (items == null || items.isEmpty()) {
+                String sk = task.getScenarioKey() != null ? task.getScenarioKey() : "";
+                items = List.of(new TestResultItemDto("已下线",
+                        sk.isBlank() ? "请改用流程编排查看新报告" : "场景 " + sk + " 已下线",
+                        RESULT_NOT_RUN, null, "功能基础质量硬编码已移除"));
+            }
             dto.setTestResultItems(items);
             dto.setCompatibilitySummary(buildSummaryFromItems(items));
             dto.setResultDistribution(buildDistributionFromItems(items));
-            String sk = task.getScenarioKey() != null ? task.getScenarioKey().trim().toLowerCase() : null;
-            if (("cs_ended_match_detail_analysis".equals(sk) || "cs_ended_match_detail_analysis_android".equals(sk))
-                    && executionLog != null && !executionLog.isEmpty()) {
-                dto.setParticipatingTeams(extractParticipatingTeams(executionLog));
-            }
-        } else if (type == Task.TaskType.PERFORMANCE_BASELINE_TEST) {
+            Map<String, String> executionVariables = parseExecutionVariables(latest != null ? latest.getExecutionVariables() : null);
+            dto.setExecutionVariables(executionVariables);
+        } else if (type == Task.TaskType.PERFORMANCE_BASELINE_TEST
+                || type == Task.TaskType.SCENARIO_PERFORMANCE_TEST) {
             dto.setSummarySectionTitle("性能测试结果");
             Boolean passed = latest == null ? null : (latest.getStatus() == TaskExecution.ExecutionStatus.COMPLETED);
             List<ExecutionLogEntryDto> executionLog = parseExecutionLog(latest != null ? latest.getExecutionLog() : null);
@@ -151,990 +196,8 @@ public class TaskOverviewService {
         return dto;
     }
 
-    /**
-     * 功能基础质量测试：按场景输出报告测项，检测规则必须与本次执行逻辑一致。
-     * - 搜索：启动、登录（判断/可能跳过）、搜索（点击搜索、输入关键词、验证结果），按执行日志逐条生成，分类为 启动/登录/搜索。
-     * - 设置/设置-我的账号/设置-我的兴趣/设置-高校认证：按执行日志逐条生成测项（侧边栏、设置页、子页、截图等），不套用登录测项。
-     * - 当 scenario_key 为空时，根据执行日志内容推断是否为设置相关场景，避免误展示「输入手机号/验证码」。
-     * - 登录等其它场景：沿用「启动、登录-输入手机号/验证码/完成登录」+ 整体 passed。
-     */
-    private List<TestResultItemDto> buildFunctionalQualityResultItems(Task task, Boolean passed, Map<String, String> executionVariables, List<ExecutionLogEntryDto> executionLog) {
-        String scenarioKey = task != null && task.getScenarioKey() != null ? task.getScenarioKey().trim().toLowerCase() : null;
-        // 搜索-最新/最热视频播放：优先按 scenarioKey 展示预定义检测规则，有完整执行日志时再按日志细化
-        if ("search_video_latest_hottest".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isSearchVideoLatestHottestLog(executionLog)) {
-                return buildSearchScenarioResultItems(executionLog, scenarioKey);
-            }
-            return buildSearchVideoLatestHottestPredefinedItems(passed);
-        }
-        // CS资讯页浏览：按执行日志生成，分类为 启动/登录/CS资讯
-        if ("cs_news_browsing".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsNewsBrowsingLog(executionLog)) {
-                return buildCsNewsBrowsingResultItems(executionLog);
-            }
-            return buildCsNewsBrowsingPredefinedItems(passed);
-        }
-        // CS-动态页浏览：按执行日志生成，分类为 启动/登录/CS-动态
-        if ("cs_dynamic_browsing".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsDynamicBrowsingLog(executionLog)) {
-                return buildCsDynamicBrowsingResultItems(executionLog);
-            }
-            return buildCsDynamicBrowsingPredefinedItems(passed);
-        }
-        // CS-动态-关注更多战队选手：按执行日志生成，分类为 启动/登录/关注更多
-        if ("cs_dynamic_follow_more".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsDynamicFollowMoreLog(executionLog)) {
-                return buildCsDynamicFollowMoreResultItems(executionLog);
-            }
-            return buildCsDynamicFollowMorePredefinedItems(passed);
-        }
-        // CS-热评-浏览：按执行日志生成，分类为 启动/登录/CS-热评-浏览
-        if ("cs_hot_comment_browse".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsHotCommentBrowseLog(executionLog)) {
-                return buildCsHotCommentBrowseResultItems(executionLog);
-            }
-            return buildCsHotCommentBrowsePredefinedItems(passed);
-        }
-        // CS-热评点赞：按执行日志生成，分类为 启动/登录/CS-热评点赞
-        if ("cs_hot_comment_like".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsHotCommentLikeLog(executionLog)) {
-                return buildCsHotCommentLikeResultItems(executionLog);
-            }
-            return buildCsHotCommentLikePredefinedItems(passed);
-        }
-        // CS-热评页面跳转至用户个人页面：按执行日志生成，分类为 启动/登录/热评跳转
-        if ("cs_hot_comment_to_user_profile".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsHotCommentToUserProfileLog(executionLog)) {
-                return buildCsHotCommentToUserProfileResultItems(executionLog);
-            }
-            return buildCsHotCommentToUserProfilePredefinedItems(passed);
-        }
-        // CS-热评内容跳转：按执行日志生成，分类为 启动/登录/热评内容跳转
-        if ("cs_hot_comment_content_jump".equals(scenarioKey)) {
-            return buildCsHotCommentContentJumpPredefinedItems(passed);
-        }
-        // CS-评论热评内容：按执行日志生成，分类为 启动/登录/评论热评内容
-        if ("cs_comment_hot_comment_content".equals(scenarioKey)) {
-            return buildCsCommentHotCommentContentPredefinedItems(passed);
-        }
-        // CS-视频播放|点赞|评论|分享：按执行日志生成，分类为 启动/登录/CS-视频播放/点赞/评论/分享
-        if ("cs_video_play_like_comment_share".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsVideoPlayLikeCommentShareLog(executionLog)) {
-                return buildCsVideoPlayLikeCommentShareResultItems(executionLog);
-            }
-            return buildCsVideoPlayLikeCommentSharePredefinedItems(passed);
-        }
-        // CS-视频浏览：按执行日志生成，分类为 启动/登录/CS-视频浏览
-        if ("cs_video_browse".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsVideoBrowseLog(executionLog)) {
-                return buildCsVideoBrowseResultItems(executionLog);
-            }
-            return buildCsVideoBrowsePredefinedItems(passed);
-        }
-        // CS-活动浏览：按执行日志生成，分类为 启动/登录/CS-活动
-        if ("cs_activity_browse".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsActivityBrowseLog(executionLog)) {
-                return buildCsActivityBrowseResultItems(executionLog);
-            }
-            return buildCsActivityBrowsePredefinedItems(passed);
-        }
-        // CS-赛事-赛程浏览：按执行日志生成，分类为 启动/登录/CS-赛事-赛程
-        if ("cs_event_schedule_browse".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsEventScheduleBrowseLog(executionLog)) {
-                return buildCsEventScheduleBrowseResultItems(executionLog);
-            }
-            return buildCsEventScheduleBrowsePredefinedItems(passed);
-        }
-        // CS-已结束比赛-赛事详情-数据：按执行日志生成，分类为 启动/登录/CS-赛事-赛程
-        if ("cs_ended_match_detail_data".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsEndedMatchDetailDataLog(executionLog)) {
-                return buildCsEndedMatchDetailDataResultItems(executionLog);
-            }
-            return buildCsEndedMatchDetailDataPredefinedItems(passed);
-        }
-        // CS-已结束比赛-赛事详情-分析：按执行日志生成，参赛队伍战队数据输出至测试结果分布
-        if ("cs_ended_match_detail_analysis".equals(scenarioKey)) {
-            if (executionLog != null && !executionLog.isEmpty() && isCsEndedMatchDetailAnalysisLog(executionLog)) {
-                return buildCsEndedMatchDetailAnalysisResultItems(executionLog);
-            }
-            return buildCsEndedMatchDetailAnalysisPredefinedItems(passed);
-        }
-        boolean fromLog = false;
-        String categoryForLog = null;
-        boolean searchFromLog = false;
-        if (executionLog != null && !executionLog.isEmpty()) {
-            // 搜索场景：按执行日志逐条生成，每步归类为 启动/登录/搜索 等，测试结果分布展示对应分类
-            if ("search".equals(scenarioKey) || "search_tabs".equals(scenarioKey) || "search_user_follow".equals(scenarioKey) || "search_video_latest_hottest".equals(scenarioKey) || isSearchLog(executionLog) || isSearchUserFollowLog(executionLog) || isSearchVideoLatestHottestLog(executionLog)) {
-                searchFromLog = true;
-            } else if (isSettingsOrSettingsAccountLog(executionLog)) {
-                fromLog = true;
-                categoryForLog = inferSettingsCategoryFromLog(executionLog);
-            } else if ("settings".equals(scenarioKey)) {
-                fromLog = true;
-                categoryForLog = "设置";
-            } else if ("settings_account".equals(scenarioKey)) {
-                fromLog = true;
-                categoryForLog = "设置-我的账号";
-            } else if ("settings_interests".equals(scenarioKey)) {
-                fromLog = true;
-                categoryForLog = "设置-我的兴趣";
-            } else if ("settings_school_cert".equals(scenarioKey)) {
-                fromLog = true;
-                categoryForLog = "设置-高校认证";
-            }
-        }
-        if (searchFromLog) {
-            String effectiveScenarioKey = scenarioKey;
-            if (effectiveScenarioKey == null && isSearchVideoLatestHottestLog(executionLog)) {
-                effectiveScenarioKey = "search_video_latest_hottest";
-            }
-            return buildSearchScenarioResultItems(executionLog, effectiveScenarioKey);
-        }
-        if (fromLog && categoryForLog != null) {
-            List<TestResultItemDto> list = new ArrayList<>();
-            for (ExecutionLogEntryDto entry : executionLog) {
-                String step = entry.getStep() != null ? entry.getStep() : "步骤";
-                if (isLogMetaStep(step)) continue; // 仅展示实际校验步骤，不展示头部/汇总等元信息
-                String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-                list.add(new TestResultItemDto(categoryForLog, step, result, null, entry.getMessage()));
-            }
-            return list;
-        }
-        // 任务配置为设置/设置-我的账号/设置-我的兴趣/设置-高校认证但无执行日志时：按执行状态决定通过/未执行，避免达标率为 0
-        if (executionLog == null || executionLog.isEmpty()) {
-            String resultWhenNoLog = Boolean.TRUE.equals(passed) ? RESULT_PASS : RESULT_NOT_RUN;
-            String detailWhenNoLog = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-            if ("settings".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("设置", "进入设置页并截图", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("settings_account".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("设置-我的账号", "进入我的账号页并截图", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("settings_interests".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("设置-我的兴趣", "进入我的兴趣页并截图", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("settings_school_cert".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("设置-高校认证", "进入高校认证页并截图", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("search_tabs".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("搜索Tab切换", "搜索后依次切换综合/新闻/社区/视频/梗百科/选手/战队/用户", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("search_user_follow".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("搜索用户添加关注", "搜索Kak1→校验结果→点击更多→用户Tab→添加关注", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("search_video_latest_hottest".equals(scenarioKey)) {
-                return List.of(new TestResultItemDto("搜索-最新最热视频", "启动→登录→搜索→视频Tab→最新/最热视频播放→加载超时返回→向上滑动", resultWhenNoLog, null, detailWhenNoLog));
-            }
-            if ("cs_video_play_like_comment_share".equals(scenarioKey)) {
-                return buildCsVideoPlayLikeCommentSharePredefinedItems(passed);
-            }
-            if ("cs_video_browse".equals(scenarioKey)) {
-                return buildCsVideoBrowsePredefinedItems(passed);
-            }
-            if ("cs_activity_browse".equals(scenarioKey)) {
-                return buildCsActivityBrowsePredefinedItems(passed);
-            }
-            if ("cs_event_schedule_browse".equals(scenarioKey)) {
-                return buildCsEventScheduleBrowsePredefinedItems(passed);
-            }
-            if ("cs_ended_match_detail_data".equals(scenarioKey)) {
-                return buildCsEndedMatchDetailDataPredefinedItems(passed);
-            }
-            if ("cs_ended_match_detail_analysis".equals(scenarioKey)) {
-                return buildCsEndedMatchDetailAnalysisPredefinedItems(passed);
-            }
-        }
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String phoneMasked = executionVariables != null ? executionVariables.get("phoneNumberMasked") : null;
-        String codeMasked = executionVariables != null ? executionVariables.get("verificationCodeMasked") : null;
-        List<TestResultItemDto> list = new ArrayList<>();
-        list.add(new TestResultItemDto("启动", "启动应用程序", result, null, null));
-        list.add(new TestResultItemDto("登录", "输入手机号", result, null, phoneMasked));
-        list.add(new TestResultItemDto("登录", "输入验证码", result, null, codeMasked));
-        list.add(new TestResultItemDto("登录", "完成登录", result, null, null));
-        return list;
-    }
+    /** 旧功能基础质量场景拼装已移除；历史任务走 buildUiFlowResultItems。 */
 
-    /** 是否为日志中的元信息步骤（不作为检测规则展示） */
-    private boolean isLogMetaStep(String step) {
-        if (step == null) return true;
-        String s = step.trim();
-        return "开始测试".equals(s) || "测试场景".equals(s) || "测试应用".equals(s) || "测试设备".equals(s) || "汇总".equals(s);
-    }
-
-    /** 根据执行日志判断是否为「设置」或「设置-我的账号」或「设置-我的兴趣」或「设置-高校认证」场景（避免误用登录测项） */
-    private boolean isSettingsOrSettingsAccountLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            String msg = entry.getMessage() != null ? entry.getMessage() : "";
-            if (step.contains("设置-我的账号") || step.contains("我的账号页") || msg.contains("设置-我的账号") || msg.contains("我的账号"))
-                return true;
-            if (step.contains("设置-我的兴趣") || step.contains("我的兴趣页") || msg.contains("设置-我的兴趣") || msg.contains("我的兴趣"))
-                return true;
-            if (step.contains("设置-高校认证") || step.contains("高校认证页") || msg.contains("设置-高校认证") || msg.contains("高校认证"))
-                return true;
-            if (step.contains("设置测试") || step.contains("设置页面") || msg.contains("设置测试") || msg.contains("设置页"))
-                return true;
-        }
-        return false;
-    }
-
-    /** 从执行日志推断分类：有「高校认证」→「设置-高校认证」，有「我的兴趣」→「设置-我的兴趣」，有「我的账号」→「设置-我的账号」，否则「设置」 */
-    private String inferSettingsCategoryFromLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return "设置";
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            String msg = entry.getMessage() != null ? entry.getMessage() : "";
-            if (step.contains("高校认证") || msg.contains("高校认证")) return "设置-高校认证";
-            if (step.contains("我的兴趣") || msg.contains("我的兴趣")) return "设置-我的兴趣";
-            if (step.contains("我的账号") || msg.contains("我的账号")) return "设置-我的账号";
-        }
-        return "设置";
-    }
-
-    /** 搜索场景：按执行日志逐条生成测项，每步归类为 启动/登录/搜索 或 搜索-最新最热视频 的细分分类 */
-    private List<TestResultItemDto> buildSearchScenarioResultItems(List<ExecutionLogEntryDto> executionLog, String scenarioKey) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        boolean isVideoLatestHottest = "search_video_latest_hottest".equals(scenarioKey);
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferSearchStepCategory(step, isVideoLatestHottest);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断搜索场景下的分类：启动、登录、搜索；search_video_latest_hottest 时细分为 视频Tab、最新、最热、返回校验、滑动 */
-    private String inferSearchStepCategory(String step, boolean isVideoLatestHottest) {
-        if (step == null) return "搜索";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("判断登录") || s.contains("侧边栏") || s.contains("获取驱动") || s.contains("前置登录")) return "登录";
-        if (isVideoLatestHottest) {
-            if (s.contains("点击视频Tab") || s.contains("视频 Tab")) return "视频Tab";
-            if (s.contains("判断最新") || (s.contains("随机选视频") && !s.contains("最热")) || (s.contains("播放视频") && !s.contains("最热")) || (s.contains("检测加载超时") && !s.contains("最热"))) return "最新";
-            if (s.contains("判断最热") || s.contains("点击最热") || s.contains("随机选视频(最热)") || s.contains("播放视频(最热)") || s.contains("检测加载超时(最热)")) return "最热";
-            if (s.contains("验证返回") || s.contains("点击返回") || s.contains("返回视频页")) return "返回校验";
-            if (s.contains("向上滑动") || s.contains("滑动完成") || s.contains("滑动结束")) return "滑动";
-        }
-        return "搜索";
-    }
-
-    /** 执行日志是否包含搜索相关步骤 */
-    private boolean isSearchLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("搜索") || step.contains("点击搜索") || step.contains("输入搜索") || step.contains("验证搜索")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含搜索Tab切换相关步骤 */
-    private boolean isSearchTabSwitchLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("搜索Tab切换") || step.contains("点击Tab") || step.contains("校验综合Tab")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含搜索用户添加关注相关步骤 */
-    private boolean isSearchUserFollowLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("搜索用户添加关注") || step.contains("点击关注") || step.contains("取消关注") || step.contains("校验用户Tab")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含搜索-最新/最热视频播放相关步骤 */
-    private boolean isSearchVideoLatestHottestLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("点击视频Tab") || step.contains("判断最新") || step.contains("判断最热") || step.contains("点击最热") || step.contains("向上滑动") || step.contains("srl_classics_title")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS资讯页浏览 相关步骤 */
-    private boolean isCsNewsBrowsingLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("点击CS") || step.contains("点击资讯") || step.contains("CS资讯")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-动态页浏览 相关步骤 */
-    private boolean isCsDynamicBrowsingLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("点击动态") || step.contains("CS-动态") || step.contains("关注更多战队选手")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-动态-关注更多战队选手 相关步骤 */
-    private boolean isCsDynamicFollowMoreLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("选择关注") || step.contains("点击战队") || step.contains("点击赛事") || step.contains("点击选手") || step.contains("关注更多")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-热评-浏览 相关步骤 */
-    private boolean isCsHotCommentBrowseLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("热评") || step.contains("CS-热评-浏览")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-热评点赞 相关步骤 */
-    private boolean isCsHotCommentLikeLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("点赞") || step.contains("排行5") || step.contains("CS-热评点赞")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-热评页面跳转至用户个人页面 相关步骤 */
-    private boolean isCsHotCommentToUserProfileLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("排行6") || step.contains("头像") || step.contains("用户个人页面")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-视频播放|点赞|评论|分享 相关步骤 */
-    private boolean isCsVideoPlayLikeCommentShareLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("点击视频播放") || step.contains("点赞") || step.contains("点击评论") || step.contains("分享") || step.contains("取消分享")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-视频浏览 相关步骤 */
-    private boolean isCsVideoBrowseLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("点击视频") || step.contains("向上滑动") || step.contains("向下滑动") || step.contains("CS-视频")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-活动浏览 相关步骤 */
-    private boolean isCsActivityBrowseLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("活动") || step.contains("资讯") || step.contains("向左滑动") || step.contains("随机点击活动")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-赛事-赛程浏览 相关步骤 */
-    private boolean isCsEventScheduleBrowseLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("赛事") || step.contains("赛程") || step.contains("今天") || step.contains("周×") || step.contains("向右滑动") || step.contains("向左滑动")) return true;
-        }
-        return false;
-    }
-
-    /** 执行日志是否包含 CS-已结束比赛-赛事详情-分析 相关步骤 */
-    private boolean isCsEndedMatchDetailAnalysisLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("分析") || step.contains("对阵图") || step.contains("概览") || step.contains("参赛队伍")) return true;
-        }
-        return false;
-    }
-
-    /** 从执行日志中提取参赛队伍名称（step=参赛队伍 且 message 为战队名，排除系统消息） */
-    private List<String> extractParticipatingTeams(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return List.of();
-        List<String> teams = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            String msg = entry.getMessage() != null ? entry.getMessage().trim() : "";
-            if (!step.contains("参赛队伍") || msg.isEmpty()) continue;
-            if (msg.startsWith("共提取") || msg.startsWith("未") || msg.startsWith("已找到")
-                    || msg.contains("判断") || msg.contains("等待") || msg.contains("元素")) continue;
-            teams.add(msg);
-        }
-        return teams;
-    }
-
-    /** 执行日志是否包含 CS-已结束比赛-赛事详情-数据 相关步骤 */
-    private boolean isCsEndedMatchDetailDataLog(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null) return false;
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "";
-            if (step.contains("已结束") || step.contains("地图BP") || step.contains("地图分析") || step.contains("总览") || step.contains("对位数据") || step.contains("赛后数据") || step.contains("死亡游乐园") || step.contains("基础数据")) return true;
-        }
-        return false;
-    }
-
-    /** CS资讯页浏览：按执行日志生成测项，分类为 启动/登录/CS资讯 */
-    private List<TestResultItemDto> buildCsNewsBrowsingResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsNewsBrowsingStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** CS-动态页浏览：按执行日志生成测项，分类为 启动/登录/CS-动态 */
-    private List<TestResultItemDto> buildCsDynamicBrowsingResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsDynamicBrowsingStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS资讯页浏览 分类 */
-    private String inferCsNewsBrowsingStepCategory(String step) {
-        if (step == null) return "CS资讯";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("点击资讯") || s.contains("向上滑动") || s.contains("向下滑动")) return "CS资讯";
-        return "CS资讯";
-    }
-
-    /** 根据步骤名推断 CS-动态页浏览 分类 */
-    private String inferCsDynamicBrowsingStepCategory(String step) {
-        if (step == null) return "CS-动态";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("点击动态") || s.contains("向上滑动") || s.contains("向下滑动") || s.contains("滑动完成")) return "CS-动态";
-        return "CS-动态";
-    }
-
-    /** CS-动态-关注更多战队选手：按执行日志生成测项，分类为 启动/登录/关注更多 */
-    private List<TestResultItemDto> buildCsDynamicFollowMoreResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsDynamicFollowMoreStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-动态-关注更多战队选手 分类 */
-    private String inferCsDynamicFollowMoreStepCategory(String step) {
-        if (step == null) return "关注更多";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("点击动态") || s.contains("选择关注") || s.contains("点击战队") || s.contains("点击赛事") || s.contains("点击其他") || s.contains("点击选手") || s.contains("关注") || s.contains("向上滑动") || s.contains("点击返回")) return "关注更多";
-        return "关注更多";
-    }
-
-    /** CS-热评-浏览：按执行日志生成测项，分类为 启动/登录/CS-热评-浏览 */
-    private List<TestResultItemDto> buildCsHotCommentBrowseResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsHotCommentBrowseStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-热评-浏览 分类 */
-    private String inferCsHotCommentBrowseStepCategory(String step) {
-        if (step == null) return "CS-热评-浏览";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("热评") || s.contains("向上滑动") || s.contains("向下滑动")) return "CS-热评-浏览";
-        return "CS-热评-浏览";
-    }
-
-    /** CS-热评点赞：按执行日志生成测项，分类为 启动/登录/CS-热评点赞 */
-    private List<TestResultItemDto> buildCsHotCommentLikeResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsHotCommentLikeStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-热评点赞 分类 */
-    private String inferCsHotCommentLikeStepCategory(String step) {
-        if (step == null) return "CS-热评点赞";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("热评") || s.contains("点赞") || s.contains("排行5") || s.contains("向下滑动")) return "CS-热评点赞";
-        return "CS-热评点赞";
-    }
-
-    /** CS-热评页面跳转至用户个人页面：按执行日志生成测项，分类为 启动/登录/热评跳转 */
-    private List<TestResultItemDto> buildCsHotCommentToUserProfileResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsHotCommentToUserProfileStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-热评页面跳转至用户个人页面 分类 */
-    private String inferCsHotCommentToUserProfileStepCategory(String step) {
-        if (step == null) return "热评跳转";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("热评") || s.contains("排行6") || s.contains("头像") || s.contains("向上滑动")) return "热评跳转";
-        return "热评跳转";
-    }
-
-    /** CS-热评页面跳转至用户个人页面 预定义检测规则 */
-    private List<TestResultItemDto> buildCsHotCommentToUserProfilePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("热评跳转", "CS→热评→向上滑动至排行N", result, null, detail),
-                new TestResultItemDto("热评跳转", "点击排行旁头像→进入用户个人页面", result, null, detail)
-        );
-    }
-
-    /** CS-热评内容跳转 预定义检测规则 */
-    private List<TestResultItemDto> buildCsHotCommentContentJumpPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("热评内容跳转", "CS→热评→进入热评页面", result, null, detail),
-                new TestResultItemDto("热评内容跳转", "若出现评论内容则点击", result, null, detail)
-        );
-    }
-
-    /** CS-评论热评内容 预定义检测规则 */
-    private List<TestResultItemDto> buildCsCommentHotCommentContentPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("评论热评内容", "CS→热评→点击评论内容→进入评论页", result, null, detail),
-                new TestResultItemDto("评论热评内容", "向上滑动(出现已显示全部则停止,未出现则滑动几次后也停止)→输入不错→表情包→选择不上班→发布→点击关闭→点击返回", result, null, detail)
-        );
-    }
-
-    /** CS-视频播放|点赞|评论|分享：按执行日志生成测项，分类为 启动/登录/CS-视频播放/点赞/评论/分享 */
-    private List<TestResultItemDto> buildCsVideoPlayLikeCommentShareResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsVideoPlayLikeCommentShareStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-视频播放|点赞|评论|分享 分类 */
-    private String inferCsVideoPlayLikeCommentShareStepCategory(String step) {
-        if (step == null) return "CS-视频播放";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("等待视频元素") || s.contains("点击视频") || s.contains("点击视频播放") || s.contains("视频进度条")) return "CS-视频播放";
-        if (s.contains("点赞")) return "点赞";
-        if (s.contains("评论") || s.contains("点击输入框") || s.contains("输入评论") || s.contains("选择表情") || s.contains("发布评论") || s.contains("关闭弹窗")) return "评论";
-        if (s.contains("分享") || s.contains("取消分享")) return "分享";
-        if (s.contains("返回")) return "返回";
-        return "CS-视频播放";
-    }
-
-    /** CS-视频播放|点赞|评论|分享 预定义检测规则（按实际步骤） */
-    private List<TestResultItemDto> buildCsVideoPlayLikeCommentSharePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序、等待页面就绪", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-视频播放", "CS→视频→选择第一个视频点击播放、判断进度条", result, null, detail),
-                new TestResultItemDto("点赞", "判断点赞元素存在则点击", result, null, detail),
-                new TestResultItemDto("评论", "点击评论→输入不错→表情加油加油→发布→关闭弹窗", result, null, detail),
-                new TestResultItemDto("分享", "判断分享按钮→点击分享→取消", result, null, detail),
-                new TestResultItemDto("返回", "点击返回", result, null, detail)
-        );
-    }
-
-    /** CS-视频浏览：按执行日志生成测项，分类为 启动/登录/CS-视频浏览 */
-    private List<TestResultItemDto> buildCsVideoBrowseResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsVideoBrowseStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-视频浏览 分类（按实际步骤） */
-    private String inferCsVideoBrowseStepCategory(String step) {
-        if (step == null) return "CS-视频浏览";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回")) return "进入CS";
-        if (s.contains("等待视频元素") || s.contains("点击视频")) return "进入CS-视频页";
-        if (s.contains("向上滑动") || s.contains("向下滑动")) return "CS-视频浏览";
-        return "CS-视频浏览";
-    }
-
-    /** CS-视频浏览 预定义检测规则（按实际步骤） */
-    private List<TestResultItemDto> buildCsVideoBrowsePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序、等待页面就绪", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("进入CS", "判断CS出现并点击", result, null, detail),
-                new TestResultItemDto("进入CS-视频页", "判断视频出现并点击", result, null, detail),
-                new TestResultItemDto("CS-视频浏览", "向上滑动浏览", result, null, detail)
-        );
-    }
-
-    /** CS-活动浏览：按执行日志生成测项，分类按实际步骤细分 */
-    private List<TestResultItemDto> buildCsActivityBrowseResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsActivityBrowseStepCategory(step, entry.getMessage());
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名+说明推断 CS-活动浏览 分类（按实际步骤细分） */
-    private String inferCsActivityBrowseStepCategory(String step, String message) {
-        if (step == null) return "CS-活动";
-        String s = step.trim();
-        String msg = message != null ? message : "";
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回")) return "进入CS";
-        if (s.contains("资讯") || s.contains("向左滑动") || s.contains("滑动至活动") || s.contains("活动已出现")) return "滑动至活动";
-        if (s.contains("点击活动") && msg.contains("已进入活动页面")) return "进入活动页";
-        if (s.contains("向上滑动") || s.contains("向下滑动")) return "活动页浏览";
-        if (s.contains("随机点击活动") || (s.contains("点击活动") && (msg.contains("活动详情") || msg.contains("第一个活动") || msg.contains("跳过")))) return "进入活动详情";
-        return "CS-活动";
-    }
-
-    /** CS-赛事-赛程浏览：按执行日志生成测项，分类为 启动/登录/CS-赛事-赛程 */
-    private List<TestResultItemDto> buildCsEventScheduleBrowseResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsEventScheduleBrowseStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-赛事-赛程浏览 分类 */
-    private String inferCsEventScheduleBrowseStepCategory(String step) {
-        if (step == null) return "CS-赛事-赛程";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("尝试返回") || s.contains("赛事") || s.contains("点击赛事") || s.contains("点击周×") || s.contains("今天")) return "CS-赛事-赛程";
-        if (s.contains("向上滑动") || s.contains("向下滑动") || s.contains("向左滑动") || s.contains("向右滑动")) return "CS-赛事-赛程";
-        return "CS-赛事-赛程";
-    }
-
-    /** CS-已结束比赛-赛事详情-分析：按执行日志生成测项，参赛队伍战队数据输出至测试结果分布 */
-    private List<TestResultItemDto> buildCsEndedMatchDetailAnalysisResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsEndedMatchDetailAnalysisStepCategory(step, entry.getMessage());
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            String msg = entry.getMessage();
-            // 参赛队伍：战队名作为测试项名称，便于在检测规则表格中直接看到
-            String displayName = step;
-            if (step != null && step.contains("参赛队伍") && msg != null && !msg.isBlank()
-                    && !msg.startsWith("共提取") && !msg.startsWith("未") && !msg.startsWith("已找到")
-                    && !msg.contains("判断") && !msg.contains("等待")) {
-                displayName = msg.trim();
-            }
-            list.add(new TestResultItemDto(category, displayName, result, null, msg));
-        }
-        return list;
-    }
-
-    /** 根据步骤名+说明推断 CS-已结束比赛-赛事详情-分析 分类，参赛队伍战队名归入「参赛队伍」以展示于测试结果分布 */
-    private String inferCsEndedMatchDetailAnalysisStepCategory(String step, String message) {
-        if (step == null) return "CS-赛事-赛程";
-        String s = step.trim();
-        if (s.contains("参赛队伍")) return "参赛队伍";
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("赛事") || s.contains("已结束") || s.contains("分析") || s.contains("对阵图") || s.contains("概览")) return "CS-赛事-赛程";
-        return "CS-赛事-赛程";
-    }
-
-    /** CS-已结束比赛-赛事详情-分析 预定义检测规则 */
-    private List<TestResultItemDto> buildCsEndedMatchDetailAnalysisPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序、等待页面就绪", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "CS→赛事→随机点击已结束→分析→对阵图→概览", result, null, detail),
-                new TestResultItemDto("参赛队伍", "提取战队数据并输出至测试结果分布", result, null, detail)
-        );
-    }
-
-    /** CS-已结束比赛-赛事详情-数据：按执行日志生成测项，分类为 启动/登录/CS-赛事-赛程 */
-    private List<TestResultItemDto> buildCsEndedMatchDetailDataResultItems(List<ExecutionLogEntryDto> executionLog) {
-        if (executionLog == null || executionLog.isEmpty()) return List.of();
-        List<TestResultItemDto> list = new ArrayList<>();
-        for (ExecutionLogEntryDto entry : executionLog) {
-            String step = entry.getStep() != null ? entry.getStep() : "步骤";
-            if (isLogMetaStep(step)) continue;
-            String category = inferCsEndedMatchDetailDataStepCategory(step);
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
-            list.add(new TestResultItemDto(category, step, result, null, entry.getMessage()));
-        }
-        return list;
-    }
-
-    /** 根据步骤名推断 CS-已结束比赛-赛事详情-数据 分类 */
-    private String inferCsEndedMatchDetailDataStepCategory(String step) {
-        if (step == null) return "CS-赛事-赛程";
-        String s = step.trim();
-        if (s.contains("启动") || s.contains("应用信息") || s.contains("环境初始化") || s.contains("检测规则") || s.contains("等待页面就绪")) return "启动";
-        if (s.contains("登录") || s.contains("手机号") || s.contains("验证码") || s.contains("前置登录") || s.contains("获取驱动")) return "登录";
-        if (s.contains("等待CS") || s.contains("点击CS") || s.contains("赛事") || s.contains("已结束") || s.contains("数据") || s.contains("地图BP") || s.contains("地图分析") || s.contains("总览") || s.contains("基础数据") || s.contains("对位数据") || s.contains("赛后数据") || s.contains("点击地图")) return "CS-赛事-赛程";
-        return "CS-赛事-赛程";
-    }
-
-    /** CS-已结束比赛-赛事详情-数据 预定义检测规则 */
-    private List<TestResultItemDto> buildCsEndedMatchDetailDataPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序、等待页面就绪", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "CS→赛事→随机点击已结束", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "数据页→若存在地图BP则执行地图分析→总览→基础数据/对位数据切换", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "若存在地图BP则查找地图依次点击，地图页若对位数据不存在则跳过后续", result, null, detail)
-        );
-    }
-
-    /** CS-赛事-赛程浏览 预定义检测规则 */
-    private List<TestResultItemDto> buildCsEventScheduleBrowsePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序、等待页面就绪", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "判断CS出现并点击", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "判断赛事出现并点击进入赛程页", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "向上滑动4次、向下滑动4次", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "判断今天出现→今天处向左滑4次", result, null, detail),
-                new TestResultItemDto("CS-赛事-赛程", "点击周×→周×处向右滑4次→点击周×", result, null, detail)
-        );
-    }
-
-    /** CS-活动浏览 预定义检测规则（按实际步骤） */
-    private List<TestResultItemDto> buildCsActivityBrowsePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序、等待页面就绪", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("进入CS", "判断CS出现并点击", result, null, detail),
-                new TestResultItemDto("滑动至活动", "判断资讯出现、向左滑动直至活动出现", result, null, detail),
-                new TestResultItemDto("进入活动页", "点击活动进入活动页面", result, null, detail),
-                new TestResultItemDto("活动页浏览", "向上滑动5次、向下滑动5次", result, null, detail),
-                new TestResultItemDto("进入活动详情", "随机点击一个活动进入", result, null, detail)
-        );
-    }
-
-    /** CS-热评点赞 预定义检测规则 */
-    private List<TestResultItemDto> buildCsHotCommentLikePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-热评点赞", "CS→热评→首条点赞", result, null, detail),
-                new TestResultItemDto("CS-热评点赞", "向上滑动至排行N→点击排行右侧点赞", result, null, detail)
-        );
-    }
-
-    /** CS-热评-浏览 预定义检测规则 */
-    private List<TestResultItemDto> buildCsHotCommentBrowsePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-热评-浏览", "CS→热评(若出现则点击)", result, null, detail),
-                new TestResultItemDto("CS-热评-浏览", "热评页向上5次、向下5次滑动", result, null, detail)
-        );
-    }
-
-    /** CS-动态-关注更多战队选手 预定义检测规则 */
-    private List<TestResultItemDto> buildCsDynamicFollowMorePredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("关注更多", "CS→动态→点击选择关注", result, null, detail),
-                new TestResultItemDto("关注更多", "选手/战队/赛事/其他/选手(向上滑动2次)", result, null, detail),
-                new TestResultItemDto("关注更多", "点击返回", result, null, detail)
-        );
-    }
-
-    /** CS资讯页浏览 预定义检测规则 */
-    private List<TestResultItemDto> buildCsNewsBrowsingPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS资讯", "等待 CS 元素出现并点击", result, null, detail),
-                new TestResultItemDto("CS资讯", "点击 资讯 进入资讯页", result, null, detail),
-                new TestResultItemDto("CS资讯", "向上滑动 10 次、向下滑动 6 次", result, null, detail)
-        );
-    }
-
-    /** CS-动态页浏览 预定义检测规则 */
-    private List<TestResultItemDto> buildCsDynamicBrowsingPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        return List.of(
-                new TestResultItemDto("启动", "启动应用程序", result, null, detail),
-                new TestResultItemDto("登录", "未登录则执行登录", result, null, detail),
-                new TestResultItemDto("CS-动态", "等待 CS 元素出现并点击", result, null, detail),
-                new TestResultItemDto("CS-动态", "点击 动态 进入 CS-动态 页", result, null, detail),
-                new TestResultItemDto("CS-动态", "向上 5 次、向下 5 次滑动直至出现「关注更多战队选手」", result, null, detail)
-        );
-    }
-
-    /** 搜索-最新/最热视频播放场景的预定义检测规则（与实际测试步骤一致） */
-    private List<TestResultItemDto> buildSearchVideoLatestHottestPredefinedItems(Boolean passed) {
-        String result = passed == null ? RESULT_NOT_RUN : (passed ? RESULT_PASS : RESULT_FAIL);
-        String detail = Boolean.TRUE.equals(passed) ? "执行成功" : "请运行任务后查看检测规则";
-        List<TestResultItemDto> list = new ArrayList<>();
-        list.add(new TestResultItemDto("启动", "启动应用程序", result, null, detail));
-        list.add(new TestResultItemDto("登录", "判断登录状态，未登录则执行登录", result, null, detail));
-        list.add(new TestResultItemDto("搜索", "点击放大镜搜索图标", result, null, detail));
-        list.add(new TestResultItemDto("搜索", "输入关键词 Kak1", result, null, detail));
-        list.add(new TestResultItemDto("搜索", "点击搜索按钮", result, null, detail));
-        list.add(new TestResultItemDto("视频Tab", "点击视频 Tab（模糊匹配）", result, null, detail));
-        list.add(new TestResultItemDto("最新", "判断是否出现「最新」", result, null, detail));
-        list.add(new TestResultItemDto("最新", "随机选 1-5 视频播放", result, null, detail));
-        list.add(new TestResultItemDto("最新", "无论是否加载超时均点击返回至视频页", result, null, detail));
-        list.add(new TestResultItemDto("最热", "判断是否出现「最热」", result, null, detail));
-        list.add(new TestResultItemDto("最热", "点击「最热」Tab", result, null, detail));
-        list.add(new TestResultItemDto("最热", "随机选 1-5 视频播放", result, null, detail));
-        list.add(new TestResultItemDto("最热", "无论是否加载超时均点击返回至视频页", result, null, detail));
-        list.add(new TestResultItemDto("返回校验", "验证返回至最热页面", result, null, detail));
-        list.add(new TestResultItemDto("滑动", "向上滑动直至出现 srl_classics_title", result, null, detail));
-        return list;
-    }
-
-    private Map<String, String> parseExecutionVariables(String json) {
-        if (json == null || json.isBlank()) return new LinkedHashMap<>();
-        try {
-            return JSON.readValue(json, MAP_STRING_STRING);
-        } catch (Exception e) {
-            return new LinkedHashMap<>();
-        }
-    }
-
-    private List<ExecutionLogEntryDto> parseExecutionLog(String executionLogJson) {
-        if (executionLogJson == null || executionLogJson.isBlank()) return null;
-        try {
-            return JSON.readValue(executionLogJson, EXECUTION_LOG_TYPE);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * 解析应用版本：优先从任务关联设备上实时获取 com.pwrd.steam.esports 等应用的安装版本，
-     * 失败时回退到 Application 表中的缓存版本。
-     */
     private String resolveAppVersion(Task task, Application app) {
         String deviceId = task.getDeviceId();
         String packageName = app.getPackageName();
@@ -1151,6 +214,23 @@ public class TaskOverviewService {
         return app.getVersion();
     }
 
+    private List<ExecutionLogEntryDto> parseExecutionLog(String executionLogJson) {
+        return ExecutionLogJson.parse(executionLogJson);
+    }
+
+    /**
+     * 库内日志优先；若无库日志则回退磁盘发现。有库日志时不要把磁盘图按序塞进无截图步骤。
+     */
+    private List<ExecutionLogEntryDto> mergeExecutionLogWithDiscovery(
+            List<ExecutionLogEntryDto> fromDb,
+            List<ExecutionLogEntryDto> discovery
+    ) {
+        if (fromDb != null && !fromDb.isEmpty()) {
+            return fromDb;
+        }
+        return discovery != null ? discovery : List.of();
+    }
+
     private void fillScreenshotUrls(List<ExecutionLogEntryDto> log, String taskId) {
         if (log == null || taskId == null) return;
         for (int i = 0; i < log.size(); i++) {
@@ -1159,6 +239,161 @@ public class TaskOverviewService {
                 entry.setScreenshotUrl("functional-test/tasks/" + taskId + "/screenshots/" + i);
             }
         }
+    }
+
+    /** 性能基础质量测试：按执行日志生成测项；无日志时单条「性能遍历与资源采样」。 */
+
+    private Map<String, String> parseExecutionVariables(String json) {
+        if (json == null || json.isBlank()) return new LinkedHashMap<>();
+        try {
+            return JSON.readValue(json, MAP_STRING_STRING);
+        } catch (Exception e) {
+            return new LinkedHashMap<>();
+        }
+    }
+
+    /**
+     * 补上功能健康度。
+     * <p>
+     * <b>执行达标率</b>照常把偶现算作不通过——它回答「这轮跑得顺不顺」，脚本不稳就该体现在这个数上，
+     * 藏起来等于把自动化自身的健康度也一并藏了。
+     * <b>功能健康度</b>把偶现剔除，回答「功能是不是真坏了」。
+     * <p>
+     * 两个数指向的责任人不同，所以必须并列给出，而不是二选一。
+     */
+    private CompatibilitySummaryDto withFunctionalHealth(CompatibilitySummaryDto summary, boolean flaky) {
+        if (summary == null) {
+            return null;
+        }
+        int passed = summary.getPassedCount();
+        int failed = summary.getFailedCount();
+        if (!flaky || failed == 0) {
+            // 没判偶现，两个口径本来就一样，不必给出第二个数徒增困惑
+            summary.setFunctionalHealthPercent(null);
+            summary.setFlakyExcludedCount(0);
+            return summary;
+        }
+        // 整条任务被判为偶现，其失败项不计入功能健康度的分母
+        int denominator = passed;
+        summary.setFlakyExcludedCount(failed);
+        summary.setFunctionalHealthPercent(denominator == 0 ? 0 : 100);
+        return summary;
+    }
+
+    /** 存量任务 config 里没有 environment，一律按生产——行为要跟改动前完全一致 */
+    private String readEnvironment(String config) {
+        if (config == null || config.isBlank()) {
+            return TestEnvironment.PROD;
+        }
+        try {
+            return TestEnvironment.normalize(
+                    ExecutionLogJson.mapper().readTree(config).path("environment").asText(null));
+        } catch (Exception e) {
+            return TestEnvironment.PROD;
+        }
+    }
+
+    /**
+     * 归因结论出问题不能拖垮整个概览页。
+     * <p>
+     * 概览是排查失败时最常打开的页面，为了一个附加信息把主视图弄挂了得不偿失。
+     */
+    private TaskFailureDiagnosis safeCurrentDiagnosis(String taskId) {
+        try {
+            return diagnosisService.current(taskId);
+        } catch (Exception e) {
+            log.warn("读取失败归因出错 taskId={}: {}", taskId, e.getMessage());
+            return null;
+        }
+    }
+
+    private boolean isFlaky(TaskFailureDiagnosis diagnosis) {
+        return diagnosis != null
+                && FailureDiagnosisDtos.Category.FLAKY.name().equalsIgnoreCase(diagnosis.getCategory());
+    }
+
+    private boolean isLogMetaStep(String step) {
+        if (step == null) return true;
+        String s = step.trim();
+        return "开始测试".equals(s) || "测试场景".equals(s) || "测试应用".equals(s) || "测试设备".equals(s) || "汇总".equals(s);
+    }
+
+    private List<TestResultItemDto> buildUiFlowResultItems(List<ExecutionLogEntryDto> executionLog) {
+        return buildUiFlowResultItems(executionLog, false);
+    }
+
+    /**
+     * @param flakyDowngrade 保留给内部调用；对外的两个口径见 {@link #withFunctionalHealth}。
+     */
+    private List<TestResultItemDto> buildUiFlowResultItems(List<ExecutionLogEntryDto> executionLog,
+                                                           boolean flakyDowngrade) {
+        if (executionLog == null || executionLog.isEmpty()) {
+            return List.of(new TestResultItemDto("流程", "暂无执行日志", RESULT_NOT_RUN, null, null));
+        }
+        List<TestResultItemDto> list = new ArrayList<>();
+        for (ExecutionLogEntryDto entry : executionLog) {
+            if (entry == null) continue;
+            String step = entry.getStep() != null ? entry.getStep().trim() : "步骤";
+            if (isUiFlowNoiseStep(step)) continue;
+            String category = inferUiFlowCategory(step);
+            // 中立事件（用户停止、重试前的失败尝试）归告警：看得见，但不拉低达标率
+            boolean neutral = "neutral".equalsIgnoreCase(entry.getStatus())
+                    || "Warn".equalsIgnoreCase(entry.getLevel());
+            boolean fail = !neutral && ("fail".equalsIgnoreCase(entry.getStatus())
+                    || "Error".equalsIgnoreCase(entry.getLevel()));
+            String result = (neutral || (fail && flakyDowngrade))
+                    ? RESULT_WARN : (fail ? RESULT_FAIL : RESULT_PASS);
+            String detail = entry.getMessage();
+            // 返回提示：把返回文案前置，概览「详细日志」一眼可见
+            if (!fail && (step.contains("返回提示") || "流程返回".equals(step))
+                    && detail != null && !detail.isBlank()) {
+                detail = "返回：" + detail;
+            }
+            if (entry.getSelector() != null && !entry.getSelector().isBlank()) {
+                detail = (detail != null && !detail.isBlank() ? detail + " | " : "") + "selector=" + entry.getSelector();
+            }
+            list.add(new TestResultItemDto(category, step, result, null, detail));
+        }
+        if (list.isEmpty()) {
+            return List.of(new TestResultItemDto("流程", "暂无有效步骤日志", RESULT_NOT_RUN, null, null));
+        }
+        return list;
+    }
+
+    private boolean isUiFlowNoiseStep(String step) {
+        if (step == null || step.isBlank()) return true;
+        String s = step.trim();
+        if ("截图".equals(s) || s.startsWith("截图 ")) return true;
+        if (s.contains("连续截图")) return true;
+        if (s.startsWith("开始 ·")) return true;
+        if (s.contains("Appium") && !s.contains("启动应用程序")) return true;
+        if (s.contains("启动回退")) return true;
+        return false;
+    }
+
+    private String inferUiFlowCategory(String step) {
+        if (step == null) return "流程步骤";
+        String s = step.trim();
+        if ("开始执行流程".equals(s) || "流程结束".equals(s) || "流程返回".equals(s) || "流程中断".equals(s)) {
+            return "流程结果";
+        }
+        if (s.contains("返回提示")) return "返回结果";
+        if (s.contains("元素存在判断") || s.contains("判断")) return "分支判断";
+        if (s.contains("启动")) return "启动";
+        if (s.contains("卸载") || s.contains("商店安装")) return "安装";
+        if (s.contains("点击") || s.contains("输入") || s.contains("清空") || s.contains("滑动") || s.contains("等待")) {
+            return "操作";
+        }
+        if (s.contains("断言") || s.contains("组件")) return "校验";
+        // 大纲号 1 / 1.1 → 取首段归类展示
+        int dot = s.indexOf('·');
+        if (dot > 0) {
+            String no = s.substring(0, dot).trim();
+            if (!no.isEmpty() && Character.isDigit(no.charAt(0))) {
+                return "步骤 " + no.split("\\.")[0];
+            }
+        }
+        return "流程步骤";
     }
 
     /** 性能基础质量测试：按执行日志生成测项；无日志时单条「性能遍历与资源采样」。 */
@@ -1171,7 +406,12 @@ public class TaskOverviewService {
         for (ExecutionLogEntryDto entry : executionLog) {
             String step = entry.getStep() != null ? entry.getStep() : "步骤";
             if ("开始测试".equals(step) || "测试场景".equals(step)) continue;
-            String result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
+            String result;
+            if ("neutral".equalsIgnoreCase(entry.getStatus()) || "Warn".equalsIgnoreCase(entry.getLevel())) {
+                result = RESULT_WARN;
+            } else {
+                result = "success".equalsIgnoreCase(entry.getStatus()) ? RESULT_PASS : RESULT_FAIL;
+            }
             list.add(new TestResultItemDto("性能测试", step, result, null, entry.getMessage()));
         }
         return list.isEmpty() ? List.of(new TestResultItemDto("性能测试", "性能遍历与资源采样", resultWhenNoLog, null, null)) : list;
@@ -1197,36 +437,37 @@ public class TaskOverviewService {
             switch (item.getTestResult() == null ? "" : item.getTestResult()) {
                 case RESULT_PASS -> passed++;
                 case RESULT_FAIL -> failed++;
-                case "告警" -> warning++;
+                case RESULT_WARN -> warning++;
                 default -> { /* 设备依赖、未执行等不计入通过/不通过/告警 */ }
             }
         }
         return new CompatibilitySummaryDto(actual, passed, failed, warning);
     }
 
-    /** 根据检测规则列表按分类汇总：测试结果分布（柱状图）。 */
+    /**
+     * 根据检测规则列表按分类汇总：测试结果分布（柱状图）。
+     * <p>
+     * 按分类名归并，而不是按「连续相同分类」分段——同一个分类在列表里断开后再出现
+     * （如「流程步骤」中间夹了「步骤 1」）会画出两行同名的柱子，看起来像有两个不同的分组。
+     * 保持首次出现的顺序。
+     */
     private List<ResultDistributionItemDto> buildDistributionFromItems(List<TestResultItemDto> items) {
-        List<ResultDistributionItemDto> out = new ArrayList<>();
-        String prevCategory = null;
-        int passed = 0, warning = 0, failed = 0, deviceDependent = 0;
+        Map<String, int[]> byCategory = new LinkedHashMap<>();
         for (TestResultItemDto item : items) {
-            String cat = item.getTestItemCategory();
-            if (prevCategory != null && !prevCategory.equals(cat)) {
-                out.add(new ResultDistributionItemDto(prevCategory, passed, warning, failed, deviceDependent));
-                passed = warning = failed = deviceDependent = 0;
-            }
-            prevCategory = cat;
-            String r = item.getTestResult() == null ? "" : item.getTestResult();
-            switch (r) {
-                case RESULT_PASS -> passed++;
-                case RESULT_FAIL -> failed++;
-                case "告警" -> warning++;
-                case RESULT_DEVICE_DEPENDENT -> deviceDependent++;
+            String cat = item.getTestItemCategory() != null ? item.getTestItemCategory() : "";
+            int[] counts = byCategory.computeIfAbsent(cat, k -> new int[4]);
+            switch (item.getTestResult() == null ? "" : item.getTestResult()) {
+                case RESULT_PASS -> counts[0]++;
+                case RESULT_WARN -> counts[1]++;
+                case RESULT_FAIL -> counts[2]++;
+                case RESULT_DEVICE_DEPENDENT -> counts[3]++;
                 default -> { }
             }
         }
-        if (prevCategory != null) {
-            out.add(new ResultDistributionItemDto(prevCategory, passed, warning, failed, deviceDependent));
+        List<ResultDistributionItemDto> out = new ArrayList<>();
+        for (Map.Entry<String, int[]> e : byCategory.entrySet()) {
+            int[] c = e.getValue();
+            out.add(new ResultDistributionItemDto(e.getKey(), c[0], c[1], c[2], c[3]));
         }
         return out;
     }

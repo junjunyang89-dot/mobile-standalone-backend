@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiChangeReportMapper">
+
+    <resultMap id="Map" type="com.mobile.standalone.entity.ApiChangeReport">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="baseRef" column="base_ref"/>
+        <result property="headRef" column="head_ref"/>
+        <result property="summary" column="summary"/>
+        <result property="reportJson" column="report_json"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <!-- 列表不取 report_json，避免大字段拖慢 -->
+    <resultMap id="ListMap" type="com.mobile.standalone.entity.ApiChangeReport">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="baseRef" column="base_ref"/>
+        <result property="headRef" column="head_ref"/>
+        <result property="summary" column="summary"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO api_change_reports
+        (project, base_ref, head_ref, summary, report_json, created_at)
+        VALUES
+        (#{project}, #{baseRef}, #{headRef}, #{summary}, #{reportJson}, #{createdAt})
+    </insert>
+
+    <select id="findById" resultMap="Map">
+        SELECT * FROM api_change_reports WHERE id = #{id}
+    </select>
+
+    <select id="search" resultMap="ListMap">
+        SELECT id, project, base_ref, head_ref, summary, created_at
+        FROM api_change_reports
+        <where>
+            <if test="project != null and project != ''">
+                AND project = #{project}
+            </if>
+        </where>
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <delete id="deleteById">
+        DELETE FROM api_change_reports WHERE id = #{id}
+    </delete>
+</mapper>

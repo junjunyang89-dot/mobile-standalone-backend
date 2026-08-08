@@ -95,6 +95,7 @@ public class UiAppService {
         if (patch.getDescription() != null) existing.setDescription(patch.getDescription());
         if (patch.getAndroidPackage() != null) existing.setAndroidPackage(patch.getAndroidPackage().trim());
         if (patch.getIosBundleId() != null) existing.setIosBundleId(patch.getIosBundleId().trim());
+        if (patch.getChannelUrls() != null) existing.setChannelUrls(patch.getChannelUrls().trim());
         if (patch.getEnabled() != null) existing.setEnabled(patch.getEnabled());
         if (patch.getSortOrder() != null) existing.setSortOrder(patch.getSortOrder());
         if (existing.getNameZh() == null || existing.getNameZh().isBlank()) {
@@ -108,5 +109,20 @@ public class UiAppService {
     @Transactional
     public boolean delete(String id) {
         return uiAppMapper.deleteById(id) > 0;
+    }
+
+    /** 应用字典里配的蒲公英 appKey，按平台取；没配返回 null */
+    public String pgyerAppKey(String appId, String platform) {
+        if (appId == null || appId.isBlank()) {
+            return null;
+        }
+        com.mobile.standalone.entity.UiApp app = get(appId.trim());
+        if (app == null) {
+            return null;
+        }
+        boolean ios = platform != null
+                && platform.toUpperCase(java.util.Locale.ROOT).contains("IOS");
+        String key = ios ? app.getPgyerAppKeyIos() : app.getPgyerAppKeyAndroid();
+        return key == null || key.isBlank() ? null : key.trim();
     }
 }

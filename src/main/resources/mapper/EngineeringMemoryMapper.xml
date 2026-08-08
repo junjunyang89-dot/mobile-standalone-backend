@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.EngineeringMemoryMapper">
+
+    <resultMap id="MemoryMap" type="com.mobile.standalone.entity.EngineeringMemory">
+        <id property="id" column="id"/>
+        <result property="occurredAt" column="occurred_at"/>
+        <result property="memType" column="mem_type"/>
+        <result property="title" column="title"/>
+        <result property="body" column="body"/>
+        <result property="tags" column="tags"/>
+        <result property="source" column="source"/>
+        <result property="sessionRef" column="session_ref"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO project_engineering_memory
+        (occurred_at, mem_type, title, body, tags, source, session_ref, created_by, created_at)
+        VALUES
+        (#{occurredAt}, #{memType}, #{title}, #{body}, #{tags}, #{source}, #{sessionRef}, #{createdBy}, #{createdAt})
+    </insert>
+
+    <select id="findById" resultMap="MemoryMap">
+        SELECT * FROM project_engineering_memory WHERE id = #{id}
+    </select>
+
+    <select id="search" resultMap="MemoryMap">
+        SELECT * FROM project_engineering_memory
+        <where>
+            <if test="memType != null and memType != ''">
+                AND mem_type = #{memType}
+            </if>
+            <if test="tag != null and tag != ''">
+                AND FIND_IN_SET(#{tag}, REPLACE(tags, ' ', '')) &gt; 0
+            </if>
+            <if test="q != null and q != ''">
+                AND (title LIKE CONCAT('%', #{q}, '%') OR body LIKE CONCAT('%', #{q}, '%') OR tags LIKE CONCAT('%', #{q}, '%'))
+            </if>
+        </where>
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countAll" resultType="int">
+        SELECT COUNT(*) FROM project_engineering_memory
+    </select>
+</mapper>

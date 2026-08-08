@@ -11,9 +11,15 @@
         <result property="nameZh" column="name_zh"/>
         <result property="nameEn" column="name_en"/>
         <result property="description" column="description"/>
+        <result property="visualHint" column="visual_hint"/>
         <result property="moduleTag" column="module_tag"/>
+        <result property="pageId" column="page_id"/>
+        <result property="source" column="source"/>
+        <result property="status" column="status"/>
+        <result property="lastVerifiedAt" column="last_verified_at"/>
         <result property="locatorType" column="locator_type"/>
         <result property="locatorValue" column="locator_value"/>
+        <result property="locatorFallbacks" column="locator_fallbacks"/>
         <result property="previewImage" column="preview_image"/>
         <result property="defaultTimeoutSec" column="default_timeout_sec"/>
         <result property="enabled" column="enabled"/>
@@ -23,8 +29,7 @@
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
-    <select id="findByFilters" resultMap="UiElementMap">
-        SELECT * FROM ui_elements
+    <sql id="UiElementFilterWhere">
         <where>
             <if test="appId != null and appId != ''">AND app_id = #{appId}</if>
             <if test="platform != null and platform != ''">AND platform = #{platform}</if>
@@ -36,13 +41,34 @@
                 </foreach>
             </if>
             <if test="moduleTag != null and moduleTag != ''">AND module_tag = #{moduleTag}</if>
+            <if test="pageId != null and pageId != ''">AND page_id = #{pageId}</if>
+            <if test="source != null and source != ''">AND source = #{source}</if>
+            <if test="status != null and status != ''">AND status = #{status}</if>
             <if test="keyword != null and keyword != ''">
                 AND (name_zh LIKE CONCAT('%', #{keyword}, '%')
                   OR name_en LIKE CONCAT('%', #{keyword}, '%')
-                  OR description LIKE CONCAT('%', #{keyword}, '%'))
+                  OR description LIKE CONCAT('%', #{keyword}, '%')
+                  OR page_id LIKE CONCAT('%', #{keyword}, '%')
+                  OR locator_value LIKE CONCAT('%', #{keyword}, '%')
+                  OR module_tag LIKE CONCAT('%', #{keyword}, '%')
+                  OR visual_hint LIKE CONCAT('%', #{keyword}, '%'))
             </if>
         </where>
-        ORDER BY sort_order ASC, module_tag ASC, name_zh ASC
+    </sql>
+
+    <select id="findByFilters" resultMap="UiElementMap">
+        SELECT * FROM ui_elements
+        <include refid="UiElementFilterWhere"/>
+        ORDER BY sort_order ASC, page_id ASC, module_tag ASC, name_zh ASC, source ASC
+        <if test="limit != null">
+            LIMIT #{limit}
+            <if test="offset != null">OFFSET #{offset}</if>
+        </if>
+    </select>
+
+    <select id="countByFilters" resultType="long">
+        SELECT COUNT(*) FROM ui_elements
+        <include refid="UiElementFilterWhere"/>
     </select>
 
     <select id="findById" resultMap="UiElementMap">
@@ -52,16 +78,28 @@
     <select id="findByAppPlatformKey" resultMap="UiElementMap">
         SELECT * FROM ui_elements
         WHERE app_id = #{appId} AND platform = #{platform} AND name_en = #{nameEn}
+        <if test="source != null and source != ''">AND source = #{source}</if>
+        ORDER BY CASE source WHEN 'HUMAN_AI' THEN 0 WHEN 'SOURCE_CODE' THEN 1 ELSE 2 END
+        LIMIT 1
+    </select>
+
+    <select id="findActiveByKey" resultMap="UiElementMap">
+        SELECT * FROM ui_elements
+        WHERE app_id = #{appId} AND platform = #{platform} AND name_en = #{nameEn}
+          AND status = 'ACTIVE' AND enabled = 1
+        ORDER BY CASE source WHEN 'HUMAN_AI' THEN 0 WHEN 'SOURCE_CODE' THEN 1 ELSE 2 END
         LIMIT 1
     </select>
 
     <insert id="insert">
         INSERT INTO ui_elements
-        (id, app_id, platform, catalog, name_zh, name_en, description, module_tag,
-         locator_type, locator_value, preview_image, default_timeout_sec, enabled, sort_order, created_by, created_at, updated_at)
+        (id, app_id, platform, catalog, name_zh, name_en, description, visual_hint, module_tag,
+         page_id, source, status, last_verified_at,
+         locator_type, locator_value, locator_fallbacks, preview_image, default_timeout_sec, enabled, sort_order, created_by, created_at, updated_at)
         VALUES
-        (#{id}, #{appId}, #{platform}, #{catalog}, #{nameZh}, #{nameEn}, #{description}, #{moduleTag},
-         #{locatorType}, #{locatorValue}, #{previewImage}, #{defaultTimeoutSec}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
+        (#{id}, #{appId}, #{platform}, #{catalog}, #{nameZh}, #{nameEn}, #{description}, #{visualHint}, #{moduleTag},
+         #{pageId}, #{source}, #{status}, #{lastVerifiedAt},
+         #{locatorType}, #{locatorValue}, #{locatorFallbacks}, #{previewImage}, #{defaultTimeoutSec}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -70,9 +108,15 @@
             name_zh = #{nameZh},
             name_en = #{nameEn},
             description = #{description},
+            visual_hint = #{visualHint},
             module_tag = #{moduleTag},
+            page_id = #{pageId},
+            source = #{source},
+            status = #{status},
+            last_verified_at = #{lastVerifiedAt},
             locator_type = #{locatorType},
             locator_value = #{locatorValue},
+            locator_fallbacks = #{locatorFallbacks},
             preview_image = #{previewImage},
             default_timeout_sec = #{defaultTimeoutSec},
             enabled = #{enabled},
@@ -84,4 +128,37 @@
     <delete id="deleteById">
         DELETE FROM ui_elements WHERE id = #{id}
     </delete>
+
+    <select id="findByExactLocator" resultMap="UiElementMap">
+        SELECT * FROM ui_elements
+        WHERE app_id = #{appId}
+          AND platform = #{platform}
+          AND locator_type = #{locatorType}
+          AND locator_value = #{locatorValue}
+        ORDER BY
+            CASE status WHEN 'ACTIVE' THEN 0 WHEN 'CANDIDATE' THEN 1 ELSE 2 END,
+            updated_at DESC
+        LIMIT 1
+    </select>
+
+    <!-- 点选命中后按定位符匹配已有元素（精确或后缀/模糊） -->
+    <select id="findByLocatorHint" resultMap="UiElementMap">
+        SELECT * FROM ui_elements
+        WHERE enabled = 1
+        <if test="appId != null and appId != ''">AND app_id = #{appId}</if>
+        <if test="platform != null and platform != ''">AND platform = #{platform}</if>
+        AND (
+            locator_value = #{locatorValue}
+            OR locator_value LIKE CONCAT('%', #{locatorValue}, '%')
+            <if test="shortId != null and shortId != ''">
+                OR locator_value LIKE CONCAT('%', #{shortId})
+                OR locator_value LIKE CONCAT('%/', #{shortId})
+            </if>
+        )
+        ORDER BY
+            CASE WHEN locator_value = #{locatorValue} THEN 0 ELSE 1 END,
+            CASE status WHEN 'ACTIVE' THEN 0 WHEN 'CANDIDATE' THEN 1 ELSE 2 END,
+            updated_at DESC
+        LIMIT #{limit}
+    </select>
 </mapper>

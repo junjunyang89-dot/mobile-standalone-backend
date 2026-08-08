@@ -1,0 +1,2 @@
+# SoloX sidecar for dual performance collectors (pin to latest on PyPI)
+solox==2.8.0

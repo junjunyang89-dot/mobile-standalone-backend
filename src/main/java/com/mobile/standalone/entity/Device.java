@@ -14,12 +14,35 @@ public class Device {
     private String config;
     
     public enum Platform {
-        ANDROID, IOS, HARMONYOS, POG_ANDROID, POG_IOS, POGPOG
+        ANDROID, IOS, HARMONYOS,
+        /**
+         * @deprecated 产品线混进平台的历史值。设备扫描从不写入，回归编排也已改为只写操作系统。
+         * 保留仅为让迁移前的存量数据仍能反序列化；跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POG_ANDROID,
+        /**
+         * @deprecated 产品线混进平台的历史值。设备扫描从不写入，回归编排也已改为只写操作系统。
+         * 保留仅为让迁移前的存量数据仍能反序列化；跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POG_IOS,
+        /**
+         * @deprecated 产品线混进平台的历史值。设备扫描从不写入，回归编排也已改为只写操作系统。
+         * 保留仅为让迁移前的存量数据仍能反序列化；跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POGPOG
     }
 
-    /** ADB / Appium Android 技术栈（含鸿蒙、Pog-Android） */
+    /** ADB / Appium Android 技术栈（不含纯鸿蒙 NEXT；Pog-Android 仍走 Android） */
     public static boolean usesAndroidAutomation(Platform p) {
-        return p == Platform.ANDROID || p == Platform.HARMONYOS || p == Platform.POG_ANDROID;
+        return p == Platform.ANDROID || p == Platform.POG_ANDROID;
+    }
+
+    /** 纯鸿蒙 NEXT：hdc + hmdriver2，不用 adb */
+    public static boolean usesHdcAutomation(Platform p) {
+        return p == Platform.HARMONYOS;
     }
 
     /** Appium / idevice iOS 技术栈（含 Pog-iOS） */

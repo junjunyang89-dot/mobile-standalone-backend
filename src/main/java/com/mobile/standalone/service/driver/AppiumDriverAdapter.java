@@ -1,10 +1,10 @@
 package com.mobile.standalone.service.driver;
 
 import com.mobile.standalone.entity.Device;
-import com.mobile.standalone.entity.PageObject;
 import com.mobile.standalone.mapper.DeviceMapper;
 import com.mobile.standalone.service.AutomationEngine;
 import com.mobile.standalone.service.DeviceManager;
+import com.mobile.standalone.util.LocatorTemplate;
 import io.appium.java_client.AppiumBy;
 import io.appium.java_client.AppiumDriver;
 import io.appium.java_client.android.AndroidDriver;
@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -210,11 +211,10 @@ public class AppiumDriverAdapter implements PlatformDriver {
             } catch (Exception e) {
                 log.warn("activateApp 失败，会话已创建: {}", e.getMessage());
             }
-            // 国内电竞：部分机型 activateApp 进不了前台，会话建立后补一次 am start（已知组件，不阻塞解析）
+            // 任意 Android 包：activateApp 后校验前台；未进前台则 monkey / resolve-activity / 已知组件补拉起
             if (Device.usesAndroidAutomation(dp) && dp != Device.Platform.HARMONYOS
-                    && "com.pwrd.steam.esports".equals(packageName)) {
-                adbAmStartKnownComponent(deviceId,
-                        "com.pwrd.steam.esports/.ui.activity.launcher.LauncherActivity");
+                    && packageName != null && !packageName.isBlank()) {
+                bringAndroidAppToForeground(deviceId, packageName);
             }
             return true;
         } catch (MalformedURLException e) {
@@ -223,6 +223,120 @@ public class AppiumDriverAdapter implements PlatformDriver {
         } catch (Exception e) {
             log.error("创建 Appium 会话失败: deviceId={}, package={}", deviceId, packageName, e);
             return false;
+        }
+    }
+
+    /**
+     * 确保目标包在前台。部分机型 activateApp 只建会话不切前台；电竞包另有已知 LauncherActivity。
+     */
+    private void bringAndroidAppToForeground(String deviceId, String packageName) {
+        if (isPackageInForeground(deviceId, packageName)) {
+            log.info("应用已在前台: {}", packageName);
+            return;
+        }
+        log.warn("activateApp 后应用未在前台，尝试补拉起: {}", packageName);
+
+        if ("com.pwrd.steam.esports".equals(packageName)) {
+            adbAmStartKnownComponent(deviceId,
+                    "com.pwrd.steam.esports/.ui.activity.launcher.LauncherActivity");
+            sleepQuiet(800);
+            if (isPackageInForeground(deviceId, packageName)) return;
+        }
+
+        // monkey LAUNCHER
+        try {
+            Process monkey = new ProcessBuilder("adb", "-s", deviceId, "shell", "monkey",
+                    "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1")
+                    .redirectErrorStream(true)
+                    .start();
+            monkey.waitFor(8, java.util.concurrent.TimeUnit.SECONDS);
+            sleepQuiet(800);
+            if (isPackageInForeground(deviceId, packageName)) {
+                log.info("monkey 补拉起成功: {}", packageName);
+                return;
+            }
+        } catch (Exception e) {
+            log.debug("monkey 补拉起失败: {}", e.getMessage());
+        }
+
+        // resolve-activity → am start
+        String component = resolveLauncherComponent(deviceId, packageName);
+        if (component != null) {
+            adbAmStartKnownComponent(deviceId, component);
+            sleepQuiet(800);
+            if (isPackageInForeground(deviceId, packageName)) {
+                log.info("am start 补拉起成功: {}", component);
+                return;
+            }
+        }
+        log.warn("补拉起后仍可能未在前台，请核对包名是否已安装: deviceId={}, package={}, foreground={}",
+                deviceId, packageName, getForegroundPackage(deviceId));
+    }
+
+    private boolean isPackageInForeground(String deviceId, String packageName) {
+        String fg = getForegroundPackage(deviceId);
+        return fg != null && packageName.equals(fg);
+    }
+
+    private String getForegroundPackage(String deviceId) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "dumpsys", "window", "windows")
+                    .redirectErrorStream(true)
+                    .start();
+            String out = readProcessOutput(p, 8000);
+            if (out != null) {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("mCurrentFocus=.*?\\s([a-zA-Z0-9_.]+)/").matcher(out);
+                if (m.find()) return m.group(1);
+                java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("mFocusedApp=.*?\\s([a-zA-Z0-9_.]+)/").matcher(out);
+                if (m2.find()) return m2.group(1);
+            }
+        } catch (Exception e) {
+            log.debug("读取前台包名失败: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private String resolveLauncherComponent(String deviceId, String packageName) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "cmd", "package", "resolve-activity",
+                    "--brief", "-c", "android.intent.category.LAUNCHER", packageName)
+                    .redirectErrorStream(true)
+                    .start();
+            String out = readProcessOutput(p, 5000);
+            if (out != null && !out.isBlank()) {
+                for (String raw : out.trim().split("\n")) {
+                    String line = raw.trim();
+                    if (line.contains("/") && !line.contains("null")) {
+                        String component = line.contains(":") ? line.substring(line.indexOf(':') + 1).trim() : line;
+                        if (component.matches("^[a-zA-Z0-9_.]+/[.a-zA-Z0-9_]+$")) {
+                            return component;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("resolve-activity 失败: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private static String readProcessOutput(Process p, int timeoutMs) {
+        try {
+            if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            return new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void sleepQuiet(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -274,6 +388,251 @@ public class AppiumDriverAdapter implements PlatformDriver {
         }
     }
 
+    /** 供流程关键字「冷启动」显式调用，语义等同 {@link #launchApp}（Android 会 force-stop；iOS forceAppLaunch）。 */
+    public boolean coldStartApp(String deviceId, String packageName) {
+        return launchApp(deviceId, packageName);
+    }
+
+    /**
+     * iOS 冷启动：terminateApp（若有会话）后再 {@link #launchApp}（forceAppLaunch=true）。
+     */
+    public boolean coldStartIosApp(String deviceId, String bundleId) {
+        if (deviceId == null || deviceId.isBlank() || bundleId == null || bundleId.isBlank()) {
+            return false;
+        }
+        Device device = deviceMapper.findById(deviceId);
+        if (device == null || !Device.usesIosAutomation(device.getPlatform())) {
+            log.warn("coldStartIosApp 仅支持 iOS/Pog-iOS: deviceId={}", deviceId);
+            return false;
+        }
+        try {
+            AppiumDriver existing = sessions.get(deviceId);
+            if (existing instanceof IOSDriver iosDriver) {
+                try {
+                    iosDriver.terminateApp(bundleId);
+                    log.info("iOS terminateApp 完成: bundle={}", bundleId);
+                } catch (Exception e) {
+                    log.debug("iOS terminateApp 忽略: {}", e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("iOS 冷启 terminate 阶段忽略: {}", e.getMessage());
+        }
+        sleepQuiet(500);
+        return launchApp(deviceId, bundleId);
+    }
+
+    /**
+     * 热启动：不杀进程。若进程不在则先冷启一次作为准备；再按 Home 进后台，停留后 activate 回前台。
+     * Android 与 iOS 均支持。
+     *
+     * @param backgroundWaitMs 切后台后停留毫秒，建议 ≥1000
+     * @return 热启动阶段耗时毫秒；失败返回 -1
+     */
+    public long hotStartApp(String deviceId, String packageName, long backgroundWaitMs) {
+        if (deviceId == null || deviceId.isBlank() || packageName == null || packageName.isBlank()) {
+            return -1;
+        }
+        Device device = deviceMapper.findById(deviceId);
+        if (device == null || device.getPlatform() == null) {
+            return -1;
+        }
+        if (Device.usesIosAutomation(device.getPlatform())) {
+            return hotStartIosApp(deviceId, packageName, backgroundWaitMs);
+        }
+        if (!Device.isAndroidOrPogAndroid(device.getPlatform())
+                || device.getPlatform() == Device.Platform.HARMONYOS) {
+            log.warn("hotStartApp 当前仅支持 Android/Pog-Android/iOS: deviceId={}", deviceId);
+            return -1;
+        }
+        try {
+            if (!isAndroidProcessAlive(deviceId, packageName)) {
+                log.info("热启动准备：进程未在运行，先冷启动 {}", packageName);
+                if (!launchApp(deviceId, packageName)) {
+                    return -1;
+                }
+                sleepQuiet(1500);
+            } else if (sessions.get(deviceId) == null) {
+                if (!ensureAndroidSessionWithoutForceStop(deviceId, packageName)) {
+                    return -1;
+                }
+            }
+
+            pressAndroidHome(deviceId);
+            long wait = Math.max(500, backgroundWaitMs);
+            sleepQuiet(wait);
+
+            long t0 = System.currentTimeMillis();
+            AppiumDriver driver = sessions.get(deviceId);
+            if (driver instanceof AndroidDriver androidDriver) {
+                try {
+                    androidDriver.activateApp(packageName);
+                } catch (Exception e) {
+                    log.warn("activateApp 失败，尝试补拉起: {}", e.getMessage());
+                }
+            }
+            bringAndroidAppToForeground(deviceId, packageName);
+            long deadline = t0 + 15_000;
+            while (System.currentTimeMillis() < deadline) {
+                if (isPackageInForeground(deviceId, packageName)) {
+                    long cost = System.currentTimeMillis() - t0;
+                    log.info("热启动完成: deviceId={}, package={}, costMs={}", deviceId, packageName, cost);
+                    return cost;
+                }
+                sleepQuiet(100);
+            }
+            log.warn("热启动超时未进前台: package={}, foreground={}", packageName, getForegroundPackage(deviceId));
+            return -1;
+        } catch (Exception e) {
+            log.error("热启动失败: deviceId={}, package={}", deviceId, packageName, e);
+            return -1;
+        }
+    }
+
+    /** iOS 热启动：不 terminate；Home 后台后 activateApp。 */
+    public long hotStartIosApp(String deviceId, String bundleId, long backgroundWaitMs) {
+        if (deviceId == null || deviceId.isBlank() || bundleId == null || bundleId.isBlank()) {
+            return -1;
+        }
+        try {
+            if (!(sessions.get(deviceId) instanceof IOSDriver)) {
+                if (!ensureIosSessionWithoutForceLaunch(deviceId, bundleId)) {
+                    return -1;
+                }
+                // 无会话时先激活一次，保证进程在
+                try {
+                    ((IOSDriver) sessions.get(deviceId)).activateApp(bundleId);
+                    sleepQuiet(1200);
+                } catch (Exception e) {
+                    log.warn("iOS 热启准备 activate 失败，改冷启: {}", e.getMessage());
+                    if (!coldStartIosApp(deviceId, bundleId)) {
+                        return -1;
+                    }
+                    sleepQuiet(1200);
+                }
+            }
+
+            pressIosHome(deviceId);
+            long wait = Math.max(500, backgroundWaitMs);
+            sleepQuiet(wait);
+
+            long t0 = System.currentTimeMillis();
+            AppiumDriver driver = sessions.get(deviceId);
+            if (!(driver instanceof IOSDriver iosDriver)) {
+                return -1;
+            }
+            try {
+                iosDriver.activateApp(bundleId);
+            } catch (Exception e) {
+                log.warn("iOS activateApp 失败: {}", e.getMessage());
+                return -1;
+            }
+            // iOS 无可靠前台包名轮询时，activate 成功即计时结束（短暂等待稳定）
+            sleepQuiet(300);
+            long cost = System.currentTimeMillis() - t0;
+            log.info("iOS 热启动完成: deviceId={}, bundle={}, costMs={}", deviceId, bundleId, cost);
+            return cost;
+        } catch (Exception e) {
+            log.error("iOS 热启动失败: deviceId={}, bundle={}", deviceId, bundleId, e);
+            return -1;
+        }
+    }
+
+    private boolean ensureIosSessionWithoutForceLaunch(String deviceId, String bundleId) {
+        try {
+            closeSession(deviceId);
+            int wdaPort = wdaLocalPortFor(deviceId);
+            String wdaUrl = "http://127.0.0.1:" + wdaPort;
+            if (!deviceManager.ensureIosWdaRunning(deviceId, wdaPort)) {
+                log.error("无法拉起 WDA: deviceId={}, port={}", deviceId, wdaPort);
+                return false;
+            }
+            URL url = new URL(serverUrl);
+            XCUITestOptions opts = buildIosOptions(deviceId, bundleId);
+            opts.setWebDriverAgentUrl(wdaUrl);
+            opts.setForceAppLaunch(false);
+            IOSDriver driver = new IOSDriver(url, opts);
+            driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(implicitWaitSeconds));
+            sessions.put(deviceId, driver);
+            log.info("已挂接 iOS 会话（未 force launch）: deviceId={}, bundle={}", deviceId, bundleId);
+            return true;
+        } catch (Exception e) {
+            log.error("挂接 iOS 会话失败: deviceId={}, bundle={}", deviceId, bundleId, e);
+            return false;
+        }
+    }
+
+    private void pressIosHome(String deviceId) {
+        try {
+            AppiumDriver driver = sessions.get(deviceId);
+            if (driver instanceof IOSDriver iosDriver) {
+                try {
+                    iosDriver.executeScript("mobile: pressButton", Map.of("name", "home"));
+                    log.info("iOS mobile:pressButton home 成功: deviceId={}", deviceId);
+                    return;
+                } catch (Exception e) {
+                    log.warn("iOS pressButton home 失败，尝试备用: {}", e.getMessage());
+                }
+            }
+            // 无会话时无法按 Home；有会话但脚本失败则忽略，由上层感知
+        } catch (Exception e) {
+            log.warn("iOS 按 Home 失败: {}", e.getMessage());
+        }
+    }
+
+    /** 建 Appium 会话但不 force-stop，用于热启动挂接已在跑的应用。 */
+    private boolean ensureAndroidSessionWithoutForceStop(String deviceId, String packageName) {
+        try {
+            closeSession(deviceId);
+            URL url = new URL(serverUrl);
+            UiAutomator2Options opts = buildAndroidOptions(deviceId, packageName);
+            AndroidDriver driver = new AndroidDriver(url, opts);
+            applyAndroidUiStabilitySettings(driver);
+            driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(implicitWaitSeconds));
+            sessions.put(deviceId, driver);
+            log.info("已挂接 Android 会话（未 force-stop）: deviceId={}, package={}", deviceId, packageName);
+            return true;
+        } catch (Exception e) {
+            log.error("挂接 Android 会话失败: deviceId={}, package={}", deviceId, packageName, e);
+            return false;
+        }
+    }
+
+    private boolean isAndroidProcessAlive(String deviceId, String packageName) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "pidof", packageName)
+                    .redirectErrorStream(true)
+                    .start();
+            String out;
+            try (java.io.InputStream in = p.getInputStream()) {
+                out = new String(in.readAllBytes()).trim();
+            }
+            boolean finished = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                return false;
+            }
+            return p.exitValue() == 0 && !out.isBlank() && out.chars().anyMatch(Character::isDigit);
+        } catch (Exception e) {
+            log.debug("pidof 失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private void pressAndroidHome(String deviceId) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "keyevent", "KEYCODE_HOME")
+                    .redirectErrorStream(true)
+                    .start();
+            if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+            }
+            log.info("已按 Home 切入后台: deviceId={}", deviceId);
+        } catch (Exception e) {
+            log.warn("按 Home 失败: {}", e.getMessage());
+        }
+    }
+
     /**
      * 创建 Android 会话时不指定 appPackage/appActivity，避免「Activity .MainActivity 不存在」报错。
      * 会话创建后通过 activateApp(packageName) 启动应用，由系统使用默认启动 Activity。
@@ -286,6 +645,14 @@ public class AppiumDriverAdapter implements PlatformDriver {
         // 指针位置/开屏动画等会让 UiAutomator 一直等 idle，表现为元素「检测不到」且整段卡住
         opts.setCapability("appium:settings[waitForIdleTimeout]", 0);
         opts.setCapability("appium:settings[waitForSelectorTimeout]", 2_000);
+        // 与 Appium Inspector 一致：把 PopupWindow/对话框等非焦点窗口并入 page source，否则真机点选只能「穿透」到背后页
+        opts.setCapability("appium:settings[enableMultiWindows]", true);
+        opts.setCapability("appium:settings[enableTopmostWindowFromActivePackage]", true);
+        // 小米/MIUI 等无 WRITE_SECURE_SETTINGS 时，忽略 hidden_api_policy 写入失败，否则会话创建直接 500
+        opts.setCapability("appium:ignoreHiddenApiPolicyError", true);
+        // 不要 pm clear / 重装：国内应用常无 CLEAR_APP_USER_DATA，否则会话创建失败
+        opts.setNoReset(true);
+        opts.setFullReset(false);
         // 不设置 appPackage/appActivity，否则 Appium 会尝试在会话创建时启动指定 Activity，
         // 若应用主入口不是 .MainActivity 会报错；创建会话后通过 activateApp(packageName) 启动即可
         return opts;
@@ -299,22 +666,92 @@ public class AppiumDriverAdapter implements PlatformDriver {
         try {
             androidDriver.setSetting("waitForIdleTimeout", 0);
             androidDriver.setSetting("waitForSelectorTimeout", 2_000);
-            log.info("已设置 Android waitForIdleTimeout=0，避免动画导致查找卡住");
+            applyAndroidMultiWindowSettings(androidDriver);
+            log.info("已设置 Android waitForIdleTimeout=0 + multiWindows，避免动画卡住并可见弹窗层");
         } catch (Exception e) {
-            log.warn("设置 waitForIdleTimeout 失败: {}", e.getMessage());
+            log.warn("设置 Android UI settings 失败: {}", e.getMessage());
+        }
+    }
+
+    /** 对齐 Inspector：可见 PopupWindow / 自定义对话框等非焦点窗口 */
+    private void applyAndroidMultiWindowSettings(AndroidDriver androidDriver) {
+        try {
+            androidDriver.setSetting("enableMultiWindows", true);
+        } catch (Exception e) {
+            log.warn("enableMultiWindows 设置失败: {}", e.getMessage());
+        }
+        try {
+            androidDriver.setSetting("enableTopmostWindowFromActivePackage", true);
+        } catch (Exception e) {
+            log.warn("enableTopmostWindowFromActivePackage 设置失败: {}", e.getMessage());
         }
     }
 
     /**
-     * 使用显式 {@code appPackage} + {@code appActivity}（相对 Activity，如 {@code .LauncherActivity}）创建会话并启动应用，
-     * 等价于 Appium caps：{@code appium:appPackage}、{@code appium:appActivity}。
-     * 用于 PogPog 等需固定启动入口的 Android 应用。
+     * 真机点选：挂接/复用 Android 会话，不 force-stop、不重新启动应用，避免关掉当前弹窗。
+     */
+    public boolean attachAndroidUiSession(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) return false;
+        AppiumDriver existing = sessions.get(deviceId);
+        if (existing instanceof AndroidDriver androidDriver) {
+            applyAndroidMultiWindowSettings(androidDriver);
+            return true;
+        }
+        if (existing != null) {
+            return true; // 非 Android 会话已在
+        }
+        try {
+            Device device = deviceMapper.findById(deviceId);
+            if (device == null || device.getPlatform() == null
+                    || !Device.usesAndroidAutomation(device.getPlatform())
+                    || device.getPlatform() == Device.Platform.HARMONYOS) {
+                return false;
+            }
+            URL url = new URL(serverUrl);
+            UiAutomator2Options opts = buildAndroidOptions(deviceId, null);
+            AndroidDriver driver = new AndroidDriver(url, opts);
+            applyAndroidUiStabilitySettings(driver);
+            driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(implicitWaitSeconds));
+            sessions.put(deviceId, driver);
+            log.info("已挂接 Android 点选会话(不重启应用): deviceId={}", deviceId);
+            return true;
+        } catch (Exception e) {
+            log.warn("挂接点选会话失败: deviceId={}, err={}", deviceId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 点选/采集用 page source：确保 multiWindows 后 dump（与 Inspector 同源能力）。
+     */
+    public String getPageSourceWithMultiWindows(String deviceId) {
+        if (!attachAndroidUiSession(deviceId)) {
+            return getPageSource(deviceId);
+        }
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) return null;
+        try {
+            if (driver instanceof AndroidDriver androidDriver) {
+                applyAndroidMultiWindowSettings(androidDriver);
+            }
+            return driver.getPageSource();
+        } catch (Exception e) {
+            log.warn("Appium multiWindow pageSource 失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 先建「无 appPackage」的 Appium 会话（避免 MIUI 上 pm clear 权限失败），再 force-stop + 显式启动 Activity。
      */
     public boolean launchAndroidWithPackageAndRelativeActivity(String deviceId, String appPackage, String relativeActivityDotForm) {
         if (deviceId == null || deviceId.isBlank() || appPackage == null || appPackage.isBlank()) {
             return false;
         }
         String rel = relativeActivityDotForm != null && !relativeActivityDotForm.isBlank() ? relativeActivityDotForm.trim() : ".LauncherActivity";
+        if (!rel.startsWith(".")) {
+            rel = "." + rel;
+        }
         try {
             closeSession(deviceId);
             Device device = deviceMapper.findById(deviceId);
@@ -328,25 +765,67 @@ public class AppiumDriverAdapter implements PlatformDriver {
             }
             forceStopAndroidApp(deviceId, appPackage);
             URL url = new URL(serverUrl);
-            UiAutomator2Options opts = new UiAutomator2Options();
-            opts.setUdid(deviceId);
-            opts.setNewCommandTimeout(Duration.ofSeconds(newCommandTimeout));
-            applyAndroidParallelPorts(opts, deviceId);
-            opts.setCapability("appium:settings[waitForIdleTimeout]", 0);
-            opts.setCapability("appium:settings[waitForSelectorTimeout]", 2_000);
-            opts.setAppPackage(appPackage);
-            opts.setAppActivity(rel.startsWith(".") ? rel : "." + rel);
+            // 会话不带 appPackage/appActivity，避免 Appium 执行 pm clear
+            UiAutomator2Options opts = buildAndroidOptions(deviceId, appPackage);
             AndroidDriver driver = new AndroidDriver(url, opts);
             applyAndroidUiStabilitySettings(driver);
             driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(implicitWaitSeconds));
             sessions.put(deviceId, driver);
-            log.info("Appium 会话已创建（显式 appPackage/appActivity）: deviceId={}, package={}, activity={}", deviceId, appPackage, rel);
+
+            boolean started = startAndroidActivity(deviceId, driver, appPackage, rel);
+            if (!started) {
+                closeSession(deviceId);
+                return false;
+            }
+            log.info("Appium 会话已创建并启动: deviceId={}, package={}, activity={}", deviceId, appPackage, rel);
             return true;
         } catch (MalformedURLException e) {
             log.error("Appium Server URL 无效: {}", serverUrl, e);
             return false;
         } catch (Exception e) {
             log.error("创建 Appium 会话失败(显式 Activity): deviceId={}, package={}", deviceId, appPackage, e);
+            closeSession(deviceId);
+            return false;
+        }
+    }
+
+    /** 优先 mobile: startActivity，失败则 ADB am start */
+    private boolean startAndroidActivity(String deviceId, AndroidDriver driver, String appPackage, String relativeActivity) {
+        String component = appPackage + "/" + relativeActivity;
+        try {
+            driver.executeScript("mobile: startActivity", Map.of(
+                    "component", component,
+                    "package", appPackage,
+                    "activity", relativeActivity
+            ));
+            log.info("mobile: startActivity 成功: {}", component);
+            return true;
+        } catch (Exception e) {
+            log.warn("mobile: startActivity 失败，改用 ADB: {} — {}", component, e.getMessage());
+        }
+        try {
+            Process p = new ProcessBuilder(
+                    "adb", "-s", deviceId, "shell", "am", "start", "-n", component
+            ).redirectErrorStream(true).start();
+            String out;
+            try (java.io.InputStream in = p.getInputStream()) {
+                out = new String(in.readAllBytes());
+            }
+            boolean ok = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0;
+            if (ok) {
+                log.info("ADB am start 成功(会话已建立): {}", component);
+                return true;
+            }
+            log.warn("ADB am start 失败: exit={} out={}", p.exitValue(), out.trim());
+        } catch (Exception e) {
+            log.warn("ADB am start 异常: {}", e.getMessage());
+        }
+        try {
+            driver.activateApp(appPackage);
+            log.info("activateApp 兜底成功: {}", appPackage);
+            return true;
+        } catch (Exception e) {
+            log.warn("activateApp 兜底失败: {}", e.getMessage());
             return false;
         }
     }
@@ -476,6 +955,30 @@ public class AppiumDriverAdapter implements PlatformDriver {
 
     @Override
     public boolean click(String deviceId, int x, int y) {
+        return clickWithMethod(deviceId, x, y, "AUTO");
+    }
+
+    /**
+     * 坐标点击（落点已算好）。
+     * ADB=仅 adb；COORDINATE/ELEMENT=仅 Appium W3C；AUTO=Appium 失败回退 ADB。
+     */
+    public boolean clickWithMethod(String deviceId, int x, int y, String method) {
+        String m = normalizeClickMethod(method);
+        if ("ADB".equals(m)) {
+            return adbInputTap(deviceId, x, y);
+        }
+        boolean appiumOk = clickViaAppium(deviceId, x, y);
+        if (appiumOk) {
+            return true;
+        }
+        if ("COORDINATE".equals(m) || "ELEMENT".equals(m) || "ELEMENT_THEN_COORD".equals(m)) {
+            return false;
+        }
+        log.warn("Appium 坐标点击失败，回退 adb input tap: deviceId={}, ({},{})", deviceId, x, y);
+        return adbInputTap(deviceId, x, y);
+    }
+
+    private boolean clickViaAppium(String deviceId, int x, int y) {
         AppiumDriver driver = sessions.get(deviceId);
         if (driver == null) return false;
         // iOS：先试 mobile: tap（对 App Store 云图标更稳），再 W3C 按压
@@ -504,6 +1007,57 @@ public class AppiumDriverAdapter implements PlatformDriver {
         }
     }
 
+    /** adb shell input tap —— 小米等机型上比 UiAutomator 注入更稳 */
+    public boolean adbInputTap(String deviceId, int x, int y) {
+        try {
+            Process p = new ProcessBuilder(
+                    "adb", "-s", deviceId, "shell", "input", "tap",
+                    String.valueOf(x), String.valueOf(y)
+            ).redirectErrorStream(true).start();
+            String out;
+            try (java.io.InputStream in = p.getInputStream()) {
+                out = new String(in.readAllBytes()).trim();
+            }
+            boolean ok = p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0;
+            if (ok) {
+                log.info("adb input tap 成功: deviceId={}, ({},{})", deviceId, x, y);
+            } else {
+                log.warn("adb input tap 失败: deviceId={}, ({},{}) exit={} out={}",
+                        deviceId, x, y, p.exitValue(), out);
+            }
+            return ok;
+        } catch (Exception e) {
+            log.warn("adb input tap 异常: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 编排 params.clickMethod 归一化：
+     * AUTO | ELEMENT | COORDINATE | ADB | ELEMENT_THEN_COORD
+     * 兼容旧值：APPIUM→ELEMENT，W3C→COORDINATE，BOTH/PREFER_COORD→ELEMENT_THEN_COORD
+     */
+    static String normalizeClickMethod(String method) {
+        if (method == null || method.isBlank()) {
+            return "AUTO";
+        }
+        String m = method.trim().toUpperCase().replace('-', '_');
+        if ("ADB".equals(m) || "ADB_TAP".equals(m) || "INPUT_TAP".equals(m)) {
+            return "ADB";
+        }
+        if ("ELEMENT".equals(m) || "APPIUM".equals(m) || "EL_CLICK".equals(m)) {
+            return "ELEMENT";
+        }
+        if ("COORDINATE".equals(m) || "W3C".equals(m) || "CENTER".equals(m) || "COORD".equals(m)) {
+            return "COORDINATE";
+        }
+        if ("ELEMENT_THEN_COORD".equals(m) || "BOTH".equals(m) || "PREFER_COORD".equals(m)
+                || "PREFER_COORDINATES".equals(m)) {
+            return "ELEMENT_THEN_COORD";
+        }
+        return "AUTO";
+    }
+
     /** 当前会话窗口尺寸 [width, height]；无会话返回 null */
     public int[] getWindowSize(String deviceId) {
         AppiumDriver driver = sessions.get(deviceId);
@@ -521,6 +1075,10 @@ public class AppiumDriverAdapter implements PlatformDriver {
 
     @Override
     public boolean clickElement(String deviceId, String selector) {
+        if (sessions.get(deviceId) == null) {
+            log.warn("无 Appium 会话，回退 uiautomator 点击: {}", selector);
+            return automationEngine.clickElement(deviceId, resolvePlatform(deviceId), selector);
+        }
         WebElement el = findElement(deviceId, selector);
         if (el == null) return false;
         try {
@@ -534,38 +1092,211 @@ public class AppiumDriverAdapter implements PlatformDriver {
                 int y = r.getY() + Math.max(1, r.getHeight() / 2);
                 return click(deviceId, x, y);
             } catch (Exception e2) {
-                log.warn("坐标点击也失败: {}", e2.getMessage());
-                return false;
+                log.warn("坐标点击也失败，尝试 adb: {}", e2.getMessage());
+                try {
+                    org.openqa.selenium.Rectangle r = el.getRect();
+                    int x = r.getX() + Math.max(1, r.getWidth() / 2);
+                    int y = r.getY() + Math.max(1, r.getHeight() / 2);
+                    return adbInputTap(deviceId, x, y);
+                } catch (Exception e3) {
+                    return false;
+                }
             }
         }
     }
 
     /**
-     * 点击元素；若元素 click 后仍在（可选校验），再按中心坐标点一次。
-     * iOS 侧边栏「点击登录」常为 StaticText，element.click 假成功时用坐标补点。
+     * 点击元素；默认 AUTO。
+     * 编排可指定 clickMethod，见 {@link #normalizeClickMethod(String)}。
      */
     public boolean clickElementPreferCoordinates(String deviceId, String selector) {
+        return clickElementPreferCoordinates(deviceId, selector, "AUTO", null);
+    }
+
+    /**
+     * @param clickMethod AUTO | ELEMENT | COORDINATE | ADB | ELEMENT_THEN_COORD
+     */
+    public boolean clickElementPreferCoordinates(String deviceId, String selector, String clickMethod) {
+        return clickElementPreferCoordinates(deviceId, selector, clickMethod, null);
+    }
+
+    /**
+     * @param clickMethod AUTO | ELEMENT | COORDINATE | ADB | ELEMENT_THEN_COORD
+     * @param elementKey  元素库 nameEn（如 CHECK_TO_AGREE）；勾选识别必须靠它，不能只看 locator 串
+     */
+    public boolean clickElementPreferCoordinates(String deviceId, String selector, String clickMethod,
+                                                 String elementKey) {
+        String method = normalizeClickMethod(clickMethod);
+        int[] coord = parseCoordinateSelector(selector);
+        if (coord != null) {
+            boolean ok = switch (method) {
+                case "ADB" -> adbInputTap(deviceId, coord[0], coord[1]);
+                case "COORDINATE", "ELEMENT", "ELEMENT_THEN_COORD" ->
+                        clickWithMethod(deviceId, coord[0], coord[1], "COORDINATE")
+                                || adbInputTap(deviceId, coord[0], coord[1]);
+                default -> clickWithMethod(deviceId, coord[0], coord[1], "AUTO")
+                        || adbInputTap(deviceId, coord[0], coord[1]);
+            };
+            log.info("clickElementPreferCoordinates: coordinate tap ({},{}) method={} ok={}",
+                    coord[0], coord[1], method, ok);
+            return ok;
+        }
+        if (sessions.get(deviceId) == null) {
+            log.warn("无 Appium 会话，回退 uiautomator/ADB 点击: method={}, selector={}", method, selector);
+            return automationEngine.clickElement(deviceId, resolvePlatform(deviceId), selector);
+        }
         WebElement el = findElementWithTimeout(deviceId, selector, 3);
         if (el == null) {
             return false;
         }
+        org.openqa.selenium.Rectangle rect;
         int x;
         int y;
         try {
-            org.openqa.selenium.Rectangle r = el.getRect();
-            x = r.getX() + Math.max(1, r.getWidth() / 2);
-            y = r.getY() + Math.max(1, r.getHeight() / 2);
+            rect = el.getRect();
+            x = rect.getX() + Math.max(1, rect.getWidth() / 2);
+            y = rect.getY() + Math.max(1, rect.getHeight() / 2);
         } catch (Exception e) {
             log.warn("读取元素坐标失败: {}", e.getMessage());
-            return clickElement(deviceId, selector);
+            if ("ADB".equals(method) || "COORDINATE".equals(method)) {
+                return false;
+            }
+            return tryElementClickOnly(el, selector);
         }
+
+        boolean ios = sessions.get(deviceId) instanceof IOSDriver;
+        boolean toggleLike = looksLikeIosToggleOrCheckbox(el, selector, elementKey);
+        // 勾选框若误选「补点」仍会连点两次 → 降级为 AUTO 单次路径
+        if (toggleLike && "ELEMENT_THEN_COORD".equals(method)) {
+            log.warn("勾选/开关勿用 ELEMENT_THEN_COORD，已降级为单次: elementKey={} selector={}",
+                    elementKey, selector);
+            method = "AUTO";
+        }
+        boolean ok;
+        switch (method) {
+            case "ADB" -> ok = adbInputTap(deviceId, x, y);
+            case "COORDINATE" -> ok = clickWithMethod(deviceId, x, y, "COORDINATE");
+            case "ELEMENT" -> ok = tryElementClickOnly(el, selector);
+            case "ELEMENT_THEN_COORD" -> {
+                // 先点再补坐标：适合 iOS StaticText；Android 抽屉会「开又关」，勿滥用
+                try {
+                    el.click();
+                } catch (Exception ignored) {
+                }
+                ok = clickWithMethod(deviceId, x, y, "COORDINATE");
+            }
+            default -> {
+                // AUTO：
+                // - Android：元素 → 坐标 → ADB，只成功一种
+                // - 勾选/开关：只点一次（避免勾上又勾掉）；宽控件点左侧圆点
+                // - iOS 普通按钮（如「点击登录」）：元素 + 坐标补点
+                if (toggleLike) {
+                    ok = clickToggleOnce(deviceId, el, selector, rect, ios);
+                    log.info("AUTO 勾选/开关路径（单次） elementKey={} selector={}", elementKey, selector);
+                } else if (ios) {
+                    try {
+                        el.click();
+                        log.info("iOS AUTO 元素 click 已执行，继续坐标补点: {}", selector);
+                    } catch (Exception e) {
+                        log.warn("iOS AUTO 元素 click 异常，仍尝试坐标: {} — {}", selector, e.getMessage());
+                    }
+                    ok = clickWithMethod(deviceId, x, y, "COORDINATE");
+                    if (!ok) {
+                        ok = tryElementClickOnly(el, selector);
+                    }
+                } else if (tryElementClickOnly(el, selector)) {
+                    ok = true;
+                } else if (clickWithMethod(deviceId, x, y, "COORDINATE")) {
+                    ok = true;
+                } else {
+                    ok = adbInputTap(deviceId, x, y);
+                }
+            }
+        }
+        log.info("clickElementPreferCoordinates: method={} ios={} toggleLike={} elementKey={} selector={} center=({},{}) ok={}",
+                method, ios, toggleLike, elementKey, selector, x, y, ok);
+        return ok;
+    }
+
+    /** 勾选/开关只点一次：优先点矩形左侧（圆点），避免点到协议链接文字。 */
+    private boolean clickToggleOnce(String deviceId, WebElement el, String selector,
+                                    org.openqa.selenium.Rectangle rect, boolean ios) {
+        if (rect != null && rect.getWidth() > 0) {
+            int tapX = rect.getX() + Math.max(8, Math.min(24, Math.max(1, rect.getWidth() / 8)));
+            int tapY = rect.getY() + Math.max(1, rect.getHeight() / 2);
+            if (clickWithMethod(deviceId, tapX, tapY, "COORDINATE")) {
+                log.info("勾选单次坐标点击 (left) ({},{}) selector={}", tapX, tapY, selector);
+                return true;
+            }
+            if (!ios && adbInputTap(deviceId, tapX, tapY)) {
+                return true;
+            }
+        }
+        return tryElementClickOnly(el, selector);
+    }
+
+    private boolean tryElementClickOnly(WebElement el, String selector) {
         try {
             el.click();
-        } catch (Exception ignored) {
+            log.info("element.click 成功: {}", selector);
+            return true;
+        } catch (Exception e) {
+            log.warn("element.click 失败: {} — {}", selector, e.getMessage());
+            return false;
         }
-        boolean tapped = click(deviceId, x, y);
-        log.info("clickElementPreferCoordinates: selector={} center=({},{}) tapped={}", selector, x, y, tapped);
-        return tapped;
+    }
+
+    /**
+     * 协议勾选/开关：AUTO 只能点一次。
+     * 必须同时看 elementKey（nameEn），因为传入的 selector 往往是 xpath/id，不含 CHECK_TO_AGREE。
+     */
+    private static boolean looksLikeIosToggleOrCheckbox(WebElement el, String selector, String elementKey) {
+        StringBuilder sb = new StringBuilder();
+        if (elementKey != null) {
+            sb.append(elementKey).append(' ');
+        }
+        if (selector != null) {
+            sb.append(selector).append(' ');
+        }
+        try {
+            for (String attr : List.of("type", "name", "label", "value")) {
+                String v = el.getAttribute(attr);
+                if (v != null && !v.isBlank()) {
+                    sb.append(v).append(' ');
+                }
+            }
+            try {
+                String tag = el.getTagName();
+                if (tag != null) {
+                    sb.append(tag);
+                }
+            } catch (Exception ignored) {
+                // ignore
+            }
+        } catch (Exception ignored) {
+            // ignore
+        }
+        String s = sb.toString();
+        String lower = s.toLowerCase(Locale.ROOT);
+        if (lower.contains("switch") || lower.contains("checkbox") || lower.contains("toggle")
+                || lower.contains("check_to_agree") || lower.contains("policy_checkbox")
+                || lower.contains("login_policy") || lower.contains("protocol_selected")
+                || (lower.contains("privacy") && (lower.contains("check") || lower.contains("agree")))) {
+            return true;
+        }
+        // nameEn：CHECK_TO_AGREE / agree_checkbox / policy_check —— 勿用过宽的 agree/policy 误伤链接/按钮
+        if (elementKey != null) {
+            String ek = elementKey.toLowerCase(Locale.ROOT).replace('-', '_');
+            if (ek.contains("check_to_agree") || ek.contains("checkbox") || ek.contains("toggle")
+                    || ek.contains("switch") || ek.contains("login_policy")
+                    || ek.contains("protocol_selected") || ek.endsWith("_check") || ek.startsWith("check_")
+                    || (ek.contains("agree") && (ek.contains("check") || ek.contains("box")))
+                    || (ek.contains("policy") && ek.contains("check"))) {
+                return true;
+            }
+        }
+        return s.contains("协议") || s.contains("勾选") || s.contains("已同意")
+                || s.contains("我已阅读") || s.contains("同意并继续") || s.contains("同意协议");
     }
 
     /** iOS/Android deep link（用于打开 App Store / market URI） */
@@ -622,11 +1353,33 @@ public class AppiumDriverAdapter implements PlatformDriver {
     public boolean swipe(String deviceId, int x1, int y1, int x2, int y2, int duration) {
         AppiumDriver driver = sessions.get(deviceId);
         if (driver == null) return false;
+        int durMs = Math.max(100, duration);
+
+        // iOS XCUITest 不支持 Android 的 mobile: swipeGesture
+        if (driver instanceof IOSDriver) {
+            try {
+                // duration 单位：秒
+                double durSec = Math.max(0.15, Math.min(3.0, durMs / 1000.0));
+                driver.executeScript("mobile: dragFromToForDuration", Map.of(
+                        "duration", durSec,
+                        "fromX", x1,
+                        "fromY", y1,
+                        "toX", x2,
+                        "toY", y2
+                ));
+                log.info("iOS dragFromToForDuration 成功: ({},{})->({},{}) dur={}s",
+                        x1, y1, x2, y2, durSec);
+                return true;
+            } catch (Exception e) {
+                log.warn("iOS dragFromToForDuration 失败，回退 W3C: {}", e.getMessage());
+            }
+            return swipeViaW3c(driver, x1, y1, x2, y2, durMs);
+        }
+
         try {
             int left, top, width, height;
             String direction;
             if (x1 == x2) {
-                // 垂直滑动：向上或向下
                 direction = y2 < y1 ? "up" : "down";
                 int minY = Math.min(y1, y2);
                 int maxY = Math.max(y1, y2);
@@ -635,7 +1388,6 @@ public class AppiumDriverAdapter implements PlatformDriver {
                 width = 100;
                 height = Math.max(50, maxY - minY);
             } else if (y1 == y2) {
-                // 水平滑动：向左或向右
                 direction = x2 > x1 ? "right" : "left";
                 int minX = Math.min(x1, x2);
                 int maxX = Math.max(x1, x2);
@@ -643,21 +1395,18 @@ public class AppiumDriverAdapter implements PlatformDriver {
                 top = Math.max(0, y1 - 50);
                 width = Math.max(50, maxX - minX);
                 height = 100;
+            } else if (Math.abs(y2 - y1) >= Math.abs(x2 - x1)) {
+                direction = y2 < y1 ? "up" : "down";
+                left = Math.max(0, Math.min(x1, x2) - 50);
+                top = Math.min(y1, y2);
+                width = 100;
+                height = Math.max(50, Math.abs(y2 - y1));
             } else {
-                // 斜向滑动：按主要方向处理
-                if (Math.abs(y2 - y1) >= Math.abs(x2 - x1)) {
-                    direction = y2 < y1 ? "up" : "down";
-                    left = Math.max(0, Math.min(x1, x2) - 50);
-                    top = Math.min(y1, y2);
-                    width = 100;
-                    height = Math.max(50, Math.abs(y2 - y1));
-                } else {
-                    direction = x2 > x1 ? "right" : "left";
-                    left = Math.min(x1, x2);
-                    top = Math.max(0, Math.min(y1, y2) - 50);
-                    width = Math.max(50, Math.abs(x2 - x1));
-                    height = 100;
-                }
+                direction = x2 > x1 ? "right" : "left";
+                left = Math.min(x1, x2);
+                top = Math.max(0, Math.min(y1, y2) - 50);
+                width = Math.max(50, Math.abs(x2 - x1));
+                height = 100;
             }
             driver.executeScript("mobile: swipeGesture", Map.of(
                     "left", left,
@@ -667,9 +1416,31 @@ public class AppiumDriverAdapter implements PlatformDriver {
                     "direction", direction,
                     "percent", 1.0
             ));
+            log.info("Android swipeGesture 成功: {} ({},{})->({},{})", direction, x1, y1, x2, y2);
             return true;
         } catch (Exception e) {
-            log.warn("Appium 滑动失败 deviceId={} ({},{})->({},{})", deviceId, x1, y1, x2, y2, e);
+            log.warn("Android swipeGesture 失败，回退 W3C: {}", e.getMessage());
+            return swipeViaW3c(driver, x1, y1, x2, y2, durMs);
+        }
+    }
+
+    /** 双端通用：W3C 手指拖动 */
+    private boolean swipeViaW3c(AppiumDriver driver, int x1, int y1, int x2, int y2, int durationMs) {
+        try {
+            PointerInput finger = new PointerInput(PointerInput.Kind.TOUCH, "finger");
+            Sequence seq = new Sequence(finger, 0)
+                    .addAction(finger.createPointerMove(Duration.ZERO, PointerInput.Origin.viewport(), x1, y1))
+                    .addAction(finger.createPointerDown(PointerInput.MouseButton.LEFT.asArg()))
+                    .addAction(new Pause(finger, Duration.ofMillis(80)))
+                    .addAction(finger.createPointerMove(
+                            Duration.ofMillis(Math.max(120, durationMs)),
+                            PointerInput.Origin.viewport(), x2, y2))
+                    .addAction(finger.createPointerUp(PointerInput.MouseButton.LEFT.asArg()));
+            driver.perform(Collections.singletonList(seq));
+            log.info("W3C 滑动成功: ({},{})->({},{})", x1, y1, x2, y2);
+            return true;
+        } catch (Exception e) {
+            log.warn("W3C 滑动失败 ({},{})->({},{}): {}", x1, y1, x2, y2, e.getMessage());
             return false;
         }
     }
@@ -692,11 +1463,37 @@ public class AppiumDriverAdapter implements PlatformDriver {
         WebElement el = findElement(deviceId, selector);
         if (el == null) return false;
         try {
-            el.sendKeys(text);
+            try {
+                el.click();
+            } catch (Exception ignored) {
+            }
+            try {
+                el.clear();
+            } catch (Exception ignored) {
+            }
+            el.sendKeys(text != null ? text : "");
             return true;
         } catch (Exception e) {
-            log.warn("Appium 元素输入失败: selector={}", selector, e);
-            return false;
+            log.warn("Appium 元素输入失败，尝试焦点 EditText: selector={} {}", selector, e.getMessage());
+            try {
+                AppiumDriver driver = sessions.get(deviceId);
+                if (driver == null) return false;
+                // TextView 占位点开后，真正可输入的是 focused EditText
+                WebElement focused = driver.findElement(AppiumBy.xpath("//android.widget.EditText[@focused='true']"));
+                if (focused == null) {
+                    focused = driver.findElement(AppiumBy.className("android.widget.EditText"));
+                }
+                focused.click();
+                try {
+                    focused.clear();
+                } catch (Exception ignored) {
+                }
+                focused.sendKeys(text != null ? text : "");
+                return true;
+            } catch (Exception e2) {
+                log.warn("Appium 焦点 EditText 输入仍失败: {}", e2.getMessage());
+                return false;
+            }
         }
     }
 
@@ -820,29 +1617,244 @@ public class AppiumDriverAdapter implements PlatformDriver {
         return sb.length() > 0 ? sb.toString() : null;
     }
 
+    /**
+     * 这台设备上是否有活跃的 Appium 会话。
+     * <p>
+     * 关键用途：Appium 持有 UiAutomator instrumentation 期间，
+     * {@code adb shell uiautomator dump} 会被顶住——实测卡 127 秒后返回空控件树。
+     * 有会话时控件树必须走会话，不能走 adb dump。
+     */
+    public boolean hasSession(String deviceId) {
+        return deviceId != null && sessions.get(deviceId) != null;
+    }
+
+    /**
+     * 最近一次取控件树失败的原因。
+     * <p>
+     * 原来只有一句 {@code log.warn} 然后返回 null，上层看到的是「驱动返回空控件树」——
+     * 而「取不到」和「屏幕上真没有」表现完全一样，弹窗探测因此静默失效。实测被坑过一次：
+     * 温馨提示明明在屏幕上，日志却说「未发现任何已知弹窗」。
+     */
+    private final java.util.concurrent.atomic.AtomicReference<String> lastPageSourceFailure =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** 供上层写进执行日志：null 表示最近一次是好的 */
+    public String lastPageSourceFailure() {
+        return lastPageSourceFailure.get();
+    }
+
+    /**
+     * 最近一次失败是否像「机上 UiAutomator2/WDA 已挂」——截图还能拍，但控件树/找元素全废。
+     * 实测 Vivo OriginOS 等机型在隐私弹窗页会反复复现，应提示换机而不是改流程定位。
+     */
+    public boolean isUiAutomationLikelyDead() {
+        return looksLikeUiAutomationDead(lastPageSourceFailure.get());
+    }
+
+    /**
+     * 给人看的换机提示（可拼进任务执行日志）。
+     * 技术原因可空；有则附在后面方便排障。
+     */
+    public String deviceMismatchHint(String deviceId, String technicalReason) {
+        String deviceLabel = describeDevice(deviceId);
+        String base = "⚠ 设备与自动化引擎不匹配：" + deviceLabel
+                + " 上 UiAutomator2/控件树不可用（截图能看见界面，但找不到/点不到元素）。"
+                + " 请换用兼容机（如小米等）重跑，勿在本机反复重试同一流程。";
+        if (technicalReason == null || technicalReason.isBlank()) {
+            return base;
+        }
+        return base + " | 技术原因: " + technicalReason.trim();
+    }
+
+    public static boolean looksLikeUiAutomationDead(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return false;
+        }
+        String r = reason.toLowerCase();
+        return r.contains("instrumentation")
+                || r.contains("socket hang up")
+                || r.contains("空控件树")
+                || (r.contains("timeout of") && r.contains("exceeded"))
+                || r.contains("cannot be proxied")
+                || r.contains("uiautomator2 server")
+                || r.contains("not running");
+    }
+
+    private String describeDevice(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return "未知设备";
+        }
+        Device d = deviceMapper.findById(deviceId);
+        if (d == null) {
+            return deviceId;
+        }
+        String name = d.getName() != null && !d.getName().isBlank() ? d.getName().trim() : deviceId;
+        String ver = d.getVersion() != null && !d.getVersion().isBlank() ? d.getVersion().trim() : "";
+        String plat = d.getPlatform() != null ? d.getPlatform().name() : "";
+        String extra = (plat + (ver.isEmpty() ? "" : " " + ver)).trim();
+        return extra.isEmpty() ? name + "(" + deviceId + ")" : name + "/" + extra + "(" + deviceId + ")";
+    }
+
+    private void recordPageSourceFailure(String reason) {
+        String enriched = looksLikeUiAutomationDead(reason)
+                ? reason + "（疑似机型与 UiAutomator2 不兼容，建议换机）"
+                : reason;
+        lastPageSourceFailure.set(enriched);
+    }
+
     @Override
     public String getPageSource(String deviceId) {
         AppiumDriver driver = sessions.get(deviceId);
-        if (driver == null) return null;
+        if (driver != null) {
+            long startedAt = System.currentTimeMillis();
+            try {
+                String src = driver.getPageSource();
+                if (src != null && !src.isBlank()) {
+                    lastPageSourceFailure.set(null);
+                    return src;
+                }
+                recordPageSourceFailure("Appium 会话返回空控件树（耗时 "
+                        + (System.currentTimeMillis() - startedAt) + "ms）");
+                return null;
+            } catch (Exception e) {
+                String reason = "Appium getPageSource " + e.getClass().getSimpleName() + ": "
+                        + firstLineOf(e.getMessage())
+                        + "（耗时 " + (System.currentTimeMillis() - startedAt) + "ms）";
+                recordPageSourceFailure(reason);
+                log.warn("Appium 获取页面源失败: {}", reason);
+            }
+        }
+        // 真机点选常无 Appium 会话：直接走 WDA /source（与截图同源）
+        Device device = deviceMapper.findById(deviceId);
+        if (device != null && Device.usesIosAutomation(device.getPlatform())) {
+            return getPageSourceViaWdaHttp(deviceId);
+        }
+        return null;
+    }
+
+    /**
+     * 不经 Appium 会话：确保 WDA+iproxy 后 GET /source，解析 XML。
+     * 真机点选 iOS 依赖此路径。
+     */
+    public String getPageSourceViaWdaHttp(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return null;
+        }
+        int wdaPort = wdaLocalPortFor(deviceId);
+        if (!deviceManager.ensureIosWdaRunning(deviceId, wdaPort)) {
+            log.warn("WDA HTTP pageSource 失败：WDA 未就绪 deviceId={} port={}", deviceId, wdaPort);
+            return null;
+        }
+        String url = "http://127.0.0.1:" + wdaPort + "/source";
         try {
-            return driver.getPageSource();
+            java.net.HttpURLConnection c = (java.net.HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(5000);
+            c.setReadTimeout(30000);
+            c.setRequestMethod("GET");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) {
+                log.warn("WDA /source HTTP {}: deviceId={} port={}", code, deviceId, wdaPort);
+                c.disconnect();
+                return null;
+            }
+            String body;
+            try (var in = c.getInputStream()) {
+                body = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            c.disconnect();
+            String xml = extractWdaSourceXml(body);
+            if (xml == null || !xml.contains("<")) {
+                log.warn("WDA /source 无 XML value: deviceId={}", deviceId);
+                return null;
+            }
+            log.info("WDA HTTP pageSource 成功: deviceId={} port={} chars={}", deviceId, wdaPort, xml.length());
+            return xml;
         } catch (Exception e) {
-            log.warn("Appium 获取页面源失败", e);
+            log.warn("WDA HTTP pageSource 异常: deviceId={} {}", deviceId, e.getMessage());
             return null;
         }
     }
 
+    /** 从 WDA /source JSON 取出 XML 字符串（{@code {"value":"<?xml ...>"}}）。 */
+    private static String extractWdaSourceXml(String json) {
+        if (json == null) return null;
+        int key = json.indexOf("\"value\"");
+        if (key < 0) return null;
+        int colon = json.indexOf(':', key);
+        if (colon < 0) return null;
+        int i = colon + 1;
+        while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+        if (i >= json.length() || json.charAt(i) != '"') return null;
+        i++;
+        StringBuilder sb = new StringBuilder();
+        while (i < json.length()) {
+            char ch = json.charAt(i++);
+            if (ch == '\\' && i < json.length()) {
+                char n = json.charAt(i++);
+                switch (n) {
+                    case 'n' -> sb.append('\n');
+                    case 'r' -> sb.append('\r');
+                    case 't' -> sb.append('\t');
+                    case '"' -> sb.append('"');
+                    case '\\' -> sb.append('\\');
+                    case '/' -> sb.append('/');
+                    case 'u' -> {
+                        if (i + 4 <= json.length()) {
+                            try {
+                                int cp = Integer.parseInt(json.substring(i, i + 4), 16);
+                                sb.append((char) cp);
+                                i += 4;
+                            } catch (NumberFormatException e) {
+                                sb.append('u').append(n);
+                            }
+                        } else {
+                            sb.append('u');
+                        }
+                    }
+                    default -> sb.append(n);
+                }
+                continue;
+            }
+            if (ch == '"') break;
+            sb.append(ch);
+        }
+        String xml = sb.toString().trim();
+        return xml.contains("<") ? xml : null;
+    }
+
     @Override
     public boolean waitForElement(String deviceId, String selector, int timeoutSeconds) {
+        if (sessions.get(deviceId) == null) {
+            log.warn("无 Appium 会话，回退 uiautomator 等待元素: deviceId={}, selector={}", deviceId, selector);
+            return automationEngine.waitForElement(deviceId, resolvePlatform(deviceId), selector, timeoutSeconds);
+        }
         WebElement el = findElementWithTimeout(deviceId, selector, timeoutSeconds);
         return el != null;
     }
 
     @Override
     public boolean isElementPresent(String deviceId, String selector) {
+        if (sessions.get(deviceId) == null) {
+            return automationEngine.isElementPresent(deviceId, resolvePlatform(deviceId), selector);
+        }
         // 存在性探测必须用短超时：启动/登录等流程会对多个弹窗做“有则点、无则跳过”，
         // 若沿用 implicitWait(默认 10s) 会对每个“不存在”的选择器傻等，前端体感像“半天无响应”。
         return findElementWithTimeout(deviceId, selector, 1) != null;
+    }
+
+    /** Appium 的异常动辄几十行堆栈，只留第一行 */
+    private static String firstLineOf(String msg) {
+        if (msg == null) {
+            return "无异常信息";
+        }
+        int nl = msg.indexOf('\n');
+        String s = nl > 0 ? msg.substring(0, nl) : msg;
+        return s.length() > 300 ? s.substring(0, 300) + "…" : s;
+    }
+
+    private Device.Platform resolvePlatform(String deviceId) {
+        Device d = deviceMapper.findById(deviceId);
+        return d != null && d.getPlatform() != null ? d.getPlatform() : Device.Platform.ANDROID;
     }
 
     @Override
@@ -861,19 +1873,80 @@ public class AppiumDriverAdapter implements PlatformDriver {
         }
     }
 
-    @Override
-    public boolean clickByPageObject(String deviceId, PageObject pageObject, String elementName) {
-        if (pageObject == null || pageObject.getElements() == null) return false;
-        PageObject.PageElement element = pageObject.getElements().get(elementName);
-        if (element == null) return false;
-        String selector = (element.getSelectorType() != null ? element.getSelectorType() : "id") + ":" + element.getSelector();
-        return clickElement(deviceId, selector);
-    }
 
     @Override
     public String getElementAttribute(String deviceId, String selector, String attribute) {
         WebElement el = findElement(deviceId, selector);
         return el != null ? el.getAttribute(attribute) : null;
+    }
+
+    /**
+     * 读勾选/开关状态。WebDriver 与 page source 交叉验证，避免 ImageView 误报 false 导致误点取消勾选。
+     */
+    public Boolean readToggleCheckedState(String deviceId, String selector, String elementKey) {
+        WebElement el = findElementWithTimeout(deviceId, selector, 2);
+        Boolean fromElement = readToggleFromElement(el);
+        Boolean fromXml = null;
+        try {
+            String pageSource = getPageSource(deviceId);
+            fromXml = ToggleStateReader.readCheckedFromPageSource(pageSource, selector);
+            if (fromXml != null) {
+                log.debug("勾选态 page source: elementKey={} selector={} checked={}",
+                        elementKey, selector, fromXml);
+            }
+        } catch (Exception e) {
+            log.debug("page source 读勾选态失败: {}", e.getMessage());
+        }
+        Boolean merged = ToggleStateReader.mergeElementAndPageSource(fromElement, fromXml);
+        if (merged == null && Boolean.FALSE.equals(fromElement)) {
+            log.info("勾选态仅 WebDriver 报 false、page source 无佐证，视为读不准（避免误点）: elementKey={}",
+                    elementKey);
+        }
+        return merged;
+    }
+
+    private static Boolean readToggleFromElement(WebElement el) {
+        if (el == null) {
+            return null;
+        }
+        for (String attr : List.of("checked", "selected", "value")) {
+            try {
+                Boolean parsed = ToggleStateReader.parseToggleValue(el.getAttribute(attr));
+                if (parsed != null) {
+                    return parsed;
+                }
+            } catch (Exception ignored) {
+                // 换下一个属性
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 协议勾选框：从当前屏幕截图识别蓝勾（空圈 vs 蓝勾号）。
+     */
+    public Boolean readCheckboxVisual(String deviceId, String selector) {
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) {
+            return null;
+        }
+        WebElement el = findElementWithTimeout(deviceId, selector, 2);
+        if (el == null) {
+            return null;
+        }
+        try {
+            org.openqa.selenium.Rectangle rect = el.getRect();
+            byte[] png = driver.getScreenshotAs(OutputType.BYTES);
+            Boolean visual = CheckboxVisualReader.inferCheckedFromPng(
+                    png, rect.getX(), rect.getY(), rect.getWidth(), rect.getHeight());
+            if (visual != null) {
+                log.debug("勾选态视觉识别: selector={} checked={}", selector, visual);
+            }
+            return visual;
+        } catch (Exception e) {
+            log.debug("勾选态视觉识别失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     private WebElement findElement(String deviceId, String selector) {
@@ -883,15 +1956,49 @@ public class AppiumDriverAdapter implements PlatformDriver {
     private WebElement findElementWithTimeout(String deviceId, String selector, int timeoutSeconds) {
         AppiumDriver driver = sessions.get(deviceId);
         if (driver == null) return null;
-        By by = parseSelector(selector);
+        String resolved = LocatorTemplate.expandRandomIndexes(selector);
+        if (!resolved.equals(selector)) {
+            log.info("定位随机下标: {} → {}", selector, resolved);
+        }
+        By by = parseSelector(resolved);
         if (by == null) return null;
         try {
             driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(timeoutSeconds));
             return driver.findElement(by);
         } catch (Exception e) {
+            String msg = firstLineOf(e.getMessage());
+            if (looksLikeUiAutomationDead(msg)) {
+                recordPageSourceFailure("findElement: " + msg);
+                log.warn("Appium 找元素失败且疑似 UiAutomator2 已挂: {}", msg);
+            }
             return null;
         } finally {
             driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(implicitWaitSeconds));
+        }
+    }
+
+    /**
+     * 解析 coordinate:x,y / tap:x,y / 纯 "x,y"（配合 locatorType=coordinate）。
+     */
+    static int[] parseCoordinateSelector(String selector) {
+        if (selector == null || selector.isBlank()) return null;
+        String s = selector.trim();
+        String lower = s.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("coordinate:") || lower.startsWith("coord:") || lower.startsWith("tap:")
+                || lower.startsWith("point:")) {
+            s = s.substring(s.indexOf(':') + 1).trim();
+        } else if (!s.matches("^-?\\d+\\s*,\\s*-?\\d+$")) {
+            return null;
+        }
+        String[] parts = s.split(",");
+        if (parts.length != 2) return null;
+        try {
+            int x = Integer.parseInt(parts[0].trim());
+            int y = Integer.parseInt(parts[1].trim());
+            if (x < 0 || y < 0) return null;
+            return new int[]{x, y};
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -905,10 +2012,13 @@ public class AppiumDriverAdapter implements PlatformDriver {
         }
         int colon = selector.indexOf(':');
         String type = selector.substring(0, colon).trim().toLowerCase();
+        if ("coordinate".equals(type) || "coord".equals(type) || "tap".equals(type) || "point".equals(type)) {
+            return null;
+        }
         String value = selector.substring(colon + 1).trim();
         return switch (type) {
             case "id" -> AppiumBy.id(value);
-            case "accessibilityid", "accessibility_id" -> AppiumBy.accessibilityId(value);
+            case "accessibilityid", "accessibility_id", "accessibility id" -> AppiumBy.accessibilityId(value);
             case "xpath" -> By.xpath(value);
             case "name" -> AppiumBy.name(value);
             case "classname", "class" -> By.className(value);

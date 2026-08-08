@@ -5,19 +5,28 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.mobile.standalone.dto.ExecutionLogEntryDto;
+import com.mobile.standalone.dto.FunctionalTestExecutionResult;
 import com.mobile.standalone.dto.PerformanceTestResultDto;
 import com.mobile.standalone.entity.Application;
 import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.entity.Task;
+import com.mobile.standalone.entity.UiFlow;
 import com.mobile.standalone.mapper.ApplicationMapper;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import com.mobile.standalone.service.driver.PlatformDriver;
 import com.mobile.standalone.service.driver.PlatformRouter;
+import com.mobile.standalone.service.perf.AdbPerformanceCollector;
+import com.mobile.standalone.service.perf.NoOpPerformanceCollector;
+import com.mobile.standalone.service.perf.PerformanceCollectorResolver;
+import com.mobile.standalone.service.perf.PerformanceMetricCollector;
+import com.mobile.standalone.service.perf.PerformanceMetricSample;
 import io.appium.java_client.AppiumDriver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.openqa.selenium.Dimension;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -32,8 +41,13 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 /**
- * 性能基础质量测试：自动遍历（启动/点击/滑动）+ 资源采样（CPU、内存），产出结果 JSON 与执行日志。
- * 当前仅支持 Android；需 adb 可用，建议 appium.enabled=true 以便使用 Appium 做滑动/点击。
+ * 性能测试执行：
+ * <ul>
+ *   <li>性能基础质量：随机遍历 + 资源采样（探索性，非业务路径）</li>
+ *   <li>场景化性能：<b>只跑流程编排</b>（config.flowId → {@link UiFlowExecutor}）并同步采样；
+ *       禁止后端写死登录/资讯等业务步骤，业务路径统一在「流程编排」维护</li>
+ * </ul>
+ * 当前仅支持 Android；需 adb 可用，建议 appium.enabled=true。
  */
 @Service
 @RequiredArgsConstructor
@@ -62,12 +76,30 @@ public class PerformanceTestService {
     @Value("${performance.screenshot-interval-seconds:1}")
     private int screenshotIntervalSeconds;
 
+    /** 卡顿判定阈值：采样点 jankPercent ≥ 该值计为一次卡顿问题 */
+    @Value("${performance.jank-percent-threshold:16}")
+    private double jankPercentThreshold;
+
     private final PlatformRouter platformRouter;
     private final ApplicationMapper applicationMapper;
     private final AndroidPerformanceCollector performanceCollector;
+    private final PerformanceCollectorResolver collectorResolver;
+    private final AdbPerformanceCollector adbPerformanceCollector;
+    private final NoOpPerformanceCollector noOpPerformanceCollector;
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
+    private MetricKitIngestService metricKitIngestService;
+
+    @Autowired(required = false)
     private AppiumDriverAdapter appiumDriverAdapter;
+
+    /** 场景化性能只跑流程编排；Lazy 避免循环依赖 */
+    @Lazy
+    @Autowired
+    private UiFlowExecutor uiFlowExecutor;
+
+    @Autowired
+    private UiFlowService uiFlowService;
 
     /**
      * 从任务 config（JSON）解析执行时长（分钟）。支持前端创建任务时传入 config: {"traversalMinutes": 5}。
@@ -90,6 +122,302 @@ public class PerformanceTestService {
     }
 
     /**
+     * 场景化性能测试：必须走流程编排。
+     * <p>config 须含 {@code flowId}（与 UI_FLOW_TEST 相同）；执行 {@link UiFlowExecutor}，期间同步采 CPU/内存/FPS。
+     * 业务步骤只维护在「流程编排 / 元素库」，后端不再写死登录/资讯等路径。
+     */
+    public PerformanceTestExecutionResult runScenarioPerformanceTest(Task task, Device device) {
+        Application app = applicationMapper.findById(task.getAppId());
+        if (app == null) {
+            throw new RuntimeException("应用不存在: " + task.getAppId());
+        }
+        String packageName = app.getPackageName();
+        if (packageName == null || packageName.isBlank()) {
+            packageName = resolvePackageNameFromConfig(task.getConfig());
+        }
+        if (packageName == null || packageName.isBlank()) {
+            throw new RuntimeException("应用包名为空，无法执行场景化性能测试（请在任务应用或 config.packageName 中提供）");
+        }
+        if (!Device.isAndroidOrPogAndroid(device.getPlatform()) && !Device.usesIosAutomation(device.getPlatform())) {
+            List<ExecutionLogEntryDto> logEntries = new ArrayList<>();
+            logEntries.add(ExecutionLogEntryDto.fail("场景化性能测试", "当前仅支持 Android / Pog-Android / iOS / Pog-iOS", null));
+            return new PerformanceTestExecutionResult(null, logEntries, buildUnsupportedResultJson("仅支持 Android / Pog-Android / iOS / Pog-iOS"))
+                    .markFailed("当前平台不支持场景化性能测试");
+        }
+        if (uiFlowExecutor == null) {
+            List<ExecutionLogEntryDto> logEntries = new ArrayList<>();
+            logEntries.add(ExecutionLogEntryDto.fail("场景化性能测试", "UiFlowExecutor 未注入", null));
+            return new PerformanceTestExecutionResult(null, logEntries, buildUnsupportedResultJson("UiFlowExecutor 未注入"))
+                    .markFailed("UiFlowExecutor 未注入");
+        }
+
+        String flowId = resolveFlowIdFromConfig(task.getConfig());
+        List<ExecutionLogEntryDto> executionLog = new ArrayList<>();
+        if (flowId == null || flowId.isBlank()) {
+            executionLog.add(ExecutionLogEntryDto.fail("流程编排",
+                    "场景化性能必须指定流程：config.flowId 不能为空。请先在「流程编排」维护功能流程，再对此流程做性能测试。", null));
+            return new PerformanceTestExecutionResult(null, executionLog,
+                    buildUnsupportedResultJson("缺少 config.flowId：业务路径须来自流程编排"))
+                    .markFailed("场景化性能缺少 config.flowId");
+        }
+
+        UiFlow flow = uiFlowService != null ? uiFlowService.get(flowId) : null;
+        String flowName = flow != null && flow.getName() != null ? flow.getName() : flowId;
+        executionLog.add(ExecutionLogEntryDto.success("场景化性能测试",
+                "流程编排 flowId=" + flowId + "（" + flowName + "），同步采集 CPU/内存/FPS"));
+        executionLog.add(ExecutionLogEntryDto.success("环境", "设备:" + device.getId() + ", 包名:" + packageName));
+
+        return runFlowPerformance(task, device, packageName, flowId, flowName, executionLog);
+    }
+
+    /** 流程编排路径 + 同步采样（唯一业务路径来源） */
+    private PerformanceTestExecutionResult runFlowPerformance(Task task, Device device, String packageName,
+                                                              String flowId, String flowName,
+                                                              List<ExecutionLogEntryDto> executionLog) {
+        String deviceId = device.getId();
+        List<PerformanceTestResultDto.ResourceSample> resourceSamples = new CopyOnWriteArrayList<>();
+        AtomicBoolean samplingStopped = new AtomicBoolean(false);
+        PerformanceCollectorResolver.ResolvedCollector resolved =
+                openCollector(task, device, packageName, executionLog);
+        Thread samplerThread = startSampler(deviceId, packageName, resourceSamples, samplingStopped, resolved.collector());
+
+        List<PerformanceTestResultDto.OperationRecord> operations = new ArrayList<>();
+        FunctionalTestExecutionResult flowResult = null;
+        long t0 = System.currentTimeMillis();
+        long t1;
+        boolean ok = true;
+        String errMsg = null;
+        try {
+            boolean flowHasHotStart = flowStepsContain(flowId, "HOT_START")
+                    || flowStepsContain(flowId, "HOT_START_IOS");
+            boolean flowHasColdOrLaunch = flowStepsContain(flowId, "COLD_START")
+                    || flowStepsContain(flowId, "COLD_START_IOS")
+                    || flowStepsContain(flowId, "LAUNCH_APP")
+                    || flowStepsContain(flowId, "LAUNCH_APP_IOS");
+            if (flowHasHotStart) {
+                executionLog.add(ExecutionLogEntryDto.success("流程执行",
+                        "开始执行（含热启动关键字，不预 force-stop）: " + flowName));
+            } else if (flowHasColdOrLaunch) {
+                executionLog.add(ExecutionLogEntryDto.success("流程执行",
+                        "开始执行（冷启/启动由流程步骤负责）: " + flowName));
+            } else if (Device.isAndroidOrPogAndroid(device.getPlatform())) {
+                executionLog.add(ExecutionLogEntryDto.success("流程执行",
+                        "流程无启动关键字，预 force-stop 后执行: " + flowName));
+                forceStopAndroidApp(deviceId, packageName);
+                sleep(500);
+            } else {
+                executionLog.add(ExecutionLogEntryDto.success("流程执行",
+                        "iOS 流程无启动关键字，直接执行（请在流程中配置 COLD_START_IOS/LAUNCH_APP_IOS）: " + flowName));
+            }
+            t0 = System.currentTimeMillis();
+            flowResult = uiFlowExecutor.execute(task, device);
+            t1 = System.currentTimeMillis();
+        } catch (UiFlowExecutionException e) {
+            t1 = System.currentTimeMillis();
+            ok = false;
+            errMsg = e.getMessage() != null ? e.getMessage() : e.toString();
+            executionLog.add(ExecutionLogEntryDto.fail("流程执行", "流程失败: " + errMsg, null));
+            log.warn("场景化性能(流程编排)失败: flowId={}, err={}", flowId, errMsg);
+            if (e.getExecutionLog() != null) {
+                executionLog.addAll(e.getExecutionLog());
+            }
+        } catch (Exception e) {
+            t1 = System.currentTimeMillis();
+            ok = false;
+            errMsg = e.getMessage() != null ? e.getMessage() : e.toString();
+            executionLog.add(ExecutionLogEntryDto.fail("流程执行", "流程失败: " + errMsg, null));
+            log.warn("场景化性能(流程编排)失败: flowId={}, err={}", flowId, errMsg);
+        } finally {
+            samplingStopped.set(true);
+            joinQuietly(samplerThread, 5000);
+        }
+
+        if (flowResult != null && flowResult.getExecutionLog() != null) {
+            executionLog.addAll(flowResult.getExecutionLog());
+        }
+
+        long durationMs = Math.max(0, t1 - t0);
+        PlatformDriver driver = platformRouter.getDriver(device);
+        String page = null;
+        try {
+            if (driver != null) page = driver.getCurrentActivity(deviceId);
+        } catch (Exception ignored) { }
+
+        operations.add(new PerformanceTestResultDto.OperationRecord(
+                0, "flow", t0, t1, null, null, null, null,
+                page != null ? page : flowId, "流程:" + flowName + "（" + durationMs + "ms）", null, null, null));
+
+        PerformanceTestResultDto.ResourceSummary resourceSummary = buildResourceSummary(resourceSamples);
+        PerformanceTestResultDto.IssueSummary issueSummary = buildIssueSummary(operations, List.of(), resourceSamples);
+        String conclusion = String.format("流程 %s %s，墙钟耗时 %d ms，采样点 %d 个，体验问题 %d 次。",
+                flowName, ok ? "完成" : "失败", durationMs, resourceSamples.size(),
+                issueSummary != null ? issueSummary.getTotalIssueCount() : 0);
+        executionLog.add(ExecutionLogEntryDto.success("测试结论", conclusion));
+
+        int minutes = Math.max(1, (int) Math.ceil(durationMs / 60000.0));
+        Object metricKit = null;
+        if (metricKitIngestService != null && task.getId() != null) {
+            metricKit = metricKitIngestService.get(task.getId());
+        }
+        PerformanceTestResultDto result = PerformanceTestResultDto.builder()
+                .traversalDurationMinutes(minutes)
+                .totalOperations(1)
+                .launchCount(1)
+                .clickCount(0)
+                .swipeCount(0)
+                .conclusion(conclusion)
+                .collectorEngineUsed(resolved.engineUsed())
+                .metricKitSummary(metricKit)
+                .resourceSummary(resourceSummary)
+                .issueSummary(issueSummary)
+                .resourceSamples(resourceSamples.isEmpty() ? null : new ArrayList<>(resourceSamples))
+                .operations(operations)
+                .build();
+
+        PerformanceTestExecutionResult out = toExecutionResult(result, executionLog);
+        if (!ok) {
+            executionLog.add(ExecutionLogEntryDto.fail("结果", "流程未通过，但性能采样数据已保存: " + errMsg, null));
+            // 采样数据保留，但任务必须记失败：流程没跑通的采样只覆盖了一半路径
+            out.markFailed("场景化性能流程未通过: " + errMsg);
+        }
+        return out;
+    }
+
+    private String resolveFlowIdFromConfig(String configJson) {
+        if (configJson == null || configJson.isBlank()) return null;
+        try {
+            JsonNode node = JSON.readTree(configJson);
+            if (node != null && node.hasNonNull("flowId")) {
+                String id = node.get("flowId").asText("");
+                return id.isBlank() ? null : id.trim();
+            }
+        } catch (Exception e) {
+            log.debug("解析 config.flowId 失败: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private String resolvePackageNameFromConfig(String configJson) {
+        if (configJson == null || configJson.isBlank()) return null;
+        try {
+            JsonNode node = JSON.readTree(configJson);
+            if (node != null && node.hasNonNull("packageName")) {
+                String p = node.get("packageName").asText("");
+                return p.isBlank() ? null : p.trim();
+            }
+        } catch (Exception ignored) { }
+        return null;
+    }
+
+    /** 任务 config.collectorEngine：AUTO | ADB | SOLOX | TIDEVICE | NONE，默认 AUTO */
+    private String resolveCollectorEngine(Task task) {
+        if (task == null || task.getConfig() == null || task.getConfig().isBlank()) {
+            return "AUTO";
+        }
+        try {
+            JsonNode node = JSON.readTree(task.getConfig());
+            if (node != null && node.hasNonNull("collectorEngine")) {
+                String e = node.get("collectorEngine").asText("").trim();
+                if (!e.isBlank()) return e;
+            }
+        } catch (Exception ignored) { }
+        return "AUTO";
+    }
+
+    /**
+     * 解析并打开采集会话；Android SoloX 失败回退 ADB；iOS Tidevice 失败回退 NONE。
+     */
+    private PerformanceCollectorResolver.ResolvedCollector openCollector(
+            Task task, Device device, String packageName, List<ExecutionLogEntryDto> executionLog) {
+        String deviceId = device.getId();
+        String pref = resolveCollectorEngine(task);
+        PerformanceCollectorResolver.ResolvedCollector resolved =
+                collectorResolver.resolve(pref, device.getPlatform(), deviceId, packageName, executionLog);
+        PerformanceMetricCollector collector = resolved.collector();
+        String engineUsed = resolved.engineUsed();
+        boolean fellBack = resolved.fellBack();
+        try {
+            collector.startSession(deviceId, packageName);
+        } catch (Exception e) {
+            log.warn("采集引擎 {} 启动失败: {}", collector.engineId(), e.getMessage());
+            try {
+                collector.stopSession(deviceId);
+            } catch (Exception ignored) { }
+            if (Device.usesIosAutomation(device.getPlatform())) {
+                if (executionLog != null) {
+                    executionLog.add(ExecutionLogEntryDto.success("采集引擎",
+                            collector.engineId() + " 启动失败，回退 NONE: " + e.getMessage()));
+                }
+                noOpPerformanceCollector.startSession(deviceId, packageName);
+                return new PerformanceCollectorResolver.ResolvedCollector(noOpPerformanceCollector, "NONE", true);
+            }
+            if (executionLog != null) {
+                executionLog.add(ExecutionLogEntryDto.success("采集引擎",
+                        collector.engineId() + " 启动失败，回退 ADB: " + e.getMessage()));
+            }
+            adbPerformanceCollector.startSession(deviceId, packageName);
+            return new PerformanceCollectorResolver.ResolvedCollector(adbPerformanceCollector, "ADB", true);
+        }
+        return new PerformanceCollectorResolver.ResolvedCollector(collector, engineUsed, fellBack);
+    }
+
+    private Thread startSampler(String deviceId, String packageName,
+                                List<PerformanceTestResultDto.ResourceSample> resourceSamples,
+                                AtomicBoolean samplingStopped,
+                                PerformanceMetricCollector collector) {
+        Thread samplerThread = new Thread(() -> {
+            try {
+                while (!samplingStopped.get()) {
+                    PerformanceMetricSample s = collector.sample(deviceId, packageName);
+                    if (s != null && s.hasAnyMetric()) {
+                        resourceSamples.add(new PerformanceTestResultDto.ResourceSample(
+                                System.currentTimeMillis(),
+                                s.cpuPercent(),
+                                s.memoryPssKb(),
+                                s.networkRxBytes(),
+                                s.networkTxBytes(),
+                                s.temperatureTenthsC(),
+                                s.fps(),
+                                s.jankPercent()
+                        ));
+                    }
+                    for (int i = 0; i < sampleIntervalSeconds && !samplingStopped.get(); i++) {
+                        sleep(1000);
+                    }
+                }
+            } finally {
+                try {
+                    collector.stopSession(deviceId);
+                } catch (Exception e) {
+                    log.debug("停止采集会话: {}", e.getMessage());
+                }
+            }
+        }, "perf-scenario-sampler");
+        samplerThread.setDaemon(true);
+        samplerThread.start();
+        return samplerThread;
+    }
+
+    private PerformanceTestExecutionResult toExecutionResult(PerformanceTestResultDto result,
+                                                             List<ExecutionLogEntryDto> executionLog) {
+        try {
+            return new PerformanceTestExecutionResult(null, executionLog, JSON.writeValueAsString(result));
+        } catch (JsonProcessingException e) {
+            log.warn("序列化场景化性能结果失败", e);
+            return new PerformanceTestExecutionResult(null, executionLog, buildErrorResultJson("结果序列化失败"));
+        }
+    }
+
+    private static void joinQuietly(Thread t, long ms) {
+        if (t == null) return;
+        try {
+            t.join(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
      * 执行性能基础质量测试，返回执行日志与结果 JSON（写入 result_data）。
      * 执行时长可从任务 config.traversalMinutes 读取（创建任务时前端传入），否则使用配置项默认值。
      */
@@ -106,8 +434,9 @@ public class PerformanceTestService {
         }
         if (!Device.isAndroidOrPogAndroid(device.getPlatform())) {
             List<ExecutionLogEntryDto> log = new ArrayList<>();
-            log.add(ExecutionLogEntryDto.fail("性能测试", "当前仅支持 Android / Pog-Android 设备", null));
-            String resultJson = buildUnsupportedResultJson("仅支持 Android / Pog-Android 设备");
+            log.add(ExecutionLogEntryDto.fail("性能测试",
+                    "遍历探索仅支持 Android / Pog-Android；iOS 请用「流程性能测试」+ Tidevice/MetricKit", null));
+            String resultJson = buildUnsupportedResultJson("遍历探索仅支持 Android；iOS 请用流程性能测试");
             return new PerformanceTestExecutionResult(null, log, resultJson);
         }
 
@@ -118,7 +447,8 @@ public class PerformanceTestService {
         PlatformDriver driver = platformRouter.getDriver(device);
         if (driver == null) {
             executionLog.add(ExecutionLogEntryDto.fail("获取驱动", "无法获取平台驱动", null));
-            return new PerformanceTestExecutionResult(null, executionLog, buildUnsupportedResultJson("无法获取平台驱动"));
+            return new PerformanceTestExecutionResult(null, executionLog, buildUnsupportedResultJson("无法获取平台驱动"))
+                    .markFailed("无法获取平台驱动");
         }
 
         // 性能测试每次均从冷启动开始：先强制结束应用，再启动，避免在上次运行基础上继续
@@ -150,13 +480,24 @@ public class PerformanceTestService {
             }
         }
 
-        // 启动应用
+        // 启动应用（任意已安装 Android 包均可；启动后校验前台）
         executionLog.add(ExecutionLogEntryDto.success("启动应用", "正在启动 " + packageName));
         if (!driver.launchApp(deviceId, packageName)) {
-            executionLog.add(ExecutionLogEntryDto.fail("启动应用", "启动失败", null));
-            return new PerformanceTestExecutionResult(null, executionLog, buildErrorResultJson("启动应用失败"));
+            executionLog.add(ExecutionLogEntryDto.fail("启动应用", "启动失败: " + packageName, null));
+            return new PerformanceTestExecutionResult(null, executionLog, buildErrorResultJson("启动应用失败"))
+                    .markFailed("启动应用失败");
         }
-        sleep(3000);
+        sleep(1500);
+        String fg = performanceCollector.getForegroundPackage(deviceId);
+        boolean inFg = performanceCollector.isAppInForeground(deviceId, packageName);
+        executionLog.add(ExecutionLogEntryDto.success("启动校验",
+                "前台包名=" + (fg != null ? fg : "未知") + (inFg ? "（已在前台）" : "（未在前台，请确认手机屏幕）")));
+        if (!inFg && performanceCollector.getPid(deviceId, packageName) == null) {
+            executionLog.add(ExecutionLogEntryDto.fail("启动应用", "目标应用未运行: " + packageName, null));
+            return new PerformanceTestExecutionResult(null, executionLog, buildErrorResultJson("启动应用失败: " + packageName))
+                    .markFailed("启动应用失败: " + packageName);
+        }
+        sleep(1500);
 
         int width;
         int height;
@@ -174,27 +515,9 @@ public class PerformanceTestService {
         // 资源采样列表（后台线程写入）
         List<PerformanceTestResultDto.ResourceSample> resourceSamples = new CopyOnWriteArrayList<>();
         AtomicBoolean samplingStopped = new AtomicBoolean(false);
-        Thread samplerThread = new Thread(() -> {
-            while (!samplingStopped.get()) {
-                AndroidPerformanceCollector.Sample s = performanceCollector.sample(deviceId, packageName);
-                if (s.getCpuPercent() != null || s.getMemoryPssKb() != null
-                        || s.getNetworkRxBytes() != null || s.getNetworkTxBytes() != null || s.getTemperatureTenthsC() != null) {
-                    resourceSamples.add(new PerformanceTestResultDto.ResourceSample(
-                            System.currentTimeMillis(),
-                            s.getCpuPercent(),
-                            s.getMemoryPssKb(),
-                            s.getNetworkRxBytes(),
-                            s.getNetworkTxBytes(),
-                            s.getTemperatureTenthsC()
-                    ));
-                }
-                for (int i = 0; i < sampleIntervalSeconds && !samplingStopped.get(); i++) {
-                    sleep(1000);
-                }
-            }
-        }, "perf-sampler");
-        samplerThread.setDaemon(true);
-        samplerThread.start();
+        PerformanceCollectorResolver.ResolvedCollector resolved =
+                openCollector(task, device, packageName, executionLog);
+        Thread samplerThread = startSampler(deviceId, packageName, resourceSamples, samplingStopped, resolved.collector());
 
         // 可选：按间隔在后台线程截屏，供「遍历统计」「操作详情」展示；与主线程共用 driver，可能有轻微串行
         List<Long> blackWhiteTimestamps = new CopyOnWriteArrayList<>(); // 判定为「黑白块」的截图时间戳，用于按操作类型归因
@@ -324,7 +647,7 @@ public class PerformanceTestService {
         fillOperationScreenshotsAndWhiteScreen(operations, screenshotTimeline, blackWhiteTimestamps, screenshotIntervalSeconds);
 
         PerformanceTestResultDto.ResourceSummary resourceSummary = buildResourceSummary(resourceSamples);
-        PerformanceTestResultDto.IssueSummary issueSummary = buildIssueSummary(operations, blackWhiteTimestamps);
+        PerformanceTestResultDto.IssueSummary issueSummary = buildIssueSummary(operations, blackWhiteTimestamps, resourceSamples);
         String conclusion = String.format("总共遍历 %d 分钟，执行操作 %d 次，发现较好体验问题 %d 次。",
                 effectiveTraversalMinutes, totalOps, issueSummary != null ? issueSummary.getTotalIssueCount() : 0);
         executionLog.add(ExecutionLogEntryDto.success("测试结论", conclusion));
@@ -337,6 +660,7 @@ public class PerformanceTestService {
                 .clickCount(clickCount)
                 .swipeCount(swipeCount)
                 .conclusion(conclusion)
+                .collectorEngineUsed(resolved.engineUsed())
                 .resourceSummary(resourceSummary)
                 .issueSummary(issueSummary)
                 .resourceSamples(resourceSamples.isEmpty() ? null : new ArrayList<>(resourceSamples))
@@ -395,7 +719,8 @@ public class PerformanceTestService {
         long netTxMin = Long.MAX_VALUE, netTxMax = Long.MIN_VALUE, netTxSum = 0;
         int tempMin = Integer.MAX_VALUE, tempMax = Integer.MIN_VALUE;
         long tempSum = 0;
-        int cpuCnt = 0, memCnt = 0, netRxCnt = 0, netTxCnt = 0, tempCnt = 0;
+        double fpsMin = Double.MAX_VALUE, fpsMax = Double.MIN_VALUE, fpsSum = 0;
+        int cpuCnt = 0, memCnt = 0, netRxCnt = 0, netTxCnt = 0, tempCnt = 0, fpsCnt = 0;
         for (PerformanceTestResultDto.ResourceSample s : samples) {
             if (s.getCpuPercent() != null) {
                 cpuMin = Math.min(cpuMin, s.getCpuPercent());
@@ -427,13 +752,20 @@ public class PerformanceTestService {
                 tempSum += s.getTemperatureTenthsC();
                 tempCnt++;
             }
+            if (s.getFps() != null) {
+                fpsMin = Math.min(fpsMin, s.getFps());
+                fpsMax = Math.max(fpsMax, s.getFps());
+                fpsSum += s.getFps();
+                fpsCnt++;
+            }
         }
         return new PerformanceTestResultDto.ResourceSummary(
                 cpuCnt > 0 ? new PerformanceTestResultDto.MetricStat(cpuMax, cpuMin == Double.MAX_VALUE ? 0 : cpuMin, cpuSum / cpuCnt) : null,
                 memCnt > 0 ? new PerformanceTestResultDto.MetricStat((double) memMax, (double) memMin, (double) memSum / memCnt) : null,
                 netRxCnt > 0 ? new PerformanceTestResultDto.MetricStat((double) netRxMax, (double) (netRxMin == Long.MAX_VALUE ? 0 : netRxMin), (double) netRxSum / netRxCnt) : null,
                 netTxCnt > 0 ? new PerformanceTestResultDto.MetricStat((double) netTxMax, (double) (netTxMin == Long.MAX_VALUE ? 0 : netTxMin), (double) netTxSum / netTxCnt) : null,
-                tempCnt > 0 ? new PerformanceTestResultDto.MetricStat(tempMax / 10.0, tempMin == Integer.MAX_VALUE ? 0 : tempMin / 10.0, (tempSum / (double) tempCnt) / 10.0) : null
+                tempCnt > 0 ? new PerformanceTestResultDto.MetricStat(tempMax / 10.0, tempMin == Integer.MAX_VALUE ? 0 : tempMin / 10.0, (tempSum / (double) tempCnt) / 10.0) : null,
+                fpsCnt > 0 ? new PerformanceTestResultDto.MetricStat(fpsMax, fpsMin == Double.MAX_VALUE ? 0 : fpsMin, fpsSum / fpsCnt) : null
         );
     }
 
@@ -474,7 +806,9 @@ public class PerformanceTestService {
         }
     }
 
-    private PerformanceTestResultDto.IssueSummary buildIssueSummary(List<PerformanceTestResultDto.OperationRecord> operations, List<Long> blackWhiteTimestamps) {
+    private PerformanceTestResultDto.IssueSummary buildIssueSummary(List<PerformanceTestResultDto.OperationRecord> operations,
+                                                                   List<Long> blackWhiteTimestamps,
+                                                                   List<PerformanceTestResultDto.ResourceSample> samples) {
         int responseDelayCount = 0;
         int completionDelayCount = 0;
         int launchResp = 0, launchComp = 0, clickResp = 0, clickComp = 0, swipeResp = 0, swipeComp = 0;
@@ -496,7 +830,23 @@ public class PerformanceTestService {
                 }
             }
         }
-        int stutterCount = 0; // 卡顿需帧率/掉帧数据，当前未实现
+        int stutterCount = 0;
+        int launchStutter = 0, swipeStutter = 0, clickStutter = 0;
+        if (samples != null && !samples.isEmpty() && operations != null && !operations.isEmpty()) {
+            for (PerformanceTestResultDto.ResourceSample s : samples) {
+                if (s.getJankPercent() == null || s.getJankPercent() < jankPercentThreshold) continue;
+                stutterCount++;
+                int idx = findOperationIndexByTime(operations, s.getTimestampMs() != null ? s.getTimestampMs() : 0L);
+                if (idx >= 0 && idx < operations.size()) {
+                    switch (operations.get(idx).getType()) {
+                        case "launch" -> launchStutter++;
+                        case "swipe" -> swipeStutter++;
+                        case "click" -> clickStutter++;
+                        default -> { }
+                    }
+                }
+            }
+        }
         int launchBw = 0, swipeBw = 0, clickBw = 0;
         if (blackWhiteTimestamps != null && !blackWhiteTimestamps.isEmpty() && !operations.isEmpty()) {
             for (Long ts : blackWhiteTimestamps) {
@@ -515,9 +865,9 @@ public class PerformanceTestService {
         int avCount = 0; // 音视频问题预留
         int total = responseDelayCount + completionDelayCount + stutterCount + blackWhiteBlockCount + avCount;
         Map<String, PerformanceTestResultDto.OperationTypeIssueCounts> byType = new LinkedHashMap<>();
-        byType.put("启动操作", new PerformanceTestResultDto.OperationTypeIssueCounts(launchResp, launchComp, 0, 0, launchBw));
-        byType.put("滑动操作", new PerformanceTestResultDto.OperationTypeIssueCounts(swipeResp, swipeComp, 0, 0, swipeBw));
-        byType.put("点击操作", new PerformanceTestResultDto.OperationTypeIssueCounts(clickResp, clickComp, 0, 0, clickBw));
+        byType.put("启动操作", new PerformanceTestResultDto.OperationTypeIssueCounts(launchResp, launchComp, launchStutter, 0, launchBw));
+        byType.put("滑动操作", new PerformanceTestResultDto.OperationTypeIssueCounts(swipeResp, swipeComp, swipeStutter, 0, swipeBw));
+        byType.put("点击操作", new PerformanceTestResultDto.OperationTypeIssueCounts(clickResp, clickComp, clickStutter, 0, clickBw));
         byType.put("观看视频", new PerformanceTestResultDto.OperationTypeIssueCounts(0, 0, 0, 0, 0));
         return new PerformanceTestResultDto.IssueSummary(responseDelayCount, completionDelayCount, stutterCount, blackWhiteBlockCount, avCount, total, byType);
     }
@@ -649,6 +999,27 @@ public class PerformanceTestService {
         }
     }
 
+    /** 流程 steps JSON 是否包含指定 keywordCode（含嵌套 then/else）。 */
+    private boolean flowStepsContain(String flowId, String keywordCode) {
+        if (flowId == null || keywordCode == null || uiFlowService == null) return false;
+        try {
+            UiFlow flow = uiFlowService.get(flowId);
+            if (flow == null || flow.getSteps() == null || flow.getSteps().isBlank()) return false;
+            return flowStepsJsonContains(flow.getSteps(), keywordCode);
+        } catch (Exception e) {
+            log.debug("解析流程关键字失败 flowId={}: {}", flowId, e.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean flowStepsJsonContains(String stepsJson, String keywordCode) {
+        if (stepsJson == null || keywordCode == null) return false;
+        // 轻量匹配：足够判断是否含该关键字，避免再引一套嵌套解析
+        String needle = "\"keywordCode\":\"" + keywordCode + "\"";
+        String needleSpaced = "\"keywordCode\": \"" + keywordCode + "\"";
+        return stepsJson.contains(needle) || stepsJson.contains(needleSpaced);
+    }
+
     /** Android：强制结束应用进程，确保性能测试每次从冷启动开始，不依赖上次运行状态 */
     private void forceStopAndroidApp(String deviceId, String packageName) {
         if (packageName == null || packageName.isBlank()) return;
@@ -678,5 +1049,26 @@ public class PerformanceTestService {
         private String reportPath;
         private List<ExecutionLogEntryDto> executionLog;
         private String resultDataJson;
+        /**
+         * 本次性能测试是否失败。
+         * <p>
+         * 缺了这个字段时，性能任务无论流程有没有跑通都记 COMPLETED——
+         * 采样数据是残缺的，报告上却显示「完成」，性能数据的可信度直接归零。
+         */
+        private boolean failed;
+        /** 失败原因，写进 execution.error_message */
+        private String errorMessage;
+
+        public PerformanceTestExecutionResult(String reportPath, List<ExecutionLogEntryDto> executionLog,
+                                              String resultDataJson) {
+            this(reportPath, executionLog, resultDataJson, false, null);
+        }
+
+        /** 标记为失败并返回自身，便于在 return 处一行写完 */
+        public PerformanceTestExecutionResult markFailed(String reason) {
+            this.failed = true;
+            this.errorMessage = reason;
+            return this;
+        }
     }
 }

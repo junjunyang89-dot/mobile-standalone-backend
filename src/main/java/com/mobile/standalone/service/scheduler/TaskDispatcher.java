@@ -2,7 +2,6 @@ package com.mobile.standalone.service.scheduler;
 
 import com.mobile.standalone.entity.*;
 import com.mobile.standalone.mapper.DeviceMapper;
-import com.mobile.standalone.service.CaseEngine;
 import com.mobile.standalone.service.FunctionalTestScenarioService;
 import com.mobile.standalone.service.TestPlanService;
 import com.mobile.standalone.service.TaskService;
@@ -12,19 +11,19 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * 任务分发器
- * 接收 Quartz 调度器的触发：按场景执行（创建任务并运行）或按用例列表执行。
- * 支持批量设备(deviceIds)、批量场景(scenarioIds)。
+ * 接收 Quartz 调度器的触发：按场景创建任务并运行，支持批量设备(deviceIds)、批量场景(scenarioIds)。
+ * <p>
+ * 定时与手动触发走同一条执行链（{@link TaskService#runTask}），不再有第二套用例引擎——
+ * 旧的 caseIds 分支依赖已下线的 CaseEngine/PageObject，且前端从未提供入口，已移除。
  */
 @Component
 @RequiredArgsConstructor
 @Slf4j
 public class TaskDispatcher {
 
-    private final CaseEngine caseEngine;
     private final TestPlanService testPlanService;
     private final DeviceMapper deviceMapper;
     private final FunctionalTestScenarioService scenarioService;
@@ -76,19 +75,10 @@ public class TaskDispatcher {
                 }
             }
         } else if (plan.getCaseIds() != null && !plan.getCaseIds().isEmpty()) {
-            for (String deviceId : deviceIds) {
-                Device device = deviceMapper.findById(deviceId);
-                if (device == null || device.getStatus() != Device.DeviceStatus.CONNECTED) continue;
-                for (String caseId : plan.getCaseIds()) {
-                    try {
-                        executeCase(plan, caseId, device);
-                    } catch (Exception e) {
-                        log.error("执行用例失败: planId={}, caseId={}", planId, caseId, e);
-                    }
-                }
-            }
+            log.error("测试计划配置了已下线的 caseIds，未执行：请改为配置 scenarioIds（流程编排）。planId={}, caseIds={}",
+                    planId, plan.getCaseIds());
         } else {
-            log.warn("测试计划既未配置 scenarioId/scenarioIds 也未配置 caseIds: {}", planId);
+            log.warn("测试计划未配置 scenarioId/scenarioIds: {}", planId);
         }
 
         testPlanService.updateLastRunTime(planId);
@@ -139,41 +129,5 @@ public class TaskDispatcher {
         Task created = taskService.createTask(task);
         taskService.runTask(created.getId());
         log.info("定时计划已创建并提交任务: planId={}, deviceId={}, scenarioId={}, taskId={}", plan.getId(), device.getId(), scenarioId, created.getId());
-    }
-    
-    /**
-     * 执行单个用例
-     */
-    private void executeCase(TestPlan plan, String caseId, Device device) {
-        TestCase testCase = testPlanService.getCaseById(caseId);
-        if (testCase == null) {
-            log.warn("测试用例不存在: {}", caseId);
-            return;
-        }
-        
-        log.info("执行用例: {}, 计划: {}", testCase.getName(), plan.getName());
-        
-        // 执行用例
-        TestReport report = caseEngine.executeCase(testCase, device, plan.getAppId());
-        
-        // 关联计划ID和执行ID
-        report.setPlanId(plan.getId());
-        
-        // 创建任务执行记录
-        TaskExecution execution = new TaskExecution();
-        execution.setId(UUID.randomUUID().toString());
-        execution.setTaskId(plan.getId()); // 使用计划ID作为任务ID
-        execution.setStatus(TaskExecution.ExecutionStatus.valueOf(report.getStatus().name()));
-        execution.setStartTime(report.getStartTime());
-        execution.setEndTime(report.getEndTime());
-        execution.setErrorMessage(report.getErrorMessage());
-        
-        report.setExecutionId(execution.getId());
-        
-        // 保存报告和执行记录
-        testPlanService.saveReport(report);
-        // TODO: 保存 execution 到数据库
-        
-        log.info("用例执行完成: {}, 结果: {}", testCase.getName(), report.getStatus());
     }
 }

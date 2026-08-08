@@ -1,7 +1,15 @@
 package com.mobile.standalone.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.mobile.standalone.entity.Application;
+import com.mobile.standalone.entity.Task;
+import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.entity.UiFlow;
+import com.mobile.standalone.service.TaskAppResolver;
+import com.mobile.standalone.service.TaskService;
 import com.mobile.standalone.service.UiFlowService;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -10,23 +18,38 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 拖拽流程/组件 CRUD。steps 只引用 keywordCode + elementKey。
+ * 拖拽流程/组件 CRUD + 执行（创建 UI_FLOW_TEST 任务并可立即 run）。
  */
 @RestController
 @RequestMapping("/ui-flows")
 @RequiredArgsConstructor
 public class UiFlowController {
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     private final UiFlowService uiFlowService;
+    private final TaskService taskService;
+    private final TaskAppResolver taskAppResolver;
 
     @GetMapping
     public ResponseEntity<List<UiFlow>> list(
             @RequestParam(required = false) String appId,
             @RequestParam(required = false) String platform,
             @RequestParam(required = false) String catalog,
-            @RequestParam(required = false) Boolean componentOnly
+            @RequestParam(required = false) Boolean componentOnly,
+            @RequestParam(required = false) Boolean forRegression,
+            /**
+             * 环境（PROD / TEST）。回归勾选列表缺省按生产，存量前端行为不变；
+             * 普通列表缺省不过滤，等于「全部环境」。
+             */
+            @RequestParam(required = false) String environment,
+            /** 批量执行候选：REGRESSION（默认）/ AUTOMATION，与 forRegression 配合用 */
+            @RequestParam(required = false) String track
     ) {
-        return ResponseEntity.ok(uiFlowService.list(appId, platform, catalog, componentOnly));
+        if (Boolean.TRUE.equals(forRegression)) {
+            return ResponseEntity.ok(uiFlowService.listForBatch(appId, platform, environment, track));
+        }
+        return ResponseEntity.ok(uiFlowService.list(appId, platform, catalog, componentOnly, environment));
     }
 
     @GetMapping("/{id}")
@@ -57,5 +80,138 @@ public class UiFlowController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(@PathVariable String id) {
         return uiFlowService.delete(id) ? ResponseEntity.ok(Map.of("ok", true)) : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * 这条流程用到的定位变量名。
+     * <p>
+     * 前端据此在执行对话框里自动列出输入框——否则人得记住哪条流程要填什么，
+     * 忘了就是一次「元素未找到」的白跑。
+     */
+    @GetMapping("/{id}/locator-variables")
+    public ResponseEntity<List<String>> locatorVariables(@PathVariable String id) {
+        UiFlow flow = uiFlowService.get(id);
+        if (flow == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(uiFlowService.collectLocatorVariables(flow));
+    }
+
+    /**
+     * 执行流程：创建 UI_FLOW_TEST 任务（写入测试任务列表），默认立即 run。
+     * 应用来源（勿写死）：请求 appId / packageName → 流程绑定 appId；包名可执行时覆盖。
+     */
+    @PostMapping("/{id}/execute")
+    public ResponseEntity<?> execute(@PathVariable String id, @RequestBody ExecuteFlowRequest body) {
+        UiFlow flow = uiFlowService.get(id);
+        if (flow == null) {
+            return ResponseEntity.notFound().build();
+        }
+        if (body == null || body.getDeviceId() == null || body.getDeviceId().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "deviceId 必填"));
+        }
+        try {
+            Task.Platform platform = body.getPlatform();
+            if (platform == null) {
+                if (flow.getPlatform() != null && !flow.getPlatform().isBlank()) {
+                    platform = Task.Platform.valueOf(flow.getPlatform().trim().toUpperCase());
+                } else {
+                    platform = Task.Platform.ANDROID;
+                }
+            }
+
+            String uiAppId = blankToNull(body.getAppId());
+            if (uiAppId == null) {
+                uiAppId = blankToNull(flow.getAppId());
+            }
+            String packageName = blankToNull(body.getPackageName());
+            String activity = blankToNull(body.getActivity());
+            if (uiAppId == null && packageName == null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "message", "请选择应用字典，或填写要启动的包名/BundleId"));
+            }
+
+            Application installed = taskAppResolver.resolveForTask(
+                    uiAppId, body.getDeviceId().trim(), platform, packageName);
+
+            ObjectNode config = JSON.createObjectNode();
+            config.put("flowId", id);
+            if (uiAppId != null) {
+                config.put("uiAppId", uiAppId);
+            }
+            if (packageName != null) {
+                config.put("packageName", packageName);
+            }
+            if (activity != null) {
+                config.put("activity", activity);
+            }
+            if (body.getParams() != null && !body.getParams().isEmpty()) {
+                config.set("params", JSON.valueToTree(body.getParams()));
+            }
+            String environment = TestEnvironment.normalize(body.getEnvironment());
+            config.put("environment", environment);
+
+            Task task = new Task();
+            String name = body.getTaskName();
+            if (name == null || name.isBlank()) {
+                // 环境写进任务名：两个环境的报告混在一列时，不点开也能分清
+                name = "流程" + TestEnvironment.tag(environment) + "-"
+                        + (flow.getName() != null ? flow.getName() : id);
+            }
+            task.setName(name);
+            task.setDescription(flow.getDescription());
+            task.setTaskType(Task.TaskType.UI_FLOW_TEST);
+            task.setPlatform(platform);
+            task.setDeviceId(body.getDeviceId().trim());
+            task.setAppId(installed.getId());
+            task.setConfig(JSON.writeValueAsString(config));
+            task.setScenarioKey("ui_flow");
+            task.setStatus(Task.TaskStatus.PENDING);
+
+            Task created = taskService.createTask(task);
+            boolean runNow = body.getRunNow() == null || Boolean.TRUE.equals(body.getRunNow());
+            boolean started = false;
+            if (runNow) {
+                started = taskService.runTask(created.getId());
+            }
+            return ResponseEntity.ok(Map.of(
+                    "taskId", created.getId(),
+                    "task", created,
+                    "started", started,
+                    "message", started ? "已创建任务并开始执行" : "已创建任务（未自动执行）"
+            ));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
+        } catch (Exception ex) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", ex.getMessage() != null ? ex.getMessage() : "执行失败"));
+        }
+    }
+
+    private static String blankToNull(String s) {
+        if (s == null || s.isBlank()) return null;
+        return s.trim();
+    }
+
+    @Data
+    public static class ExecuteFlowRequest {
+        private String deviceId;
+        private Task.Platform platform;
+        /** 应用字典 id；可与 packageName 二选一或同时传（包名优先生效于启动） */
+        private String appId;
+        /** 自定义包名 / BundleId，不在字典里的应用可直接填 */
+        private String packageName;
+        /** Android 可选启动 Activity */
+        private String activity;
+        private String taskName;
+        private Map<String, String> params;
+        private Boolean runNow;
+        /**
+         * 执行环境：TEST / PROD，缺省 PROD。
+         * <p>
+         * 包名两个环境一样、元素定位也通用，环境只决定「装的是哪个构建、用哪套验证码」，
+         * 以及报告和归因上怎么标——所以它是执行参数，不是流程属性，流程不用分两份维护。
+         */
+        private String environment;
     }
 }

@@ -21,6 +21,8 @@ public class OnlineRegressionStep {
     private LocalDateTime updatedAt;
 
     public enum Status {
-        PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
+        PENDING, RUNNING, SUCCESS, FAILED, SKIPPED,
+        /** 首次失败、重跑通过：功能是好的，但这条用例不稳定，需要治理 */
+        UNSTABLE
     }
 }

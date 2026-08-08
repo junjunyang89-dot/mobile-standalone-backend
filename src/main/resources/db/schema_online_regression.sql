@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS online_regression_runs (
     selected_features TEXT NOT NULL COMMENT 'JSON 数组',
     ordered_steps TEXT NULL COMMENT '排序后原子步骤 JSON',
     enable_overseas_proxy TINYINT(1) NOT NULL DEFAULT 0,
+    environment VARCHAR(16) NULL COMMENT 'PROD/TEST，空按 PROD',
+    track VARCHAR(16) NULL COMMENT 'REGRESSION/AUTOMATION，空按 REGRESSION',
     pass_rate INT NULL,
     error_message TEXT NULL,
     started_at DATETIME NULL,

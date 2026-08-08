@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiCodeDirMapper">
+
+    <resultMap id="Map" type="com.mobile.standalone.entity.ApiCodeDir">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="label" column="label"/>
+        <result property="dirPath" column="dir_path"/>
+        <result property="isBaseline" column="is_baseline"/>
+        <result property="remark" column="remark"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByProject" resultMap="Map">
+        SELECT * FROM api_code_dirs
+        <where>
+            <if test="project != null and project != ''">AND project = #{project}</if>
+        </where>
+        ORDER BY is_baseline DESC, sort_order ASC, id DESC
+    </select>
+
+    <select id="findById" resultMap="Map">
+        SELECT * FROM api_code_dirs WHERE id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO api_code_dirs (project, label, dir_path, is_baseline, remark, sort_order, created_at, updated_at)
+        VALUES (#{project}, #{label}, #{dirPath}, #{isBaseline}, #{remark}, #{sortOrder}, NOW(), NOW())
+    </insert>
+
+    <update id="update">
+        UPDATE api_code_dirs
+        SET project = #{project}, label = #{label}, dir_path = #{dirPath},
+            is_baseline = #{isBaseline}, remark = #{remark}, sort_order = #{sortOrder}, updated_at = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM api_code_dirs WHERE id = #{id}
+    </delete>
+</mapper>

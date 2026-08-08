@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.UiH5PageMapper">
+
+    <resultMap id="UiH5PageMap" type="com.mobile.standalone.entity.UiH5Page">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="url" column="url"/>
+        <result property="appId" column="app_id"/>
+        <result property="moduleTag" column="module_tag"/>
+        <result property="description" column="description"/>
+        <result property="authType" column="auth_type"/>
+        <result property="authKey" column="auth_key"/>
+        <result property="authToken" column="auth_token"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByFilters" resultMap="UiH5PageMap">
+        SELECT * FROM ui_h5_pages
+        <where>
+            <if test="appId != null and appId != ''">AND app_id = #{appId}</if>
+            <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+        </where>
+        ORDER BY sort_order ASC, updated_at DESC
+    </select>
+
+    <select id="findById" resultMap="UiH5PageMap">
+        SELECT * FROM ui_h5_pages WHERE id = #{id}
+    </select>
+
+    <select id="countAll" resultType="int">
+        SELECT COUNT(*) FROM ui_h5_pages
+    </select>
+
+    <insert id="insert">
+        INSERT INTO ui_h5_pages
+        (id, name, url, app_id, module_tag, description, auth_type, auth_key, auth_token,
+         enabled, sort_order, created_at, updated_at)
+        VALUES
+        (#{id}, #{name}, #{url}, #{appId}, #{moduleTag}, #{description}, #{authType}, #{authKey}, #{authToken},
+         #{enabled}, #{sortOrder}, NOW(), NOW())
+    </insert>
+
+    <update id="update">
+        UPDATE ui_h5_pages SET
+            name = #{name},
+            url = #{url},
+            app_id = #{appId},
+            module_tag = #{moduleTag},
+            description = #{description},
+            auth_type = #{authType},
+            auth_key = #{authKey},
+            auth_token = #{authToken},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ui_h5_pages WHERE id = #{id}
+    </delete>
+</mapper>

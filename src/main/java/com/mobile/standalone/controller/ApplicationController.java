@@ -241,9 +241,11 @@ public class ApplicationController {
         if (path == null || path.isBlank()) {
             return false;
         }
-        if (com.mobile.standalone.entity.Device.isAndroidOrPogAndroid(device.getPlatform())
-                || device.getPlatform() == com.mobile.standalone.entity.Device.Platform.HARMONYOS) {
+        if (com.mobile.standalone.entity.Device.isAndroidOrPogAndroid(device.getPlatform())) {
             return deviceManager.installAndroidApp(deviceId, path);
+        }
+        if (device.getPlatform() == com.mobile.standalone.entity.Device.Platform.HARMONYOS) {
+            return deviceManager.installHarmonyApp(deviceId, path);
         }
         if (com.mobile.standalone.entity.Device.usesIosAutomation(device.getPlatform())) {
             return deviceManager.installIOSApp(deviceId, path);

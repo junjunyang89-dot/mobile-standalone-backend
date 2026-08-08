@@ -10,6 +10,8 @@
         <result property="selectedFeatures" column="selected_features"/>
         <result property="orderedSteps" column="ordered_steps"/>
         <result property="enableOverseasProxy" column="enable_overseas_proxy"/>
+        <result property="environment" column="environment"/>
+        <result property="track" column="track"/>
         <result property="passRate" column="pass_rate"/>
         <result property="errorMessage" column="error_message"/>
         <result property="startedAt" column="started_at"/>
@@ -31,10 +33,10 @@
 
     <insert id="insert">
         INSERT INTO online_regression_runs
-        (id, status, selected_apps, selected_features, ordered_steps, enable_overseas_proxy,
+        (id, status, selected_apps, selected_features, ordered_steps, enable_overseas_proxy, environment, track,
          pass_rate, error_message, started_at, finished_at, created_at, updated_at)
         VALUES
-        (#{id}, #{status}, #{selectedApps}, #{selectedFeatures}, #{orderedSteps}, #{enableOverseasProxy},
+        (#{id}, #{status}, #{selectedApps}, #{selectedFeatures}, #{orderedSteps}, #{enableOverseasProxy}, #{environment}, #{track},
          #{passRate}, #{errorMessage}, #{startedAt}, #{finishedAt}, #{createdAt}, #{updatedAt})
     </insert>
 
@@ -45,6 +47,8 @@
             selected_features = #{selectedFeatures},
             ordered_steps = #{orderedSteps},
             enable_overseas_proxy = #{enableOverseasProxy},
+            environment = #{environment},
+            track = #{track},
             pass_rate = #{passRate},
             error_message = #{errorMessage},
             started_at = #{startedAt},
@@ -52,4 +56,8 @@
             updated_at = #{updatedAt}
         WHERE id = #{id}
     </update>
+
+    <delete id="deleteAll">
+        DELETE FROM online_regression_runs
+    </delete>
 </mapper>

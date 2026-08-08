@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.TaskFailureDiagnosisMapper">
+
+    <resultMap id="DiagnosisMap" type="com.mobile.standalone.entity.TaskFailureDiagnosis">
+        <id property="id" column="id"/>
+        <result property="taskId" column="task_id"/>
+        <result property="executionId" column="execution_id"/>
+        <result property="category" column="category"/>
+        <result property="confidence" column="confidence"/>
+        <result property="failedStep" column="failed_step"/>
+        <result property="elementKey" column="element_key"/>
+        <result property="signature" column="signature"/>
+        <result property="reviewedAt" column="reviewed_at"/>
+        <result property="reviewedBy" column="reviewed_by"/>
+        <result property="suggestedLocatorType" column="suggested_locator_type"/>
+        <result property="suggestedLocatorValue" column="suggested_locator_value"/>
+        <result property="appliedAt" column="applied_at"/>
+        <result property="reason" column="reason"/>
+        <result property="suggestion" column="suggestion"/>
+        <result property="source" column="source"/>
+        <result property="model" column="model"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <select id="findByTaskId" resultMap="DiagnosisMap">
+        SELECT * FROM task_failure_diagnoses
+        WHERE task_id = #{taskId}
+        ORDER BY created_at DESC, id DESC
+    </select>
+
+    <select id="findById" resultMap="DiagnosisMap">
+        SELECT * FROM task_failure_diagnoses WHERE id = #{id}
+    </select>
+
+    <insert id="insert" parameterType="com.mobile.standalone.entity.TaskFailureDiagnosis">
+        INSERT INTO task_failure_diagnoses
+        (id, task_id, execution_id, category, confidence, failed_step, element_key, signature,
+         suggested_locator_type, suggested_locator_value,
+         reason, suggestion, source, model, created_by, created_at)
+        VALUES
+        (#{id}, #{taskId}, #{executionId}, #{category}, #{confidence}, #{failedStep}, #{elementKey}, #{signature},
+         #{suggestedLocatorType}, #{suggestedLocatorValue},
+         #{reason}, #{suggestion}, #{source}, #{model}, #{createdBy}, #{createdAt})
+    </insert>
+
+    <select id="findLatestBySignature" resultMap="DiagnosisMap">
+        SELECT * FROM task_failure_diagnoses
+        WHERE signature = #{signature}
+          AND source = 'AI'
+          AND created_at &gt;= #{since}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    </select>
+
+    <select id="countBySignature" resultType="int">
+        SELECT COUNT(*) FROM task_failure_diagnoses WHERE signature = #{signature}
+    </select>
+
+    <update id="markReviewed">
+        UPDATE task_failure_diagnoses
+        SET reviewed_at = #{reviewedAt}, reviewed_by = #{reviewedBy}
+        WHERE id = #{id}
+    </update>
+
+    <update id="markApplied">
+        UPDATE task_failure_diagnoses SET applied_at = #{appliedAt} WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM task_failure_diagnoses WHERE id = #{id}
+    </delete>
+
+</mapper>

@@ -23,7 +23,19 @@ public class TestCase {
     private LocalDateTime updatedAt;
     
     public enum Platform {
-        ANDROID, IOS, HARMONYOS, POG_ANDROID, POG_IOS
+        ANDROID, IOS, HARMONYOS,
+        /**
+         * @deprecated 产品线混进平台的历史值。设备扫描从不写入，回归编排也已改为只写操作系统。
+         * 保留仅为让迁移前的存量数据仍能反序列化；跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POG_ANDROID,
+        /**
+         * @deprecated 产品线混进平台的历史值。设备扫描从不写入，回归编排也已改为只写操作系统。
+         * 保留仅为让迁移前的存量数据仍能反序列化；跑完 migration_drop_pog_platform.sql 后可删。
+         */
+        @Deprecated
+        POG_IOS
     }
     
     public enum CaseType {

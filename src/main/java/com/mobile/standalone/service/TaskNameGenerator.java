@@ -27,7 +27,7 @@ public class TaskNameGenerator {
      */
     public String generateTaskName(Task.TaskType taskType) {
         if (taskType == null) {
-            taskType = Task.TaskType.FUNCTIONAL_QUALITY_TEST; // 默认类型
+            taskType = Task.TaskType.UI_FLOW_TEST;
         }
         
         String typeDisplayName = taskType.getDisplayName();
@@ -46,7 +46,7 @@ public class TaskNameGenerator {
      */
     public String generateTaskName(Task.TaskType taskType, String suffix) {
         if (taskType == null) {
-            taskType = Task.TaskType.FUNCTIONAL_QUALITY_TEST;
+            taskType = Task.TaskType.UI_FLOW_TEST;
         }
         
         String typeDisplayName = taskType.getDisplayName();

@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS ui_apps (
     description VARCHAR(512) COMMENT '说明',
     android_package VARCHAR(255) COMMENT 'Android 包名',
     ios_bundle_id VARCHAR(255) COMMENT 'iOS Bundle ID',
+    channel_urls TEXT COMMENT '渠道页 URL JSON，key=XIAOMI/HUAWEI/...',
     enabled TINYINT(1) DEFAULT 1,
     sort_order INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -23,8 +24,13 @@ CREATE TABLE IF NOT EXISTS ui_elements (
     name_en VARCHAR(128) NOT NULL COMMENT '英文 key，流程里引用',
     description VARCHAR(512) COMMENT '元素描述',
     module_tag VARCHAR(64) COMMENT '可选模块标签，如 登录页/侧边栏，仅分组不嵌套',
+    page_id VARCHAR(128) COMMENT '页面ID，如 P08_MINE_SETTINGS，与采集账本对齐',
+    source VARCHAR(32) NOT NULL DEFAULT 'HUMAN_AI' COMMENT 'HUMAN_AI / SOURCE_CODE / IMPORT_LEGACY',
+    status VARCHAR(32) NOT NULL DEFAULT 'CANDIDATE' COMMENT 'CANDIDATE / ACTIVE / DEPRECATED',
+    last_verified_at DATETIME NULL COMMENT '最近核实时间',
     locator_type VARCHAR(32) NOT NULL COMMENT 'id / xpath / text / accessibilityId / className / other',
     locator_value VARCHAR(2000) NOT NULL COMMENT '定位值',
+    locator_fallbacks TEXT NULL COMMENT '备用定位 JSON 数组',
     preview_image VARCHAR(500) COMMENT '预览图相对路径，可选',
     default_timeout_sec INT DEFAULT 10 COMMENT '默认等待秒数',
     enabled TINYINT(1) DEFAULT 1,
@@ -32,11 +38,29 @@ CREATE TABLE IF NOT EXISTS ui_elements (
     created_by VARCHAR(100),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_app_plat_en (app_id, platform, name_en),
+    UNIQUE KEY uk_app_plat_en_source (app_id, platform, name_en, source),
     INDEX idx_catalog (catalog),
     INDEX idx_module (app_id, platform, module_tag),
+    INDEX idx_page (app_id, platform, page_id),
+    INDEX idx_source (source),
+    INDEX idx_status (status),
     INDEX idx_enabled (enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='UI元素库（行级，可CRUD）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='UI元素库（行级；人机/源码同表双源可对比）';
+
+  CREATE TABLE IF NOT EXISTS ui_pages (
+    id VARCHAR(64) PRIMARY KEY COMMENT '内部主键',
+    app_id VARCHAR(64) NOT NULL COMMENT '应用ID',
+    page_id VARCHAR(128) NOT NULL COMMENT '页面编码',
+    name_zh VARCHAR(128) NOT NULL COMMENT '展示名',
+    description VARCHAR(512) NULL,
+    module_tag VARCHAR(64) NULL,
+    sort_order INT DEFAULT 0,
+    enabled TINYINT(1) DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_app_page (app_id, page_id),
+    INDEX idx_app (app_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='UI页面/弹窗字典';
 
 CREATE TABLE IF NOT EXISTS ui_keywords (
     id VARCHAR(64) PRIMARY KEY COMMENT '关键字ID',
@@ -62,15 +86,19 @@ CREATE TABLE IF NOT EXISTS ui_flows (
     description TEXT,
     app_id VARCHAR(64) COMMENT '应用ID，空表示通用',
     platform VARCHAR(20) COMMENT '平台，空表示通用',
-    catalog VARCHAR(32) NOT NULL DEFAULT 'SHARED' COMMENT 'AUTOMATION / ONLINE / SHARED',
+    catalog VARCHAR(32) NOT NULL DEFAULT 'SHARED' COMMENT '轨道：AUTOMATION / ONLINE / SHARED / PERFORMANCE',
+    environment VARCHAR(16) NOT NULL DEFAULT 'PROD' COMMENT '环境：PROD / TEST，与 catalog 正交',
     is_component TINYINT(1) DEFAULT 0 COMMENT '1=可被其它流程引用的组件',
     steps TEXT NOT NULL COMMENT '步骤 JSON：[{keywordCode, elementKey, params}]',
+    depends_on TEXT NULL COMMENT '前置流程 ID JSON 数组，如 ["uif-a","uif-b"]',
     enabled TINYINT(1) DEFAULT 1,
+    sort_order INT NOT NULL DEFAULT 100 COMMENT '回归/列表排序，越小越靠前',
     created_by VARCHAR(100),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_app_plat (app_id, platform),
     INDEX idx_catalog (catalog),
+    INDEX idx_environment (environment),
     INDEX idx_component (is_component),
     INDEX idx_enabled (enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='可拖拽流程/组件';

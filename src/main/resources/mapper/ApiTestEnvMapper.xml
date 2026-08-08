@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiTestEnvMapper">
+
+    <resultMap id="ApiTestEnvMap" type="com.mobile.standalone.entity.ApiTestEnv">
+        <id property="environment" column="environment"/>
+        <result property="name" column="name"/>
+        <result property="baseUrl" column="base_url"/>
+        <result property="defaultHeaders" column="default_headers"/>
+        <result property="defaultToken" column="default_token"/>
+        <result property="enabled" column="enabled"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findAll" resultMap="ApiTestEnvMap">
+        SELECT * FROM api_test_envs ORDER BY FIELD(environment, 'TEST', 'PROD'), environment
+    </select>
+
+    <select id="findByEnvironment" resultMap="ApiTestEnvMap">
+        SELECT * FROM api_test_envs WHERE environment = #{environment}
+    </select>
+
+    <select id="countAll" resultType="long">
+        SELECT COUNT(1) FROM api_test_envs
+    </select>
+
+    <insert id="upsert">
+        INSERT INTO api_test_envs
+        (environment, name, base_url, default_headers, default_token, enabled, updated_at)
+        VALUES
+        (#{environment}, #{name}, #{baseUrl}, #{defaultHeaders}, #{defaultToken}, #{enabled}, #{updatedAt})
+        ON DUPLICATE KEY UPDATE
+            name = VALUES(name),
+            base_url = VALUES(base_url),
+            default_headers = VALUES(default_headers),
+            default_token = VALUES(default_token),
+            enabled = VALUES(enabled),
+            updated_at = VALUES(updated_at)
+    </insert>
+</mapper>

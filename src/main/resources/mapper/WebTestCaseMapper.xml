@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.WebTestCaseMapper">
+
+    <resultMap id="WebTestCaseMap" type="com.mobile.standalone.entity.WebTestCase">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="requirementRef" column="requirement_ref"/>
+        <result property="channel" column="channel"/>
+        <result property="pageUrl" column="page_url"/>
+        <result property="h5PageId" column="h5_page_id"/>
+        <result property="authMode" column="auth_mode"/>
+        <result property="authToken" column="auth_token"/>
+        <result property="authQueryKey" column="auth_query_key"/>
+        <result property="steps" column="steps"/>
+        <result property="enabled" column="enabled"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="findByFilters" resultMap="WebTestCaseMap">
+        SELECT * FROM web_test_cases
+        <where>
+            <if test="channel != null and channel != ''">AND channel = #{channel}</if>
+            <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+            <if test="keyword != null and keyword != ''">
+                AND (name LIKE CONCAT('%', #{keyword}, '%')
+                  OR requirement_ref LIKE CONCAT('%', #{keyword}, '%')
+                  OR page_url LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        ORDER BY sort_order ASC, updated_at DESC
+    </select>
+
+    <select id="findById" resultMap="WebTestCaseMap">
+        SELECT * FROM web_test_cases WHERE id = #{id}
+    </select>
+
+    <select id="countAll" resultType="long">
+        SELECT COUNT(1) FROM web_test_cases
+    </select>
+
+    <insert id="insert">
+        INSERT INTO web_test_cases
+        (id, name, description, requirement_ref, channel, page_url, h5_page_id,
+         auth_mode, auth_token, auth_query_key, steps, enabled, sort_order, created_by, created_at, updated_at)
+        VALUES
+        (#{id}, #{name}, #{description}, #{requirementRef}, #{channel}, #{pageUrl}, #{h5PageId},
+         #{authMode}, #{authToken}, #{authQueryKey}, #{steps}, #{enabled}, #{sortOrder}, #{createdBy},
+         #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE web_test_cases
+        SET name = #{name},
+            description = #{description},
+            requirement_ref = #{requirementRef},
+            channel = #{channel},
+            page_url = #{pageUrl},
+            h5_page_id = #{h5PageId},
+            auth_mode = #{authMode},
+            auth_token = #{authToken},
+            auth_query_key = #{authQueryKey},
+            steps = #{steps},
+            enabled = #{enabled},
+            sort_order = #{sortOrder},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM web_test_cases WHERE id = #{id}
+    </delete>
+</mapper>

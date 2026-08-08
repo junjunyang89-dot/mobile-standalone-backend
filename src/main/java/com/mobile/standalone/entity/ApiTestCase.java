@@ -1,0 +1,51 @@
+package com.mobile.standalone.entity;
+
+import lombok.Data;
+
+import java.time.LocalDateTime;
+
+/**
+ * 接口测试用例：path 相对环境 baseUrl（或后续 URL 管理模块下拉）；执行时再选 TEST/PROD。
+ */
+@Data
+public class ApiTestCase {
+    private String id;
+    /** 项目编码，如 data-center；用于筛选与后续 URL 下拉归属 */
+    private String project;
+    /**
+     * 适用环境：TEST / PROD / ANY（双环境通用）。
+     * 列表与执行按环境筛选时，ANY 会同时出现在测试与线上。
+     */
+    private String environment;
+    private String name;
+    private String description;
+    private String requirementRef;
+    /** GET/POST/PUT/PATCH/DELETE */
+    private String method;
+    /** 相对路径，如 /appdatacenter/deadlock/...；也可写绝对 URL（则忽略 URL/环境 baseUrl） */
+    private String path;
+    /**
+     * 绑定的 URL 管理条目 id（资产管理 · URL）；执行时用其 baseUrl。
+     * 为空则回退到运行所选环境的 api_test_envs.baseUrl。
+     */
+    private String urlId;
+    /** JSON object */
+    private String query;
+    /** JSON object，覆盖/合并环境默认头 */
+    private String headers;
+    private String body;
+    /**
+     * JSON 数组断言，例如：
+     * [{"type":"status","equals":200},{"type":"jsonPath","path":"$.code","equals":0},{"type":"bodyIncludes","value":"data"}]
+     */
+    private String assertions;
+    /**
+     * 字段说明 JSON，例如 {"winRate":"胜率"}，方便后人认字段（不做断言）。
+     */
+    private String fieldNotes;
+    private Boolean enabled;
+    private Integer sortOrder;
+    private String createdBy;
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+}

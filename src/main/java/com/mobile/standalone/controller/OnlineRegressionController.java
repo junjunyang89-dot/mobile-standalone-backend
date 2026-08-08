@@ -9,6 +9,8 @@ import com.mobile.standalone.service.OnlineRegressionOrchestrator.OnlineRegressi
 import com.mobile.standalone.service.OnlineRegressionOrchestrator.OrderedStepDto;
 import com.mobile.standalone.service.OnlineRegressionOrchestrator.RunSummary;
 import com.mobile.standalone.service.OnlineRegressionOrchestrator.StartRunRequest;
+import com.mobile.standalone.util.RunTrack;
+import com.mobile.standalone.util.TestEnvironment;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -48,11 +50,23 @@ public class OnlineRegressionController {
         return ResponseEntity.ok(vos);
     }
 
-    /** 依赖智能排序预览：勾选功能 → 原子步骤顺序 */
+    /**
+     * 执行顺序预览。回归＝勾选顺序；自动化＝按前置依赖拓扑排序，并把没勾的前置补进来。
+     * <p>
+     * 依赖成环会在这里就报出环路（400），不用等到开跑。
+     */
     @PostMapping("/preview-order")
-    public ResponseEntity<List<OrderedStepDto>> previewOrder(@RequestBody PreviewOrderRequest body) {
-        List<String> features = body != null && body.getFeatureIds() != null ? body.getFeatureIds() : List.of();
-        return ResponseEntity.ok(orchestrator.previewOrderedSteps(features));
+    public ResponseEntity<?> previewOrder(@RequestBody PreviewOrderRequest body) {
+        List<String> flowIds = body != null && body.getFlowIds() != null ? body.getFlowIds() : List.of();
+        List<String> featureIds = body != null ? body.getFeatureIds() : null;
+        String track = body != null ? body.getTrack() : null;
+        String resetFlowId = body != null ? body.getResetFlowId() : null;
+        try {
+            return ResponseEntity.ok(orchestrator.previewOrder(
+                    orchestrator.resolveFlowIds(flowIds, featureIds), track, resetFlowId));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        }
     }
 
     /** 历史批次列表（摘要）；详情请用 GET /runs/{runId} */
@@ -72,6 +86,11 @@ public class OnlineRegressionController {
             item.put("finishedAt", run.getFinishedAt());
             item.put("createdAt", run.getCreatedAt());
             item.put("jobCount", summary.getJobCount());
+            // 存量批次没有这个字段，一律按生产解读，历史列表才不会出现空标签
+            item.put("environment", TestEnvironment.normalize(run.getEnvironment()));
+            item.put("environmentLabel", TestEnvironment.label(run.getEnvironment()));
+            item.put("track", RunTrack.normalize(run.getTrack()));
+            item.put("trackLabel", RunTrack.label(run.getTrack()));
             list.add(item);
         }
         return ResponseEntity.ok(list);
@@ -104,6 +123,13 @@ public class OnlineRegressionController {
     public ResponseEntity<Map<String, Object>> stopRun(@PathVariable String runId) {
         orchestrator.stopRun(runId);
         return ResponseEntity.ok(Map.of("success", true, "runId", runId));
+    }
+
+    /** 清空全部历史批次（模块保留，账号池保留） */
+    @DeleteMapping("/runs")
+    public ResponseEntity<Map<String, Object>> clearHistory() {
+        int n = orchestrator.clearAllHistory();
+        return ResponseEntity.ok(Map.of("success", true, "deleted", n));
     }
 
     private Map<String, Object> toRunVo(OnlineRegressionRunDetail detail) {
@@ -141,13 +167,22 @@ public class OnlineRegressionController {
                 st.put("status", normalizeStepStatus(s.getStatus()));
                 st.put("taskId", s.getTaskId());
                 st.put("error", s.getErrorMessage());
+                // 有关联任务时给出截图 URL；接口会从执行日志/磁盘发现截图，前端 404 时自行清空
                 String shotUrl = null;
                 if (s.getTaskId() != null && !s.getTaskId().isBlank()) {
-                    shotUrl = "functional-test/tasks/" + s.getTaskId() + "/screenshot";
+                    String status = s.getStatus() != null ? s.getStatus() : "";
+                    boolean done = "SUCCESS".equalsIgnoreCase(status) || "FAILED".equalsIgnoreCase(status)
+                            || "RUNNING".equalsIgnoreCase(status);
+                    boolean hasShot = s.getScreenshotPath() != null && !s.getScreenshotPath().isBlank();
+                    if (hasShot || done) {
+                        shotUrl = "functional-test/tasks/" + s.getTaskId() + "/screenshot";
+                    }
                 }
                 st.put("screenshotUrl", shotUrl);
                 st.put("screenshot", null);
-                if (shotUrl != null && ("SUCCESS".equalsIgnoreCase(s.getStatus()) || "FAILED".equalsIgnoreCase(s.getStatus()))) {
+                if (shotUrl != null && ("SUCCESS".equalsIgnoreCase(s.getStatus())
+                        || "UNSTABLE".equalsIgnoreCase(s.getStatus())
+                        || "FAILED".equalsIgnoreCase(s.getStatus()))) {
                     latestShotUrl = shotUrl;
                 }
                 steps.add(st);
@@ -169,6 +204,7 @@ public class OnlineRegressionController {
             case "SUCCESS" -> "success";
             case "FAILED" -> "failed";
             case "SKIPPED" -> "skipped";
+            case "UNSTABLE" -> "unstable";
             default -> "pending";
         };
     }
@@ -186,7 +222,13 @@ public class OnlineRegressionController {
 
     @Data
     public static class PreviewOrderRequest {
+        private List<String> flowIds;
+        /** @deprecated 兼容旧前端 */
         private List<String> featureIds;
+        /** REGRESSION（默认）/ AUTOMATION */
+        private String track;
+        /** 复位流程：每条用例前跑一次 */
+        private String resetFlowId;
     }
 
     @Data

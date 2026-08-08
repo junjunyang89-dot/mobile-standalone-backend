@@ -1,6 +1,5 @@
 package com.mobile.standalone.service.driver;
 
-import com.mobile.standalone.entity.PageObject;
 import com.mobile.standalone.service.AutomationEngine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -179,23 +178,7 @@ public class AndroidDriver implements PlatformDriver {
         
         return null;
     }
-    
-    @Override
-    public boolean clickByPageObject(String deviceId, PageObject pageObject, String elementName) {
-        if (pageObject == null || pageObject.getElements() == null) {
-            return false;
-        }
-        
-        PageObject.PageElement element = pageObject.getElements().get(elementName);
-        if (element == null) {
-            log.warn("页面对象中未找到元素: {}", elementName);
-            return false;
-        }
-        
-        String selector = element.getSelectorType() + ":" + element.getSelector();
-        return clickElement(deviceId, selector);
-    }
-    
+
     @Override
     public String getElementAttribute(String deviceId, String selector, String attribute) {
         String pageSource = getPageSource(deviceId);
