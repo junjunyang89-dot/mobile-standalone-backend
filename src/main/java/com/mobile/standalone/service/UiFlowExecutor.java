@@ -10,6 +10,7 @@ import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.entity.UiApp;
 import com.mobile.standalone.entity.UiElement;
 import com.mobile.standalone.entity.UiFlow;
+import com.mobile.standalone.service.keyword.handlers.DontKeepActivitiesHandler;
 import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import com.mobile.standalone.service.driver.PlatformDriver;
@@ -196,6 +197,12 @@ public class UiFlowExecutor implements FlowRuntime {
         } catch (Exception e) {
             logs.add(ExecutionLogEntryDto.fail("流程中断", e.getMessage(), null));
             throw new UiFlowExecutionException(e.getMessage(), logs);
+        } finally {
+            // 「不保留活动」这类设备级开关必须还原，而且不能只靠流程末尾那一步——
+            // 流程中途挂了就走不到那一步，开关会一直留在这台手机上。
+            // 后果很隐蔽：之后这台机跑什么都带着它，冒出一堆跟本次改动无关的失败，
+            // 没人会想到是几天前某条流程留下的
+            restoreDeviceToggles(device, logs);
         }
 
         FunctionalTestExecutionResult result =
@@ -218,6 +225,30 @@ public class UiFlowExecutor implements FlowRuntime {
      * 步骤循环：解析关键字 → 校验参数 → 前置截图 → 执行 → 后置截图。
      * 关键字自身逻辑一律不在这里，加关键字不需要动本方法。
      */
+    /**
+     * 把加压类开关还原成正常状态。
+     * <p>
+     * 不能只靠流程末尾那一步：流程中途挂了就走不到那里，开关会一直留在这台手机上。
+     * 后果很隐蔽——之后这台机跑什么都带着它，冒出一堆跟本次改动无关的失败，
+     * 没人会想到是几天前某条流程留下的。
+     * <p>
+     * 只在确实开着时才动，避免每条流程都白跑一次 adb。
+     */
+    private void restoreDeviceToggles(Device device, List<ExecutionLogEntryDto> logs) {
+        if (device == null || device.getId() == null
+                || !Device.isAndroidOrPogAndroid(device.getPlatform())) {
+            return;
+        }
+        try {
+            if (DontKeepActivitiesHandler.isOn(device.getId())) {
+                DontKeepActivitiesHandler.apply(device.getId(), false);
+                logs.add(ExecutionLogEntryDto.success("收尾", "已关闭「不保留活动」，设备恢复正常"));
+            }
+        } catch (Exception e) {
+            log.warn("[ui-flow] 还原设备开关失败: {}", e.getMessage());
+        }
+    }
+
     private void runSteps(List<Map<String, Object>> steps, FlowEnv env, int depth, String pathPrefix)
             throws Exception {
         if (steps == null || steps.isEmpty()) {

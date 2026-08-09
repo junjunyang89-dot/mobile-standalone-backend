@@ -71,9 +71,9 @@ public class KillAndRestoreHandler implements KeywordHandler {
         return List.of(
                 ParamDef.string("packageName", "包名")
                         .withHelp("留空则取当前流程的应用包名"),
-                ParamDef.number("waitMs", "回收后等待毫秒")
+                ParamDef.number("waitMs", "回收后等待毫秒", 2000)
                         .withHelp("等系统把进程真正回收掉再恢复；太短会恢复到一个还没死透的进程，测不出东西"),
-                ParamDef.boolean_("assertAlive", "恢复后校验没崩")
+                ParamDef.bool("assertAlive", "恢复后校验没崩", true)
                         .withHelp("恢复后确认应用仍在前台。关掉的话崩了也不会当场变红，只能靠事后翻日志")
         );
     }
@@ -89,7 +89,7 @@ public class KillAndRestoreHandler implements KeywordHandler {
             throw ctx.fail("杀进程恢复", "拿不到包名", null, "请在流程或步骤上指定包名");
         }
         String deviceId = ctx.getDeviceId();
-        long waitMs = Math.max(500L, ctx.numberOr("waitMs", 2000L));
+        long waitMs = Math.max(500L, ctx.longParam("waitMs", 2000L));
 
         // am kill 不是 force-stop：前者留着任务栈，再进去才是恢复路径
         adb(deviceId, "am", "kill", pkg);
@@ -102,7 +102,7 @@ public class KillAndRestoreHandler implements KeywordHandler {
 
         ctx.screenshotWhenSettled("恢复后");
 
-        if (!Boolean.FALSE.equals(ctx.booleanOr("assertAlive", true))) {
+        if (ctx.boolParam("assertAlive", true)) {
             String top = adb(deviceId, "dumpsys", "activity", "activities");
             if (top != null && !top.contains(pkg)) {
                 throw ctx.fail("杀进程恢复", "恢复后应用不在前台，可能已崩溃", pkg,

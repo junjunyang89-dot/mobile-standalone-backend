@@ -30,6 +30,40 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class UiElementController {
 
+    private final com.mobile.standalone.service.InspectorShotReader inspectorShotReader;
+
+    /**
+     * 从 Appium Inspector 截图里认元素，<b>只出草稿，不入库</b>。
+     * <p>
+     * 模型是在认字，{@code btn_login} 认成 {@code btn_1ogin} 完全可能，
+     * 而错一个字符的定位器不会报错，只会在跑流程时超时找不到——
+     * 那时候离录入已经很远，没人会想到是当初录错了。所以必须让人核一眼再存。
+     */
+    @org.springframework.web.bind.annotation.PostMapping(
+            value = "/read-inspector-shot",
+            consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> readInspectorShot(
+            @org.springframework.web.bind.annotation.RequestParam("files")
+            org.springframework.web.multipart.MultipartFile[] files) {
+        try {
+            java.util.List<com.mobile.standalone.service.ai.QwenChatClient.Image> images =
+                    new java.util.ArrayList<>();
+            for (org.springframework.web.multipart.MultipartFile f : files == null
+                    ? new org.springframework.web.multipart.MultipartFile[0] : files) {
+                if (f != null && !f.isEmpty()) {
+                    images.add(new com.mobile.standalone.service.ai.QwenChatClient.Image(
+                            f.getBytes(), f.getContentType()));
+                }
+            }
+            return ResponseEntity.ok(java.util.Map.of("drafts", inspectorShotReader.read(images)));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(java.util.Map.of("message", "识别失败：" + e.getMessage()));
+        }
+    }
+
     private static final Set<String> ALLOWED_EXT = Set.of(".png", ".jpg", ".jpeg", ".gif", ".webp");
 
     private final UiElementService uiElementService;

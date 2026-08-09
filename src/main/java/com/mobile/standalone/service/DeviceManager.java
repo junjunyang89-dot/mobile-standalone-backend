@@ -1670,42 +1670,68 @@ public class DeviceManager {
     }
     
     /**
-     * 安装 IPA 到 iOS 设备
+     * 安装 IPA 到 iOS 设备。
+     * <p>
+     * iOS 没有 {@code adb install}，能走的路只有这几条，按可靠性排：
+     * <ol>
+     *   <li>{@code xcrun devicectl}（Xcode 15+）——苹果自家的，对 iOS 17+ 最可靠</li>
+     *   <li>{@code ideviceinstaller install}（新版 libimobiledevice）</li>
+     *   <li>{@code ideviceinstaller -i}（旧版语法，新版已废弃）</li>
+     * </ol>
+     * 三条依次退回，因为执行机上装的是哪个版本无法假设——
+     * 只写一条的话，同事换台机器就装不上，而报错是「Unknown command」，看不出是版本问题。
+     * <p>
+     * 蒲公英那个扫码/Safari 的 OTA 页面是给人用的，自动化不走那条：
+     * 包由 API 下载到本地，再从 USB 装进去，全程无人。
      */
     public boolean installIOSApp(String deviceId, String ipaPath) {
+        if (runInstall(new String[]{"xcrun", "devicectl", "device", "install", "app",
+                "--device", deviceId, ipaPath}, ipaPath)) {
+            return true;
+        }
+        if (runInstall(new String[]{"ideviceinstaller", "-u", deviceId, "install", ipaPath}, ipaPath)) {
+            return true;
+        }
+        return runInstall(new String[]{"ideviceinstaller", "-u", deviceId, "-i", ipaPath}, ipaPath);
+    }
+
+    /** 跑一条安装命令；失败只记日志，交给上层退回下一条 */
+    private boolean runInstall(String[] cmd, String ipaPath) {
         try {
-            Process process = new ProcessBuilder("ideviceinstaller", "-u", deviceId, "-i", ipaPath)
-                    .redirectErrorStream(true)
-                    .start();
-            
+            Process process = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream()))) {
-                
                 String line;
-                StringBuilder output = new StringBuilder();
                 while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
-                    log.debug("ideviceinstaller: {}", line);
-                }
-                
-                int exitCode = process.waitFor();
-                
-                if (exitCode == 0 || output.toString().contains("Complete")) {
-                    log.info("IPA 安装成功: {}", ipaPath);
-                    return true;
-                } else {
-                    log.error("IPA 安装失败: {}", output.toString());
-                    return false;
+                    output.append(line).append('\n');
                 }
             }
-            
-        } catch (IOException | InterruptedException e) {
-            log.error("安装 IPA 失败", e);
+            int exitCode = process.waitFor();
+            String out = output.toString();
+            if (exitCode == 0 && !out.contains("Unknown command")) {
+                log.info("IPA 安装成功（{}）: {}", cmd[0], ipaPath);
+                return true;
+            }
+            // 这几种是「换一条命令也没用」的错，直接把原因抛给人，别在三条命令上白试
+            if (out.contains("ApplicationVerificationFailed") || out.contains("MismatchedApplicationIdentifierEntitlement")) {
+                log.error("IPA 签名不匹配，换命令也没用：这台设备的 UDID 不在描述文件里，"
+                        + "或包不是企业签。ipa={} 输出={}", ipaPath, out);
+                return false;
+            }
+            if (out.contains("DeveloperModeDisabled") || out.contains("developer mode")) {
+                log.error("设备未开启开发者模式：设置 → 隐私与安全性 → 开发者模式。ipa={}", ipaPath);
+                return false;
+            }
+            log.warn("[{}] 安装未成功（exit={}），尝试下一种方式: {}", cmd[0], exitCode, out.trim());
+            return false;
+        } catch (Exception e) {
+            log.debug("[{}] 不可用: {}", cmd[0], e.getMessage());
             return false;
         }
     }
 
-    /**
+/**
      * 卸载 iOS 应用。未安装也视为成功。
      * 新版 ideviceinstaller 语法：ideviceinstaller -u UDID uninstall BUNDLEID（不再支持 -U）
      */

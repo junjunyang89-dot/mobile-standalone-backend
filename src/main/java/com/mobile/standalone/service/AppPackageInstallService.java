@@ -170,6 +170,20 @@ public class AppPackageInstallService {
                 : blankToNullStr(app.getPgyerAppKeyAndroid());
     }
 
+    /** 该应用该平台的分发域名；没配则返回 null，由 PgyerAppService 退回全局默认 */
+    private String resolvePgyerHost(String appId, Device device) {
+        if (appId == null || appId.isBlank()) {
+            return null;
+        }
+        UiApp app = uiAppService.get(appId.trim());
+        if (app == null) {
+            return null;
+        }
+        return Device.usesIosAutomation(device.getPlatform())
+                ? blankToNullStr(app.getPgyerHostIos())
+                : blankToNullStr(app.getPgyerHostAndroid());
+    }
+
     private static String blankToNullStr(String s) {
         return s == null || s.isBlank() ? null : s.trim();
     }
@@ -291,7 +305,8 @@ public class AppPackageInstallService {
             if (appKey != null) {
                 PgyerAppService.PgyerBuildVo latest =
                         pgyerAppService.latestBuild(appKey,
-                                device.getPlatform() == null ? null : device.getPlatform().name());
+                                device.getPlatform() == null ? null : device.getPlatform().name(),
+                                resolvePgyerHost(appId, device));
                 PgyerAppService.InstallResult r = pgyerAppService.downloadAndInstall(
                         device.getId(), latest.getBuildKey(), false);
                 if (!r.isSuccess()) {

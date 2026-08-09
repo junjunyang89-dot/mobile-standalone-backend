@@ -71,6 +71,14 @@ public class PgyerAppService {
     }
 
     public List<PgyerBuildVo> listBuilds(String appKey, int page) {
+        return listBuilds(appKey, page, null);
+    }
+
+    /**
+     * @param host 该应用该平台的分发域名；为空退回全局 {@code pgyer.api-base}。
+     *             两端可能在不同部署上——公有云和私有部署是两套独立服务，一个全局域名服务不了
+     */
+    public List<PgyerBuildVo> listBuilds(String appKey, int page, String host) {
         ensureConfigured();
         String key = (appKey == null || appKey.isBlank()) ? defaultAppKey : appKey.trim();
         try {
@@ -78,7 +86,7 @@ public class PgyerAppService {
                     + "&appKey=" + enc(key)
                     + "&page=" + Math.max(1, page);
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(trimSlash(apiBase) + "/apiv2/app/builds"))
+                    .uri(URI.create(hostOr(host) + "/apiv2/app/builds"))
                     .timeout(Duration.ofSeconds(60))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -125,7 +133,11 @@ public class PgyerAppService {
      * @param platform 传 ANDROID / IOS 时只取该平台的包（同一个 appKey 下可能两个平台都有）
      */
     public PgyerBuildVo latestBuild(String appKey, String platform) {
-        List<PgyerBuildVo> builds = listBuilds(appKey, 1);
+        return latestBuild(appKey, platform, null);
+    }
+
+    public PgyerBuildVo latestBuild(String appKey, String platform, String host) {
+        List<PgyerBuildVo> builds = listBuilds(appKey, 1, host);
         if (builds.isEmpty()) {
             throw new IllegalStateException("蒲公英上没有找到任何版本: appKey=" + appKey);
         }
@@ -293,6 +305,11 @@ public class PgyerAppService {
 
     private static String enc(String s) {
         return URLEncoder.encode(s == null ? "" : s, StandardCharsets.UTF_8);
+    }
+
+    /** 应用上配了域名就用它，否则退回全局默认 */
+    private String hostOr(String host) {
+        return trimSlash(host == null || host.isBlank() ? apiBase : host.trim());
     }
 
     private static String trimSlash(String s) {

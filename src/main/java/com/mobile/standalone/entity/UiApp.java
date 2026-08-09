@@ -24,6 +24,16 @@ public class UiApp {
     /** 蒲公英 iOS appKey */
     private String pgyerAppKeyIos;
     /**
+     * 分发平台域名（分平台）。留空则用全局 {@code pgyer.api-base}。
+     * <p>
+     * 做成分平台是因为两端可能不在同一个部署上：
+     * 公有云 pgyer.com 和私有部署（如 xcxwo.com）是两套独立服务，
+     * appKey 格式都不一样（短链 slug vs 32 位 hex）。全局一个域名配不出这种组合。
+     */
+    private String pgyerHostAndroid;
+    /** 见 {@link #pgyerHostAndroid} */
+    private String pgyerHostIos;
+    /**
      * 渠道详情页 URL JSON，key 为 {@code AndroidStoreOem} 名（如 XIAOMI、HUAWEI），
      * value 为 https/深链。安装 CHANNEL_PAGE 时优先于厂商默认 URI。
      */
