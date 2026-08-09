@@ -61,6 +61,13 @@ public final class VariableResolver {
             throw new UnresolvedException("变量取不到值：" + String.join("、", missing)
                     + "。要么在「环境」里配上，要么让前面某条用例 extract 出来（比如登录用例抽 token）");
         }
+        // 每个变量都取到了值，展开完却还剩 {{}}，只可能是绕成了环（a={{b}}、b={{a}}）。
+        // 这时候静默留个 {{a}} 发出去最坑：请求照发，错误现象却在别处
+        Set<String> looping = referenced(out);
+        if (!looping.isEmpty()) {
+            throw new UnresolvedException("变量循环引用：" + String.join("、", looping)
+                    + "。它们的值互相指向对方，展开不出结果，去「环境」里改掉其中一个");
+        }
         return out;
     }
 

@@ -38,15 +38,26 @@ class AiTestCaseManualTest {
         }
 
         @Override
+        public List<AiTestCase> findByFlowId(String flowId) {
+            return rows.values().stream().filter(r -> flowId.equals(r.getFlowId())).toList();
+        }
+
+        @Override
+        public List<AiTestCase> findLinkable(String flowId, String platform, String keyword) {
+            return List.copyOf(rows.values());
+        }
+
+        @Override
         public List<AiTestCase> findByFilters(String category, String pageName, String priority, String status,
                                               String platform, String batchId, String automationAdvice,
-                                              int offset, int limit) {
+                                              String releaseStage, String keyword, int offset, int limit) {
             return List.copyOf(rows.values());
         }
 
         @Override
         public int countByFilters(String category, String pageName, String priority, String status,
-                                  String platform, String batchId, String automationAdvice) {
+                                  String platform, String batchId, String automationAdvice,
+                                  String releaseStage, String keyword) {
             return (int) rows.values().stream()
                     .filter(r -> category == null || category.equals(r.getCategory()))
                     .count();
@@ -89,6 +100,8 @@ class AiTestCaseManualTest {
             f.setId(id);
             f.setName(name);
             f.setEnabled(enabled);
+            // 只有「仅自动化编排」的流程才算覆盖用例；回归轨的流程不进这个判定
+            f.setCatalog("AUTOMATION");
             flows.put(id, f);
         }
     }

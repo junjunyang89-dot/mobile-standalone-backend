@@ -1,3 +1,8 @@
+-- 说明：这份 SQL 现在是「备份/参考」用的，正常不需要手动跑。
+-- ApiTestCaseService 与 ApiProjectService 启动时会自动建表补列（见各自的 @PostConstruct），
+-- 唯一例外是下面给 data-center 系列刷业务成功码那条 UPDATE——它改的是数据不是结构，
+-- 自动跑会覆盖你手工改过的配置，所以留给人决定。
+
 -- 接口自动化：变量系统 + 业务成功码
 --
 -- 解决两件事，都是「跑起来之后能不能不用人管」的前提：
@@ -22,7 +27,7 @@ UPDATE api_projects SET success_code_path = '$.code', success_code_value = '0'
    AND success_code_path IS NULL;
 
 -- ---------- 2) 环境变量 ----------
-CREATE TABLE IF NOT EXISTS api_test_variables (
+CREATE TABLE IF NOT EXISTS env_variables (
     environment VARCHAR(16)  NOT NULL COMMENT '所属环境 TEST/PROD',
     name        VARCHAR(64)  NOT NULL COMMENT '变量名，用例里写 {{name}}',
     value       VARCHAR(2048)     NULL COMMENT '变量值',
@@ -36,7 +41,7 @@ CREATE TABLE IF NOT EXISTS api_test_variables (
 
 -- baseUrl 已经在 api_test_envs 里，这里补的是除它以外的东西。
 -- 不搬 baseUrl 过来：搬了就有两个地方能改 baseUrl，迟早对不上。
-INSERT IGNORE INTO api_test_variables (environment, name, value, secret, description, sort_order) VALUES
+INSERT IGNORE INTO env_variables (environment, name, value, secret, description, sort_order) VALUES
     ('TEST', 'token', '', 1, '登录态。建议由登录用例 extract 自动写入，这里留空即可', 10),
     ('PROD', 'token', '', 1, '登录态。建议由登录用例 extract 自动写入，这里留空即可', 10);
 

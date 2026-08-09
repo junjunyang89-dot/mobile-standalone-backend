@@ -39,18 +39,26 @@ public class AiTestCaseController {
             @RequestParam(required = false) String platform,
             @RequestParam(required = false) String batchId,
             @RequestParam(required = false) String automationAdvice,
+            @RequestParam(required = false) String releaseStage,
+            /** 标题/编号/测试点/模块 模糊搜 */
+            @RequestParam(required = false) String keyword,
             @RequestParam(required = false, defaultValue = "1") int page,
             @RequestParam(required = false, defaultValue = "20") int size
     ) {
-        Map<String, Object> raw = aiTestCaseService.list(
-                category, pageName, priority, status, platform, batchId, automationAdvice, page, size);
-        @SuppressWarnings("unchecked")
-        List<AiTestCase> content = (List<AiTestCase>) raw.get("content");
-        List<Map<String, Object>> views = content == null ? List.of()
-                : content.stream().map(aiTestCaseService::toView).toList();
-        Map<String, Object> out = new LinkedHashMap<>(raw);
-        out.put("content", views);
-        return ResponseEntity.ok(out);
+        try {
+            Map<String, Object> raw = aiTestCaseService.list(
+                    category, pageName, priority, status, platform, batchId,
+                    automationAdvice, releaseStage, keyword, page, size);
+            @SuppressWarnings("unchecked")
+            List<AiTestCase> content = (List<AiTestCase>) raw.get("content");
+            List<Map<String, Object>> views = content == null ? List.of()
+                    : content.stream().map(aiTestCaseService::toView).toList();
+            Map<String, Object> out = new LinkedHashMap<>(raw);
+            out.put("content", views);
+            return ResponseEntity.ok(out);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
     }
 
     @GetMapping("/{id}")
@@ -218,6 +226,39 @@ public class AiTestCaseController {
             return ResponseEntity.ok(aiTestCaseService.toView(updated));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /** 单条提升为线上稳定 */
+    @PostMapping("/{id}/promote")
+    public ResponseEntity<?> promote(@PathVariable Long id) {
+        try {
+            AiTestCase updated = aiTestCaseService.promote(id);
+            if (updated == null) return ResponseEntity.notFound().build();
+            return ResponseEntity.ok(aiTestCaseService.toView(updated));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /** 批量提升：body { ids: [1,2,3] } */
+    @PostMapping("/promote-batch")
+    public ResponseEntity<?> promoteBatch(@RequestBody Map<String, Object> body) {
+        try {
+            Object raw = body == null ? null : body.get("ids");
+            List<Long> ids = new ArrayList<>();
+            if (raw instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o == null) continue;
+                    if (o instanceof Number n) ids.add(n.longValue());
+                    else ids.add(Long.parseLong(String.valueOf(o)));
+                }
+            }
+            return ResponseEntity.ok(aiTestCaseService.promoteBatch(ids));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage() != null ? e.getMessage() : "提升失败"));
         }
     }
 

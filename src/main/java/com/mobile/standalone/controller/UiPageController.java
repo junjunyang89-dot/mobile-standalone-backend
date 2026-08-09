@@ -18,6 +18,20 @@ import java.util.Map;
 public class UiPageController {
 
     private final UiPageService uiPageService;
+    private final com.mobile.standalone.service.PageCodeSuggester pageCodeSuggester;
+
+    /**
+     * 中文页面名 → 建议的英文编码。
+     * <p>
+     * 生成不出来时返回空串而不是报错：编码有随机码兜底，
+     * 为了一个「建议」把新建页面卡住不值得。
+     */
+    @org.springframework.web.bind.annotation.GetMapping("/suggest-code")
+    public ResponseEntity<java.util.Map<String, String>> suggestCode(
+            @org.springframework.web.bind.annotation.RequestParam String nameZh) {
+        String code = pageCodeSuggester.suggest(nameZh);
+        return ResponseEntity.ok(java.util.Map.of("code", code == null ? "" : code));
+    }
 
     @GetMapping
     public ResponseEntity<List<UiPage>> list(
@@ -66,10 +80,16 @@ public class UiPageController {
         }
     }
 
+    /** 页面下还有元素时会被拒绝，并报出有几个——不替人做「这些元素怎么办」这个决定 */
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(@PathVariable String id) {
-        return uiPageService.delete(id)
-                ? ResponseEntity.ok(Map.of("ok", true))
-                : ResponseEntity.notFound().build();
+        try {
+            return uiPageService.delete(id)
+                    ? ResponseEntity.ok(Map.of("ok", true))
+                    : ResponseEntity.notFound().build();
+        } catch (IllegalArgumentException e) {
+            // 不接住的话会变成 500 + 一句通用报错，那条写清楚了「还有几个元素」的提示就白写了
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
     }
 }

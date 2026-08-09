@@ -35,6 +35,16 @@ public interface UiElementMapper {
             @Param("keyword") String keyword
     );
 
+    /**
+     * 某个页面下，各平台各有多少元素。
+     * <p>
+     * 页面是<b>按应用</b>建的、不分平台，元素才分平台。所以「Android 下看着是空的」
+     * 完全可能同时「iOS 下还有 2 个」——删除时必须能说清楚元素到底在哪一端，
+     * 否则人只会觉得系统在瞎报。
+     */
+    List<java.util.Map<String, Object>> countByPageGroupByPlatform(
+            @Param("appId") String appId, @Param("pageId") String pageId);
+
     UiElement findById(@Param("id") String id);
 
     UiElement findByAppPlatformKey(

@@ -3,6 +3,7 @@ package com.mobile.standalone.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.mobile.standalone.entity.Application;
+import com.mobile.standalone.util.RunTrack;
 import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.entity.UiFlow;
@@ -30,6 +31,36 @@ public class UiFlowController {
     private final UiFlowService uiFlowService;
     private final TaskService taskService;
     private final TaskAppResolver taskAppResolver;
+    private final com.mobile.standalone.service.AiTestCaseService aiTestCaseService;
+
+    // ---------- 这条流程覆盖了哪些用例 ----------
+    //
+    // 真相存在用例上（ai_test_cases.flow_id），这里只是换了个编辑入口：
+    // 写完用例去建流程时顺手勾选，比建完再回用例列表一条条挂上去顺手得多。
+    // 不在 ui_flows 上再存一份，那样两边就能不一致。
+
+    @GetMapping("/{id}/cases")
+    public ResponseEntity<?> casesOfFlow(@PathVariable String id) {
+        return ResponseEntity.ok(aiTestCaseService.casesOfFlow(id));
+    }
+
+    /** 候选用例：同平台、且没被别的流程占用 */
+    @GetMapping("/{id}/linkable-cases")
+    public ResponseEntity<?> linkableCases(@PathVariable String id,
+                                           @RequestParam(required = false) String platform,
+                                           @RequestParam(required = false) String keyword) {
+        return ResponseEntity.ok(aiTestCaseService.linkableCases(id, platform, keyword));
+    }
+
+    @PutMapping("/{id}/cases")
+    public ResponseEntity<?> setFlowCases(@PathVariable String id,
+                                          @RequestBody Map<String, List<Long>> body) {
+        try {
+            return ResponseEntity.ok(aiTestCaseService.setFlowCases(id, body.get("caseIds")));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
 
     @GetMapping
     public ResponseEntity<List<UiFlow>> list(
@@ -136,6 +167,9 @@ public class UiFlowController {
 
             ObjectNode config = JSON.createObjectNode();
             config.put("flowId", id);
+            // 本页单跑＝自动化编排轨。用例的「最近执行状态」只认这条轨，
+            // 回归批次跑的是生产包，结果不能贴给提测用例
+            config.put("runTrack", RunTrack.AUTOMATION);
             if (uiAppId != null) {
                 config.put("uiAppId", uiAppId);
             }

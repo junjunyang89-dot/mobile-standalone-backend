@@ -13,6 +13,11 @@ public final class ApiTestDtos {
     @Data
     public static class RunRequest {
         private List<String> caseIds;
+        /**
+         * 按集合执行。给了它就不用给 caseIds——集合内的启用用例会按 sortOrder 顺序全跑，
+         * 顺序在这里是有意义的：登录用例 extract 出来的 token，后面的用例才引用得到。
+         */
+        private String collectionId;
         /** TEST | PROD，默认 TEST */
         private String environment;
         /** 覆盖环境默认 token */
@@ -36,6 +41,9 @@ public final class ApiTestDtos {
         private long durationMs;
         /** 落库后的执行记录 id */
         private String runId;
+        /** 本次是按哪个集合跑的（直接选用例跑时为空） */
+        private String collectionId;
+        private String collectionName;
         private List<CaseResult> cases = new ArrayList<>();
     }
 

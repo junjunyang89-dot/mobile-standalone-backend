@@ -19,7 +19,10 @@
         <result property="stepsJson" column="steps_json"/>
         <result property="expectedResult" column="expected_result"/>
         <result property="flowId" column="flow_id"/>
+        <result property="linkedAt" column="linked_at"/>
+        <result property="contentUpdatedAt" column="content_updated_at"/>
         <result property="automationAdvice" column="automation_advice"/>
+        <result property="releaseStage" column="release_stage"/>
         <result property="remark" column="remark"/>
         <result property="screenshotUrl" column="screenshot_url"/>
         <result property="platform" column="platform"/>
@@ -55,6 +58,21 @@
             <if test="automationAdvice != null and automationAdvice != ''">
                 AND automation_advice = #{automationAdvice}
             </if>
+            <if test="releaseStage != null and releaseStage != ''">
+                AND release_stage = #{releaseStage}
+            </if>
+            <!--
+              标题模糊搜。顺带把编号和测试点也搜进去：
+              人搜「验证码」时既可能记得标题里有这个词，也可能只记得测试点里写过，
+              只搜标题会得到「明明有这条却搜不到」——那比没有搜索更让人不信任这个框
+            -->
+            <if test="keyword != null and keyword != ''">
+                AND (title LIKE CONCAT('%', #{keyword}, '%')
+                  OR case_id LIKE CONCAT('%', #{keyword}, '%')
+                  OR test_point LIKE CONCAT('%', #{keyword}, '%')
+                  OR module LIKE CONCAT('%', #{keyword}, '%')
+                  OR sub_module LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
         </where>
     </sql>
 
@@ -65,7 +83,7 @@
     <select id="findByFilters" resultMap="AiTestCaseMap">
         SELECT * FROM ai_test_cases
         <include refid="filterWhere"/>
-        ORDER BY created_at DESC, id DESC
+        ORDER BY case_id ASC, id ASC
         LIMIT #{limit} OFFSET #{offset}
     </select>
 
@@ -78,13 +96,16 @@
         INSERT INTO ai_test_cases (
             case_id, page_name, category, module, sub_module, test_item, test_point,
             title, priority, type, precondition, steps_json, expected_result, flow_id,
-            automation_advice, remark,
+            linked_at, content_updated_at,
+            automation_advice, release_stage, remark,
             screenshot_url, platform, app_id, source, status, batch_id, created_by,
             created_at, updated_at
         ) VALUES (
             #{caseId}, #{pageName}, #{category}, #{module}, #{subModule}, #{testItem}, #{testPoint},
             #{title}, #{priority}, #{type}, #{precondition},
-            CAST(#{stepsJson} AS JSON), #{expectedResult}, #{flowId}, #{automationAdvice}, #{remark},
+            CAST(#{stepsJson} AS JSON), #{expectedResult}, #{flowId},
+            #{linkedAt}, #{contentUpdatedAt}, #{automationAdvice},
+            #{releaseStage}, #{remark},
             #{screenshotUrl}, #{platform}, #{appId}, #{source}, #{status}, #{batchId}, #{createdBy},
             NOW(), NOW()
         )
@@ -106,7 +127,10 @@
             steps_json = CAST(#{stepsJson} AS JSON),
             expected_result = #{expectedResult},
             flow_id = #{flowId},
+            linked_at = #{linkedAt},
+            content_updated_at = #{contentUpdatedAt},
             automation_advice = #{automationAdvice},
+            release_stage = #{releaseStage},
             remark = #{remark},
             screenshot_url = #{screenshotUrl},
             platform = #{platform},
@@ -121,4 +145,31 @@
     <delete id="deleteById">
         DELETE FROM ai_test_cases WHERE id = #{id}
     </delete>
+
+    <select id="findByFlowId" resultMap="AiTestCaseMap">
+        SELECT * FROM ai_test_cases WHERE flow_id = #{flowId}
+        ORDER BY case_id ASC
+    </select>
+
+    <!--
+      候选＝同平台 且（未关联 或 已关联到本流程）。
+      不列出「已挂别的流程」的用例：在这里勾上会把它从原来那条流程悄悄抢走，
+      而原流程那边毫无提示——那种静默改动查起来极其费时。要改就去用例那边明确改。
+    -->
+    <select id="findLinkable" resultMap="AiTestCaseMap">
+        SELECT * FROM ai_test_cases
+        <where>
+            (flow_id IS NULL OR flow_id = '' OR flow_id = #{flowId})
+            <if test="platform != null and platform != ''">
+                AND (platform = #{platform} OR platform IS NULL OR platform = '')
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (title LIKE CONCAT('%', #{keyword}, '%')
+                  OR case_id LIKE CONCAT('%', #{keyword}, '%')
+                  OR test_point LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        ORDER BY (flow_id = #{flowId}) DESC, case_id ASC
+        LIMIT 300
+    </select>
 </mapper>

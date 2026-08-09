@@ -9,6 +9,8 @@
         <result property="description" column="description"/>
         <result property="repoPath" column="repo_path"/>
         <result property="baseBranch" column="base_branch"/>
+        <result property="successCodePath" column="success_code_path"/>
+        <result property="successCodeValue" column="success_code_value"/>
         <result property="enabled" column="enabled"/>
         <result property="sortOrder" column="sort_order"/>
         <result property="createdAt" column="created_at"/>
@@ -33,9 +35,9 @@
 
     <insert id="insert">
         INSERT INTO api_projects
-        (code, name, description, repo_path, base_branch, enabled, sort_order, created_at, updated_at)
+        (code, name, description, repo_path, base_branch, success_code_path, success_code_value, enabled, sort_order, created_at, updated_at)
         VALUES
-        (#{code}, #{name}, #{description}, #{repoPath}, #{baseBranch}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+        (#{code}, #{name}, #{description}, #{repoPath}, #{baseBranch}, #{successCodePath}, #{successCodeValue}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -44,6 +46,8 @@
             description = #{description},
             repo_path = #{repoPath},
             base_branch = #{baseBranch},
+            success_code_path = #{successCodePath},
+            success_code_value = #{successCodeValue},
             enabled = #{enabled},
             sort_order = #{sortOrder},
             updated_at = #{updatedAt}

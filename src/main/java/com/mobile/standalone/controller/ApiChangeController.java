@@ -77,7 +77,7 @@ public class ApiChangeController {
         }
         List<com.mobile.standalone.entity.ApiTestCase> cases;
         try {
-            cases = apiTestCaseMapper.findByFilters(projectCode, null, null, null, null, null);
+            cases = apiTestCaseMapper.findByFilters(projectCode, null, null, null, null, null, null);
         } catch (Exception e) {
             // 用例表没建或查不到不该让整份报告失败，覆盖率只是锦上添花
             return;

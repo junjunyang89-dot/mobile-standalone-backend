@@ -65,6 +65,11 @@ public class DeviceService {
     }
     
     @Transactional
+    /** 保存设备上人可编辑的那部分（目前只有环境） */
+    public void updateDevice(Device device) {
+        deviceMapper.update(device);
+    }
+
     public Device connectDevice(String deviceId) {
         Device device = deviceMapper.findById(deviceId);
         if (device != null) {

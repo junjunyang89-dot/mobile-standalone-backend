@@ -18,6 +18,15 @@ public class ApiProject {
     private String repoPath;
     /** 对比基线分支，留空按 master */
     private String baseBranch;
+    /**
+     * 业务成功码在响应里的位置，如 {@code $.code}。
+     * <p>
+     * 这几个后端统一用 {@code ResponseResult{code,message,result}} 包一层，<b>业务失败也是 HTTP 200</b>。
+     * 配上之后 Runner 会给每条用例自动补一条业务码断言，否则只断言 status=200 的用例形同虚设。
+     */
+    private String successCodePath;
+    /** 业务成功码的值，如 0 */
+    private String successCodeValue;
     private Boolean enabled;
     private Integer sortOrder;
     private LocalDateTime createdAt;

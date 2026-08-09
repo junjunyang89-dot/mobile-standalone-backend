@@ -7,6 +7,7 @@
         <id property="id" column="id"/>
         <result property="appId" column="app_id"/>
         <result property="label" column="label"/>
+        <result property="environment" column="environment"/>
         <result property="phoneNumber" column="phone_number"/>
         <result property="verificationCode" column="verification_code"/>
         <result property="enabled" column="enabled"/>
@@ -21,6 +22,10 @@
         <if test="appId != null and appId != ''">
             AND app_id = #{appId}
         </if>
+        <!-- 空 environment 视为通用：存量账号没这个字段，不能因为加了列就一个都选不出来 -->
+        <if test="environment != null and environment != ''">
+            AND (environment = #{environment} OR environment IS NULL OR environment = '')
+        </if>
         ORDER BY sort_order ASC, created_at ASC
     </select>
 
@@ -30,8 +35,8 @@
 
     <insert id="insert">
         INSERT INTO online_regression_accounts
-        (id, app_id, label, phone_number, verification_code, enabled, sort_order, created_at, updated_at)
+        (id, app_id, label, environment, phone_number, verification_code, enabled, sort_order, created_at, updated_at)
         VALUES
-        (#{id}, #{appId}, #{label}, #{phoneNumber}, #{verificationCode}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+        (#{id}, #{appId}, #{label}, #{environment}, #{phoneNumber}, #{verificationCode}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
     </insert>
 </mapper>

@@ -56,11 +56,17 @@
               </when>
               <otherwise>('ONLINE', 'SHARED')</otherwise>
           </choose>
-          AND COALESCE(environment, 'PROD') =
-              <choose>
-                  <when test="environment != null and environment != ''">#{environment}</when>
-                  <otherwise>'PROD'</otherwise>
-              </choose>
+          <!--
+            自动化流程（catalog='AUTOMATION'）不绑环境：一条用例在两个包上是同一件事，
+            环境差异只在装哪个包、用哪套数据，那是执行时的参数。
+            回归流程照旧按环境筛——线上回归和测试回归本来就走不同的流程。
+          -->
+          AND (catalog = 'AUTOMATION'
+               OR COALESCE(environment, 'PROD') =
+                  <choose>
+                      <when test="environment != null and environment != ''">#{environment}</when>
+                      <otherwise>'PROD'</otherwise>
+                  </choose>)
           <!--
             有 app_id：仅匹配该 APP。
             空 app_id + SHARED：真·通用（如卸装启动），各 APP 可见。

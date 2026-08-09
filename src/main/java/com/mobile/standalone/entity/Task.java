@@ -22,6 +22,19 @@ public class Task {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private String config;
+    /**
+     * 从 config 里抽出来落成列。
+     * <p>
+     * 原来靠 {@code config LIKE '%"flowId":"xxx"%'} 反查，是全表扫；用例几百条 × 每次刷列表就会明显卡。
+     */
+    private String flowId;
+    /**
+     * 这次执行属于哪条轨：AUTOMATION（自动化编排单跑）/ REGRESSION（回归批次）/ PERFORMANCE。
+     * <p>
+     * 用例的「最近执行状态」只认 AUTOMATION——回归批次跑的是生产包，
+     * 而用例写的是本次提测的功能，拿前者的结果给后者贴「通过」是错的。
+     */
+    private String runTrack;
     
     public enum Platform {
         ANDROID, IOS, HARMONYOS,

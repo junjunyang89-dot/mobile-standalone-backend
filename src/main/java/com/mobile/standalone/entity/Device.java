@@ -12,6 +12,14 @@ public class Device {
     private DeviceStatus status = DeviceStatus.DISCONNECTED;
     private LocalDateTime lastSeen;
     private String config;
+    /**
+     * 这台设备跑哪个环境：PROD / TEST，空＝没指定。
+     * <p>
+     * 绑在设备上而不是每次执行时选：一台手机上装的就是某个环境的包，不会一会儿线上一会儿测试。
+     * 四台机器同时跑（两台线上两台测试）时，不用每次去勾一遍——需要人每次重复配的东西，
+     * 迟早会配错一次，而配错的现象是「登录失败」，指向的方向完全不对。
+     */
+    private String environment;
     
     public enum Platform {
         ANDROID, IOS, HARMONYOS,

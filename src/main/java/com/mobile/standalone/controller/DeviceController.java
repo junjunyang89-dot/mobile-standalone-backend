@@ -2,6 +2,7 @@ package com.mobile.standalone.controller;
 
 import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.service.DeviceService;
+import com.mobile.standalone.util.TestEnvironment;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -104,6 +105,26 @@ public class DeviceController {
     /**
      * 手动触发设备扫描（用于测试）
      */
+    /**
+     * 设置这台设备跑哪个环境。
+     * <p>
+     * 绑在设备上而不是每次执行时选：一台手机上装的就是某个环境的包。
+     * 四台机器同时跑（两台线上两台测试）时，不用每次去勾一遍。
+     */
+    @PutMapping("/{id}/environment")
+    public ResponseEntity<?> setEnvironment(@PathVariable String id,
+                                            @RequestBody Map<String, String> body) {
+        Device device = deviceService.getDeviceById(id);
+        if (device == null) {
+            return ResponseEntity.notFound().build();
+        }
+        String env = body.get("environment");
+        // 空串＝取消绑定，回到「执行时再定」；不能跟「这次不改」混为一谈
+        device.setEnvironment(env == null || env.isBlank() ? "" : TestEnvironment.normalize(env));
+        deviceService.updateDevice(device);
+        return ResponseEntity.ok(Map.of("ok", true, "environment", device.getEnvironment()));
+    }
+
     @PostMapping("/scan")
     public ResponseEntity<String> scanDevices() {
         try {

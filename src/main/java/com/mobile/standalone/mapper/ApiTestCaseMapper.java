@@ -10,6 +10,7 @@ import java.util.List;
 public interface ApiTestCaseMapper {
     List<ApiTestCase> findByFilters(
             @Param("project") String project,
+            @Param("collectionId") String collectionId,
             @Param("environment") String environment,
             @Param("enabledOnly") Boolean enabledOnly,
             @Param("keyword") String keyword,
@@ -19,6 +20,7 @@ public interface ApiTestCaseMapper {
 
     long countByFilters(
             @Param("project") String project,
+            @Param("collectionId") String collectionId,
             @Param("environment") String environment,
             @Param("enabledOnly") Boolean enabledOnly,
             @Param("keyword") String keyword
@@ -37,4 +39,7 @@ public interface ApiTestCaseMapper {
     long countByProject(@Param("project") String project);
 
     List<String> findDistinctProjects();
+
+    /** 归组用：拿一个项目下的全部用例（不分页） */
+    List<ApiTestCase> findByProject(@Param("project") String project);
 }

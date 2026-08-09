@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiTestScheduleMapper">
+
+    <resultMap id="schMap" type="com.mobile.standalone.entity.ApiTestSchedule">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="cron" column="cron"/>
+        <result property="collectionId" column="collection_id"/>
+        <result property="project" column="project"/>
+        <result property="environment" column="environment"/>
+        <result property="enabled" column="enabled"/>
+        <result property="nextRunAt" column="next_run_at"/>
+        <result property="lastRunAt" column="last_run_at"/>
+        <result property="lastRunId" column="last_run_id"/>
+        <result property="lastStatus" column="last_status"/>
+        <result property="lastMessage" column="last_message"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="collectionName" column="collection_name"/>
+        <result property="caseCount" column="case_count"/>
+    </resultMap>
+
+    <select id="findAll" resultMap="schMap">
+        SELECT s.*, c.name AS collection_name,
+               (SELECT COUNT(1) FROM api_test_cases tc
+                 WHERE tc.enabled = 1
+                   AND (s.collection_id IS NULL OR tc.collection_id = s.collection_id)
+                   AND (s.project IS NULL OR tc.project = s.project)) AS case_count
+        FROM api_test_schedules s
+        LEFT JOIN api_test_collections c ON c.id = s.collection_id
+        ORDER BY s.enabled DESC, s.next_run_at ASC, s.name ASC
+    </select>
+
+    <select id="findById" resultMap="schMap">
+        SELECT * FROM api_test_schedules WHERE id = #{id}
+    </select>
+
+    <!--
+      只取启用且已到点的。next_run_at 为 NULL 的不取——那说明 cron 没算出来（写错了），
+      当成「立刻就该跑」会变成每分钟跑一次，把测试环境打满。
+    -->
+    <select id="findDue" resultMap="schMap">
+        SELECT * FROM api_test_schedules
+        WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at &lt;= #{now}
+        ORDER BY next_run_at ASC
+    </select>
+
+    <insert id="insert">
+        INSERT INTO api_test_schedules
+            (id, name, cron, collection_id, project, environment, enabled,
+             next_run_at, created_at, updated_at)
+        VALUES
+            (#{id}, #{name}, #{cron}, #{collectionId}, #{project}, #{environment}, #{enabled},
+             #{nextRunAt}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="update">
+        UPDATE api_test_schedules
+        SET name = #{name},
+            cron = #{cron},
+            collection_id = #{collectionId},
+            project = #{project},
+            environment = #{environment},
+            enabled = #{enabled},
+            next_run_at = #{nextRunAt},
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 执行完只动执行结果那几列，不碰配置：避免定时任务把人刚改的 cron 覆盖回去 -->
+    <update id="updateAfterRun">
+        UPDATE api_test_schedules
+        SET next_run_at = #{nextRunAt},
+            last_run_at = #{lastRunAt},
+            last_run_id = #{lastRunId},
+            last_status = #{lastStatus},
+            last_message = #{lastMessage}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM api_test_schedules WHERE id = #{id}
+    </delete>
+</mapper>

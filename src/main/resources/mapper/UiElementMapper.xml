@@ -66,6 +66,15 @@
         </if>
     </select>
 
+    <select id="countByPageGroupByPlatform" resultType="java.util.Map">
+        SELECT platform, COUNT(*) AS cnt FROM ui_elements
+        <where>
+            <if test="appId != null and appId != ''">AND app_id = #{appId}</if>
+            AND page_id = #{pageId}
+        </where>
+        GROUP BY platform
+    </select>
+
     <select id="countByFilters" resultType="long">
         SELECT COUNT(*) FROM ui_elements
         <include refid="UiElementFilterWhere"/>

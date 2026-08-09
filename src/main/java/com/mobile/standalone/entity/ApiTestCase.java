@@ -40,6 +40,14 @@ public class ApiTestCase {
      */
     private String assertions;
     /**
+     * 执行后从响应里抽变量，如 {@code {"token":"$.result.token"}}。
+     * 抽到的值写进本轮上下文，后面的用例引用 <code>{{token}}</code> 即可——
+     * 靠它才能把登录态自动传下去，而不是把 token 写死在环境里等它过期。
+     */
+    private String extractJson;
+    /** 归属集合。集合是执行单元，集合内按 sortOrder 顺序跑并共享一份运行时变量 */
+    private String collectionId;
+    /**
      * 字段说明 JSON，例如 {"winRate":"胜率"}，方便后人认字段（不做断言）。
      */
     private String fieldNotes;

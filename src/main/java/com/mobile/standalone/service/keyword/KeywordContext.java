@@ -23,7 +23,14 @@ import java.util.regex.Pattern;
 @Builder
 public class KeywordContext {
 
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([a-zA-Z0-9_]+)}");
+    /**
+     * {@code ${name}} 与 {@code {{name}}} 都认。
+     * <p>
+     * 接口用例那边用的是 {@code {{name}}}（Postman 习惯），流程这边历史上是 {@code ${name}}。
+     * 同一个产品里两套语法，人一定会写混——与其让他们记，不如两个都收。
+     */
+    private static final Pattern PLACEHOLDER =
+            Pattern.compile("\\$\\{([a-zA-Z0-9_]+)}|\\{\\{\\s*([a-zA-Z0-9_]+)\\s*}}");
 
     /** 步骤解析出的关键字 code（已大写，别名已归一到主 code 之前的原始值） */
     private final String rawCode;
@@ -132,7 +139,7 @@ public class KeywordContext {
         Matcher m = PLACEHOLDER.matcher(template);
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
-            String key = m.group(1);
+            String key = m.group(1) != null ? m.group(1) : m.group(2);
             String value = execParams != null ? execParams.get(key) : null;
             m.appendReplacement(sb, Matcher.quoteReplacement(value != null ? value : m.group(0)));
         }

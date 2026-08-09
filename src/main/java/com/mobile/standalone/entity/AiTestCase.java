@@ -38,10 +38,30 @@ public class AiTestCase {
      */
     private String flowId;
     /**
+     * 关联流程的时刻。
+     * <p>
+     * 和 {@link #contentUpdatedAt} 一起判断「流程是否已经跟不上用例」——
+     * 用例的期望结果从「四项区号」改成六项，流程还在断言四项，
+     * 覆盖标记照样是绿的，但它覆盖的是旧需求。这比没做自动化更糟：没做你知道要人测。
+     */
+    private LocalDateTime linkedAt;
+    /**
+     * 用例<b>实质内容</b>最后一次改动的时刻。
+     * <p>
+     * 不用 {@code updatedAt}：那个改备注、改优先级也会动，
+     * 拿它判过期会天天误报，而误报几次之后这个标记就没人看了。
+     */
+    private LocalDateTime contentUpdatedAt;
+    /**
      * 自动化建议（值不值得做 UI 自动化），与 flowId 落地状态正交：
      * RECOMMENDED / PARTIAL / NOT_RECOMMENDED；空＝尚未评估。
      */
     private String automationAdvice;
+    /**
+     * 发布轨（与复核 status 正交）：
+     * TESTING＝测试待测；ONLINE＝线上稳定。
+     */
+    private String releaseStage;
     private String remark;
     private String screenshotUrl;
     private String platform;

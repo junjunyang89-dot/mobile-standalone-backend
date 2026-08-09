@@ -141,8 +141,17 @@ public class OnlineRegressionOrchestrator {
         log.info("已种子线上回归账号: {} {} {}", id, appId, phone);
     }
 
-    public List<OnlineRegressionAccount> listAccounts(String appId) {
-        return accountMapper.findEnabled(appId);
+    /**
+     * 界面上那个账号下拉。
+     * <p>
+     * 按环境筛：账号只区分测试和线上（数据不同），之前靠名字里带「线上」来认。
+     * 命名约定唯一的失效方式是「有人建账号时没按约定命名」——那一定会发生，
+     * 而结果是测试环境回归选到线上账号、登不上，你得从登录失败一路查回来。
+     * <p>
+     * 没标环境的账号两边都列：存量账号都没这个字段，不能因为加了列就一个都选不出来。
+     */
+    public List<OnlineRegressionAccount> listAccounts(String appId, String environment) {
+        return accountMapper.findEnabled(appId, environment);
     }
 
     /** 清空全部历史批次（保留账号池与模块本身） */
@@ -905,6 +914,7 @@ public class OnlineRegressionOrchestrator {
 
         ObjectNode config = JSON.createObjectNode();
         config.put("flowId", flowId);
+        config.put("runTrack", RunTrack.REGRESSION);
         config.put("uiAppId", job.getAppId());
         // 归因签名与任务总览都按这个字段区分环境，别让两个环境的失败互相「复用」结论
         config.put("environment", environment);
@@ -1038,7 +1048,7 @@ public class OnlineRegressionOrchestrator {
 
         if (req.getCustomPhones() != null && !req.getCustomPhones().isEmpty()) {
             List<String> codes = req.getCustomCodes() != null ? req.getCustomCodes() : List.of();
-            List<OnlineRegressionAccount> pool = accountMapper.findEnabled(appId);
+            List<OnlineRegressionAccount> pool = accountMapper.findEnabled(appId, null);
             for (int i = 0; i < req.getCustomPhones().size(); i++) {
                 String phone = req.getCustomPhones().get(i);
                 if (phone == null || phone.isBlank()) continue;
@@ -1069,7 +1079,7 @@ public class OnlineRegressionOrchestrator {
             String phone = req.getCustomPhone().trim();
             String code = req.getCustomCode() != null ? req.getCustomCode().trim() : "";
             if (code.isEmpty()) {
-                List<OnlineRegressionAccount> pool = accountMapper.findEnabled(appId);
+                List<OnlineRegressionAccount> pool = accountMapper.findEnabled(appId, null);
                 if (pool != null) {
                     for (OnlineRegressionAccount a : pool) {
                         if (phone.equals(a.getPhoneNumber() != null ? a.getPhoneNumber().trim() : null)
@@ -1108,7 +1118,7 @@ public class OnlineRegressionOrchestrator {
         }
         if (!out.isEmpty()) return out;
 
-        List<OnlineRegressionAccount> pool = accountMapper.findEnabled(appId);
+        List<OnlineRegressionAccount> pool = accountMapper.findEnabled(appId, null);
         return pool != null ? new ArrayList<>(pool) : new ArrayList<>();
     }
 
@@ -1123,7 +1133,7 @@ public class OnlineRegressionOrchestrator {
                     return a;
                 }
             }
-            List<OnlineRegressionAccount> pool = accountMapper.findEnabled(job.getAppId());
+            List<OnlineRegressionAccount> pool = accountMapper.findEnabled(job.getAppId(), null);
             if (pool != null) {
                 for (OnlineRegressionAccount a : pool) {
                     if (phone.equals(a.getPhoneNumber() != null ? a.getPhoneNumber().trim() : null)) {

@@ -12,6 +12,10 @@ import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.entity.UiFlow;
 import com.mobile.standalone.mapper.ApplicationMapper;
+import com.mobile.standalone.service.perf.MetricBaselineService;
+import com.mobile.standalone.service.perf.CrashMonitor;
+import com.mobile.standalone.service.perf.IosCrashCollector;
+import com.mobile.standalone.service.perf.CrashLogParser;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import com.mobile.standalone.service.driver.PlatformDriver;
 import com.mobile.standalone.service.driver.PlatformRouter;
@@ -86,6 +90,9 @@ public class PerformanceTestService {
     private final PerformanceCollectorResolver collectorResolver;
     private final AdbPerformanceCollector adbPerformanceCollector;
     private final NoOpPerformanceCollector noOpPerformanceCollector;
+    private final MetricBaselineService metricBaselineService;
+    private final CrashMonitor crashMonitor;
+    private final IosCrashCollector iosCrashCollector;
 
     @Autowired(required = false)
     private MetricKitIngestService metricKitIngestService;
@@ -179,6 +186,17 @@ public class PerformanceTestService {
         AtomicBoolean samplingStopped = new AtomicBoolean(false);
         PerformanceCollectorResolver.ResolvedCollector resolved =
                 openCollector(task, device, packageName, executionLog);
+        // 采样前先清 logcat：环形缓冲里躺着上一轮甚至上个版本的崩溃，
+        // 不清就会把别人的账算到这一轮头上，「崩溃次数」直接失真
+        if (isAndroid(task)) {
+            if (crashMonitor != null) {
+                crashMonitor.start(deviceId);
+            }
+        } else if (iosCrashCollector != null) {
+            // iOS 的崩溃是文件不是缓冲，「清」等于把旧的搬走。
+            // 不清的话上个版本的崩溃会算到这一轮头上，而崩溃次数正是要跟上版比的
+            iosCrashCollector.start(deviceId);
+        }
         Thread samplerThread = startSampler(deviceId, packageName, resourceSamples, samplingStopped, resolved.collector());
 
         List<PerformanceTestResultDto.OperationRecord> operations = new ArrayList<>();
@@ -273,6 +291,8 @@ public class PerformanceTestService {
                 .resourceSamples(resourceSamples.isEmpty() ? null : new ArrayList<>(resourceSamples))
                 .operations(operations)
                 .build();
+
+        recordBaseline(task, device, result, collectCrashes(task, device, resolvePackageName(task, device), executionLog));
 
         PerformanceTestExecutionResult out = toExecutionResult(result, executionLog);
         if (!ok) {
@@ -398,6 +418,229 @@ public class PerformanceTestService {
         return samplerThread;
     }
 
+    /**
+     * 把这次的关键指标按版本留档，供下个版本做基线对比。
+     * <p>
+     * 绝对值给不出结论——冷启动 1.2 秒是好是坏没人知道；
+     * 「上版 0.9 秒、这版 1.2 秒」才是能拿去问开发的。
+     * 而要能这么比，前提是每次都知道测的是哪个版本。
+     */
+    private void recordBaseline(Task task, Device device, PerformanceTestResultDto result,
+                                List<CrashLogParser.Incident> incidents) {
+        if (metricBaselineService == null || result == null || result.getResourceSummary() == null) {
+            return;
+        }
+        try {
+            PerformanceTestResultDto.ResourceSummary rs = result.getResourceSummary();
+            Map<String, Double> metrics = new LinkedHashMap<>();
+            putPeak(metrics, "cpuApp", rs.getCpuApp());
+            putPeak(metrics, "memoryPss", rs.getMemoryPss());
+            putAvg(metrics, "fps", rs.getFps());
+            putPeak(metrics, "temperature", rs.getTemperature());
+            putPeak(metrics, "networkRxBytes", rs.getNetworkRxBytes());
+            putPeak(metrics, "networkTxBytes", rs.getNetworkTxBytes());
+            String pkg = resolvePackageName(task, device);
+            // 崩溃次数也进基线：这是最该跟上个版本比的一项——
+            // 上版 0 次这版 3 次，比任何资源曲线都说明问题
+            // 崩溃次数进基线：这是最该跟上个版本比的一项——
+            // 上版 0 次这版 3 次，比任何资源曲线都说明问题。
+            // 用已经采过的那份，不重新采：两次 logcat 之间还可能再崩一次，
+            // 那样报告里写 2 次、基线里记 3 次，对不上就没人信了
+            if (incidents != null) {
+                // iOS 的 watchdog 卡死和 Android 的 ANR 是同一类问题（点得动但没响应），
+                // 归到一个指标上，两端的版本基线才能用同一套口径看
+                long anrs = incidents.stream()
+                        .filter(i -> "ANR".equals(i.getType()) || "WATCHDOG".equals(i.getType())).count();
+                metrics.put("crashCount", (double) (incidents.size() - anrs));
+                metrics.put("anrCount", (double) anrs);
+            }
+            if (metrics.isEmpty()) {
+                return;
+            }
+            String version = resolveAppVersion(task, device, pkg);
+            metricBaselineService.record(new MetricBaselineService.Snapshot(
+                    task.getId(), task.getAppId(), pkg,
+                    task.getPlatform() == null ? "ANDROID" : task.getPlatform().name(),
+                    // 按具体那台手机比。不同机型的 CPU、帧率不是一个量级，跨机型比出来的百分比没有意义
+                    version, device == null ? null : device.getName(), metrics));
+        } catch (Exception e) {
+            // 留档失败不该让一次真机跑白费——采样结果照常返回
+            log.warn("[perf] 指标留档失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 收尾时抓这一轮的崩溃 / ANR，并写进执行日志——<b>报告里看得见才算数</b>。
+     * <p>
+     * 只塞进基线指标的话，跑完还是只有一条资源曲线，崩了照样不知道；
+     * 而遍历随机点几十分钟，最该被抓住的就是这一路点出来的崩溃。
+     */
+    private List<CrashLogParser.Incident> collectCrashes(Task task, Device device, String packageName,
+                                                         List<ExecutionLogEntryDto> executionLog) {
+        if (device == null) {
+            return List.of();
+        }
+        try {
+            List<CrashLogParser.Incident> incidents;
+            if (isAndroid(task)) {
+                if (crashMonitor == null) {
+                    return List.of();
+                }
+                incidents = crashMonitor.collect(device.getId(), packageName);
+            } else {
+                if (iosCrashCollector == null) {
+                    return List.of();
+                }
+                if (!iosCrashCollector.isAvailable()) {
+                    // 说清楚是没装工具，而不是「这一轮很稳」——后者是假结论
+                    executionLog.add(ExecutionLogEntryDto.success("稳定性",
+                            "跳过崩溃采集：执行机未安装 libimobiledevice（brew install libimobiledevice）"));
+                    return List.of();
+                }
+                incidents = iosCrashCollector.collect(device.getId(), packageName);
+            }
+            if (incidents.isEmpty()) {
+                executionLog.add(ExecutionLogEntryDto.success("稳定性", "本轮未发现崩溃 / ANR"));
+                return incidents;
+            }
+            for (CrashLogParser.Incident i : incidents) {
+                // 用 fail 而不是 success：崩溃必须在报告里是红的。
+                // 混在普通日志里就等于没报——人扫一眼绿色的列表不会停下来看
+                executionLog.add(ExecutionLogEntryDto.fail(
+                        switch (i.getType() == null ? "" : i.getType()) {
+                            case "ANR" -> "ANR";
+                            // iOS 没有 ANR，主线程卡死表现为被 watchdog 杀掉
+                            case "WATCHDOG" -> "卡死（watchdog）";
+                            default -> "崩溃";
+                        },
+                        i.getTitle() + (i.getProcess() == null ? "" : "（" + i.getProcess() + "）"),
+                        null));
+                if (i.getStack() != null && !i.getStack().isBlank()) {
+                    executionLog.add(ExecutionLogEntryDto.success("堆栈", truncate(i.getStack(), 600)));
+                }
+            }
+            return incidents;
+        } catch (Exception e) {
+            log.warn("[perf] 崩溃采集失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return "";
+        }
+        return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    private static boolean isAndroid(Task task) {
+        return task.getPlatform() == null || "ANDROID".equalsIgnoreCase(task.getPlatform().name());
+    }
+
+    /** 峰值更能反映问题：均值会把一次卡顿摊平，而用户感受到的正是那一次 */
+    private static void putPeak(Map<String, Double> out, String key,
+                                PerformanceTestResultDto.MetricStat stat) {
+        if (stat != null && stat.getPeak() != null) {
+            out.put(key, stat.getPeak());
+        }
+    }
+
+    /** 帧率反过来看均值：偶尔掉一帧不说明问题，整体流畅度才说明 */
+    private static void putAvg(Map<String, Double> out, String key,
+                               PerformanceTestResultDto.MetricStat stat) {
+        if (stat != null && stat.getAvg() != null) {
+            out.put(key, stat.getAvg());
+        }
+    }
+
+    private String resolvePackageName(Task task, Device device) {
+        if (task.getAppId() == null || applicationMapper == null) {
+            return null;
+        }
+        try {
+            Application app = applicationMapper.findById(task.getAppId());
+            return app == null ? null : app.getPackageName();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 版本号。优先从设备上已装的那个应用读——那才是这次真正跑的包，
+     * 比任何配置里填的都可信。
+     */
+    private String resolveAppVersion(Task task, Device device, String packageName) {
+        if (packageName == null || device == null) {
+            return null;
+        }
+        // 直接问设备。应用字典里那份 version 是刷新设备时顺带写的，
+        // 可能是空串、可能是上一次装的包留下的旧值——而版本号一旦记错，
+        // 基线就会跟错误的版本比，数字看着都对、结论全是错的，且看不出错在哪
+        String fromDevice = readVersionFromDevice(device.getId(), packageName);
+        if (fromDevice != null && !fromDevice.isBlank()) {
+            return fromDevice;
+        }
+        if (applicationMapper == null) {
+            return null;
+        }
+        try {
+            // 设备上已装应用那份版本是刷新设备时从包里读出来的，
+            // 比应用字典里手填的可信——手填的经常忘了改
+            for (Application installed : applicationMapper.findByDeviceId(device.getId())) {
+                if (packageName.equals(installed.getPackageName())
+                        && installed.getVersion() != null && !installed.getVersion().isBlank()) {
+                    return installed.getVersion();
+                }
+            }
+            Application dict = task.getAppId() == null ? null : applicationMapper.findById(task.getAppId());
+            if (dict != null && dict.getVersion() != null && !dict.getVersion().isBlank()) {
+                return dict.getVersion();
+            }
+        } catch (Exception e) {
+            log.debug("[perf] 读已装版本失败: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * {@code adb shell dumpsys package <pkg> | grep versionName}。
+     * <p>
+     * 这是唯一能确定「这次真正跑的是哪个包」的来源。拿不到就返回 null，
+     * 上层会跳过留档——记成 unknown 的话，几次之后基线会指向一个混了好几个版本的 unknown。
+     */
+    private String readVersionFromDevice(String deviceId, String packageName) {
+        Process p = null;
+        try {
+            p = new ProcessBuilder("adb", "-s", deviceId, "shell",
+                    "dumpsys", "package", packageName)
+                    .redirectErrorStream(true).start();
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    int i = line.indexOf("versionName=");
+                    if (i >= 0) {
+                        String v = line.substring(i + "versionName=".length()).trim();
+                        // 同一行后面可能还跟着别的字段
+                        int sp = v.indexOf(' ');
+                        if (sp > 0) {
+                            v = v.substring(0, sp);
+                        }
+                        return v.isBlank() || "null".equals(v) ? null : v;
+                    }
+                }
+            }
+            p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.debug("[perf] 从设备读版本号失败 {}: {}", packageName, e.getMessage());
+        } finally {
+            if (p != null && p.isAlive()) {
+                p.destroyForcibly();
+            }
+        }
+        return null;
+    }
+
     private PerformanceTestExecutionResult toExecutionResult(PerformanceTestResultDto result,
                                                              List<ExecutionLogEntryDto> executionLog) {
         try {
@@ -517,6 +760,11 @@ public class PerformanceTestService {
         AtomicBoolean samplingStopped = new AtomicBoolean(false);
         PerformanceCollectorResolver.ResolvedCollector resolved =
                 openCollector(task, device, packageName, executionLog);
+        // 遍历是随机点几十分钟，最该抓的就是这一路点出来的崩溃。
+        // 先清 logcat，免得把上一轮的账算进来
+        if (crashMonitor != null && isAndroid(task)) {
+            crashMonitor.start(deviceId);
+        }
         Thread samplerThread = startSampler(deviceId, packageName, resourceSamples, samplingStopped, resolved.collector());
 
         // 可选：按间隔在后台线程截屏，供「遍历统计」「操作详情」展示；与主线程共用 driver，可能有轻微串行
@@ -648,8 +896,17 @@ public class PerformanceTestService {
 
         PerformanceTestResultDto.ResourceSummary resourceSummary = buildResourceSummary(resourceSamples);
         PerformanceTestResultDto.IssueSummary issueSummary = buildIssueSummary(operations, blackWhiteTimestamps, resourceSamples);
-        String conclusion = String.format("总共遍历 %d 分钟，执行操作 %d 次，发现较好体验问题 %d 次。",
-                effectiveTraversalMinutes, totalOps, issueSummary != null ? issueSummary.getTotalIssueCount() : 0);
+        List<CrashLogParser.Incident> incidents = collectCrashes(task, device, packageName, executionLog);
+        long anrCount = incidents.stream()
+                .filter(i -> "ANR".equals(i.getType()) || "WATCHDOG".equals(i.getType())).count();
+        long crashCount = incidents.size() - anrCount;
+        // 崩溃写进结论第一句。它比「体验问题 N 次」重要得多，
+        // 排在后面或者只放日志里，等于让人自己去翻
+        String conclusion = String.format("总共遍历 %d 分钟，执行操作 %d 次，%s发现较好体验问题 %d 次。",
+                effectiveTraversalMinutes, totalOps,
+                incidents.isEmpty() ? "未发现崩溃 / ANR，"
+                        : String.format("【崩溃 %d 次、ANR %d 次】，", crashCount, anrCount),
+                issueSummary != null ? issueSummary.getTotalIssueCount() : 0);
         executionLog.add(ExecutionLogEntryDto.success("测试结论", conclusion));
 
         int count = screenshotTimeline.size();
@@ -668,6 +925,8 @@ public class PerformanceTestService {
                 .screenshotCount(count > 0 ? count : null)
                 .screenshotTimeline(count > 0 ? new ArrayList<>(screenshotTimeline) : null)
                 .build();
+
+        recordBaseline(task, device, result, incidents);
 
         String resultJson;
         try {

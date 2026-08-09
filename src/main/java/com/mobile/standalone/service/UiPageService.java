@@ -8,6 +8,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.util.Map;
+import java.util.LinkedHashMap;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -23,6 +25,7 @@ public class UiPageService {
     private static final Pattern PAGE_ID_OK = Pattern.compile("^[A-Za-z][A-Za-z0-9_]{1,120}$");
 
     private final UiPageMapper uiPageMapper;
+    private final com.mobile.standalone.mapper.UiElementMapper uiElementMapper;
     private final JdbcTemplate jdbcTemplate;
 
     @PostConstruct
@@ -60,7 +63,50 @@ public class UiPageService {
     }
 
     public List<UiPage> list(String appId, Boolean enabledOnly) {
-        return uiPageMapper.findByAppId(blankToNull(appId), enabledOnly);
+        List<UiPage> pages = uiPageMapper.findByAppId(blankToNull(appId), enabledOnly);
+        // 元素数跟删除校验用同一个查询——两边各算各的，就会出现
+        // 「界面显示 0 个，删的时候说还有 2 个」
+        for (UiPage p : pages) {
+            p.setElementCount((int) countElements(p));
+            p.setElementCountByPlatform(platformBreakdown(p));
+        }
+        return pages;
+    }
+
+    /** 这个页面下的元素数。不带平台/场景/状态等界面筛选，数的是库里真实有多少 */
+    private long countElements(UiPage page) {
+        if (page == null || page.getPageId() == null || page.getPageId().isBlank()) {
+            return 0;
+        }
+        return uiElementMapper.countByFilters(
+                page.getAppId(), null, null, null, null, page.getPageId(), null, null, null);
+    }
+
+    /**
+     * 各平台各有多少。
+     * <p>
+     * 页面是按应用建的、<b>不分平台</b>，元素才分平台。所以「Android 下看着是空的」
+     * 完全可能同时「iOS 下还有 2 个」——只说总数的话，人清空了所有筛选还是找不到那 2 个，
+     * 只会觉得系统在瞎报。得直接说清楚它们在哪一端。
+     */
+    private Map<String, Integer> platformBreakdown(UiPage page) {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        if (page == null || page.getPageId() == null || page.getPageId().isBlank()) {
+            return out;
+        }
+        try {
+            for (Map<String, Object> row : uiElementMapper.countByPageGroupByPlatform(
+                    page.getAppId(), page.getPageId())) {
+                Object pf = row.get("platform");
+                Object cnt = row.get("cnt");
+                if (pf != null && cnt instanceof Number n && n.intValue() > 0) {
+                    out.put(String.valueOf(pf), n.intValue());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[ui-pages] 平台分布统计失败: {}", e.getMessage());
+        }
+        return out;
     }
 
     public UiPage get(String id) {
@@ -229,8 +275,37 @@ public class UiPageService {
         }
     }
 
+    /**
+     * 删页面。
+     * <p>
+     * <b>页面下还有元素时直接拒绝</b>，不级联删元素、也不静默把它们挪成「未归属」：
+     * <ul>
+     *   <li>级联删会一次毁掉别人采了半天的元素，而且流程里引用它们的步骤会集体失效——
+     *       现象是执行时「找不到元素」，没人会联想到是有人删了个页面</li>
+     *   <li>静默挪走则相反，元素还在但人以为丢了，会重新采一遍，元素库里就多出一批重复的</li>
+     * </ul>
+     * 报清楚有几个元素、让人自己决定先挪还是先删，比替他做决定安全得多。
+     * 界面上那些「0 个元素」的空页面（建错的、重名的）本来也是删除的主要场景。
+     */
     @Transactional
     public boolean delete(String id) {
+        UiPage page = uiPageMapper.findById(id);
+        if (page == null) {
+            return false;
+        }
+        long count = countElements(page);
+        if (count > 0) {
+            Map<String, Integer> byPlatform = platformBreakdown(page);
+            String where = byPlatform.isEmpty() ? "" : "（" + byPlatform.entrySet().stream()
+                    .map(e -> e.getKey() + " " + e.getValue() + " 个")
+                    .reduce((a, b) -> a + "、" + b).orElse("") + "）";
+            throw new IllegalArgumentException(
+                    "页面「" + page.getNameZh() + "」下还有 " + count + " 个元素" + where + "，不能直接删。"
+                            + "页面是按应用建的、不分平台，元素才分平台——"
+                            + "所以在当前平台下看着是空的，别的平台下可能还有。"
+                            + "把顶部「平台」切到上面写的那一端就能看到。"
+                            + "请先把它们改挂到别的页面，或先删掉元素");
+        }
         return uiPageMapper.deleteById(id) > 0;
     }
 

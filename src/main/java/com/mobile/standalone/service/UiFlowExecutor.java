@@ -10,6 +10,7 @@ import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.entity.UiApp;
 import com.mobile.standalone.entity.UiElement;
 import com.mobile.standalone.entity.UiFlow;
+import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import com.mobile.standalone.service.driver.PlatformDriver;
 import com.mobile.standalone.service.driver.PlatformRouter;
@@ -80,6 +81,7 @@ public class UiFlowExecutor implements FlowRuntime {
     private final AppPackageInstallService appPackageInstallService;
     private final ExecutionCancelRegistry cancelRegistry;
     private final KeywordRegistry keywordRegistry;
+    private final EnvVariableService envVariableService;
 
     @Autowired(required = false)
     private AppiumDriverAdapter appiumDriverAdapter;
@@ -111,8 +113,33 @@ public class UiFlowExecutor implements FlowRuntime {
         if (flowId == null || flowId.isBlank()) {
             throw new IllegalArgumentException("UI_FLOW_TEST 任务 config 须含 flowId");
         }
-        Map<String, String> params = readParams(config);
+        // 环境变量垫底，任务 config 里显式传的覆盖它。
+        //
+        // 这是「用例两边一样、数据两边不一样」的解法：流程里写 ${phone}，
+        // 跑测试包时取测试环境那份手机号，跑线上包时取线上那份，流程本身一个字不用改。
+        // 顺序不能反——单次执行想临时换个账号时，传进来的必须能压过配置里的
+        // 环境优先级：任务显式指定 > 设备自己绑的 > 默认。
+        //
+        // 四台机器同时跑（两台线上、两台测试）时，靠设备上绑的环境自动区分，
+        // 不用每次执行都去勾一遍——需要人每次重复配的东西迟早会配错一次，
+        // 而配错的现象是「登录失败」，指向的方向完全不对
+        String rawEnv = text(config, "environment");
+        if ((rawEnv == null || rawEnv.isBlank()) && device != null) {
+            rawEnv = device.getEnvironment();
+        }
+        String envKey = TestEnvironment.normalize(rawEnv);
+        Map<String, String> envVars = new HashMap<>();
+        try {
+            envVars.putAll(envVariableService.resolveValues(envKey));
+        } catch (Exception e) {
+            // 环境变量拿不到不该挡住执行：没引用变量的流程照样能跑，
+            // 引用了的会在替换时留下 ${xxx} 原样，日志里看得见
+            log.warn("[ui-flow] 读环境变量失败 env={}: {}", envKey, e.getMessage());
+        }
+        Map<String, String> params = new HashMap<>(envVars);
+        params.putAll(readParams(config));
         vars.putAll(params);
+        vars.put("environment", envKey);
 
         UiFlow flow = uiFlowService.get(flowId);
         if (flow == null) {

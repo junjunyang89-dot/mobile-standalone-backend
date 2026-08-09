@@ -34,8 +34,9 @@ public class OnlineRegressionController {
 
     /** 线上回归专用账号池（手机号+验证码），与专项测试默认号分离 */
     @GetMapping("/accounts")
-    public ResponseEntity<List<AccountVo>> listAccounts(@RequestParam(required = false) String appId) {
-        List<OnlineRegressionAccount> list = orchestrator.listAccounts(appId);
+    public ResponseEntity<List<AccountVo>> listAccounts(@RequestParam(required = false) String appId,
+                                                        @RequestParam(required = false) String environment) {
+        List<OnlineRegressionAccount> list = orchestrator.listAccounts(appId, environment);
         List<AccountVo> vos = new ArrayList<>();
         for (OnlineRegressionAccount a : list) {
             AccountVo vo = new AccountVo();

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.mobile.standalone.mapper.ApiTestVariableMapper">
+<mapper namespace="com.mobile.standalone.mapper.EnvVariableMapper">
 
-    <resultMap id="varMap" type="com.mobile.standalone.entity.ApiTestVariable">
+    <resultMap id="varMap" type="com.mobile.standalone.entity.EnvVariable">
         <result property="environment" column="environment"/>
         <result property="name" column="name"/>
         <result property="value" column="value"/>
@@ -17,18 +17,18 @@
     <sql id="cols">environment, name, value, secret, enabled, description, sort_order, updated_at</sql>
 
     <select id="findByEnvironment" resultMap="varMap">
-        SELECT <include refid="cols"/> FROM api_test_variables
+        SELECT <include refid="cols"/> FROM env_variables
         WHERE environment = #{environment}
         ORDER BY sort_order, name
     </select>
 
     <select id="findOne" resultMap="varMap">
-        SELECT <include refid="cols"/> FROM api_test_variables
+        SELECT <include refid="cols"/> FROM env_variables
         WHERE environment = #{environment} AND name = #{name}
     </select>
 
     <insert id="upsert">
-        INSERT INTO api_test_variables (environment, name, value, secret, enabled, description, sort_order)
+        INSERT INTO env_variables (environment, name, value, secret, enabled, description, sort_order)
         VALUES (#{environment}, #{name}, #{value}, #{secret}, #{enabled}, #{description}, #{sortOrder})
         ON DUPLICATE KEY UPDATE
             value = VALUES(value),
@@ -39,6 +39,6 @@
     </insert>
 
     <delete id="delete">
-        DELETE FROM api_test_variables WHERE environment = #{environment} AND name = #{name}
+        DELETE FROM env_variables WHERE environment = #{environment} AND name = #{name}
     </delete>
 </mapper>

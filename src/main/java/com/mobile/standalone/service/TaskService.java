@@ -197,8 +197,34 @@ public class TaskService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public Task insertNewTask(Task task) {
+        fillFlowColumns(task);
         taskMapper.insert(task);
         return task;
+    }
+
+    /**
+     * 把 config 里的 flowId / runTrack 抽成列。
+     * <p>
+     * 只在这一处做：让每个建任务的地方各写一遍，迟早有人漏，
+     * 而漏掉的现象是「这条用例永远显示未执行」——很难联想到是建任务时少塞了个字段。
+     */
+    static void fillFlowColumns(Task task) {
+        if (task == null || task.getConfig() == null || task.getConfig().isBlank()) {
+            return;
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode n =
+                    new com.fasterxml.jackson.databind.ObjectMapper().readTree(task.getConfig());
+            if (task.getFlowId() == null && n.hasNonNull("flowId")) {
+                task.setFlowId(n.get("flowId").asText(null));
+            }
+            if (task.getRunTrack() == null && n.hasNonNull("runTrack")) {
+                task.setRunTrack(n.get("runTrack").asText(null));
+            }
+        } catch (Exception e) {
+            // config 不是合法 JSON 不该挡住建任务——这两列只是给查询用的冗余
+            log.debug("解析 task.config 取 flowId/runTrack 失败: {}", e.getMessage());
+        }
     }
     
     @Transactional

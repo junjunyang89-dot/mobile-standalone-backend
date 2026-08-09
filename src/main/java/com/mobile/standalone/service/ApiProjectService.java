@@ -37,10 +37,34 @@ public class ApiProjectService {
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
+            // 建表语句只有最初那几列，后加的列靠这里补齐。
+            // 不这么做的话，每加一列就得让人记着去跑一份 migration.sql，漏跑一次就是启动即报错，
+            // 而且报出来的是「Unknown column」，看不出该跑哪个文件
+            ensureColumn("repo_path", "VARCHAR(512) NULL COMMENT '本地仓库路径'");
+            ensureColumn("base_branch", "VARCHAR(128) NULL COMMENT '对比基线分支，默认 master'");
+            ensureColumn("success_code_path", "VARCHAR(128) NULL COMMENT '业务成功码路径，如 $.code'");
+            ensureColumn("success_code_value", "VARCHAR(64) NULL COMMENT '业务成功码的值，如 0'");
             seedIfEmpty();
             log.info("[api-projects] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-projects] 建表失败: {}", e.getMessage());
+        }
+    }
+
+    /** 列不存在才加。用查 information_schema 而不是 catch 异常：后者会在日志里刷一堆吓人的堆栈 */
+    private void ensureColumn(String column, String definition) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'api_projects' AND COLUMN_NAME = ?",
+                    Integer.class, column);
+            if (n != null && n > 0) {
+                return;
+            }
+            jdbcTemplate.execute("ALTER TABLE api_projects ADD COLUMN " + column + " " + definition);
+            log.info("[api-projects] 补列 {}", column);
+        } catch (Exception e) {
+            log.warn("[api-projects] 补列 {} 失败: {}", column, e.getMessage());
         }
     }
 
@@ -88,10 +112,30 @@ public class ApiProjectService {
         body.setCode(code);
         validate(body, false);
         defaults(body);
+        // 请求里没给的字段保留原值。update 是全列覆盖，前端那个编辑表单又只有编码/名称/说明/启用/排序——
+        // 不兜这一下，改一次项目名就把 repoPath 清成 null，接口对比分析直接报「未配仓库」，
+        // 而且现场看不出是刚才那次编辑干的
+        keepIfNull(body::getRepoPath, body::setRepoPath, existing.getRepoPath());
+        keepIfNull(body::getBaseBranch, body::setBaseBranch, existing.getBaseBranch());
+        keepIfNull(body::getSuccessCodePath, body::setSuccessCodePath, existing.getSuccessCodePath());
+        keepIfNull(body::getSuccessCodeValue, body::setSuccessCodeValue, existing.getSuccessCodeValue());
         body.setCreatedAt(existing.getCreatedAt());
         body.setUpdatedAt(LocalDateTime.now());
         projectMapper.update(body);
         return projectMapper.findByCode(code);
+    }
+
+    /**
+     * null＝这次不改，保留原值；空串＝明确要清空。
+     * <p>
+     * 两者必须分开，否则「清掉仓库路径」这个操作就做不到了——传空串会被当成没传。
+     */
+    private static void keepIfNull(java.util.function.Supplier<String> get,
+                                   java.util.function.Consumer<String> set,
+                                   String existing) {
+        if (get.get() == null) {
+            set.accept(existing);
+        }
     }
 
     @Transactional

@@ -79,9 +79,24 @@ public class UiFlowService {
         if (Boolean.TRUE.equals(flow.getIsComponent())) return false;
         String c = flow.getCatalog() != null ? flow.getCatalog().trim().toUpperCase() : "";
         if (!RunTrack.catalogs(track).contains(c)) return false;
-        // 迁移前建的行 environment 为空，按 PROD 解读，存量线上回归不受影响
+        if (isEnvironmentAgnostic(flow)) return true;
+        // 回归流程：迁移前建的行 environment 为空，按 PROD 解读，存量线上回归不受影响
         return TestEnvironment.normalize(flow.getEnvironment())
                 .equals(TestEnvironment.normalize(environment));
+    }
+
+    /**
+     * 自动化流程不绑环境。
+     * <p>
+     * 一条用例（「协议勾选框可勾选」）在测试包和线上包上是同一件事，
+     * 它的自动化实现也该是同一条流程。环境差异只在「装哪个包、用哪套数据」——
+     * 那是执行时的参数，不是流程的属性。绑了环境，同一个用例就得写两遍流程，
+     * 而且一条用例要挂两条流程，关联关系立刻从 N:1 退化成 N:N。
+     * <p>
+     * 回归流程<b>照旧绑环境</b>：线上回归和测试回归本来就走不同的流程（装包方式、渠道都不同）。
+     */
+    public static boolean isEnvironmentAgnostic(UiFlow flow) {
+        return flow != null && "AUTOMATION".equals(flow.getCatalog());
     }
 
     /**

@@ -5,9 +5,9 @@
 
     <insert id="insertRun">
         INSERT INTO api_test_runs
-        (id, environment, total, passed, failed, duration_ms, ok, message, created_by, created_at)
+        (id, environment, collection_id, total, passed, failed, duration_ms, ok, message, created_by, created_at)
         VALUES
-        (#{id}, #{environment}, #{total}, #{passed}, #{failed}, #{durationMs}, #{ok}, #{message},
+        (#{id}, #{environment}, #{collectionId}, #{total}, #{passed}, #{failed}, #{durationMs}, #{ok}, #{message},
          #{createdBy}, #{createdAt})
     </insert>
 
@@ -59,5 +59,46 @@
            AND r.created_at &gt;= #{since}
         GROUP BY COALESCE(NULLIF(TRIM(c.project), ''), '(未分组)')
         ORDER BY caseCount DESC, project ASC
+    </select>
+
+    <!-- 带上集合名，报告列表才是「XX 集合」而不是一串 id -->
+    <select id="findRuns" resultType="java.util.Map">
+        SELECT r.id, r.environment, r.collection_id AS collectionId, c.name AS collectionName,
+               r.total, r.passed, r.failed, r.duration_ms AS durationMs,
+               r.ok, r.message, r.created_by AS createdBy, r.created_at AS createdAt
+        FROM api_test_runs r
+        LEFT JOIN api_test_collections c ON c.id = r.collection_id
+        <where>
+            <if test="collectionId != null and collectionId != ''">r.collection_id = #{collectionId}</if>
+        </where>
+        ORDER BY r.created_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findRunById" resultType="com.mobile.standalone.entity.ApiTestRun">
+        SELECT id, environment, collection_id AS collectionId, total, passed, failed,
+               duration_ms AS durationMs, ok, message, created_by AS createdBy, created_at AS createdAt
+        FROM api_test_runs WHERE id = #{id}
+    </select>
+
+    <!-- 失败的排前面：打开一份报告，人要看的永远是挂了哪几条 -->
+    <select id="findCasesByRun" resultType="com.mobile.standalone.entity.ApiTestRunCase">
+        SELECT id, run_id AS runId, case_id AS caseId, name, method, path, url,
+               status, http_status AS httpStatus, duration_ms AS durationMs, error, created_at AS createdAt
+        FROM api_test_run_cases
+        WHERE run_id = #{runId}
+        ORDER BY (status = 'PASSED') ASC, created_at ASC
+    </select>
+
+    <select id="dailyTrend" resultType="java.util.Map">
+        SELECT DATE(created_at) AS day,
+               COUNT(1) AS runs,
+               SUM(total) AS total,
+               SUM(passed) AS passed,
+               SUM(failed) AS failed
+        FROM api_test_runs
+        WHERE created_at &gt;= #{since}
+        GROUP BY DATE(created_at)
+        ORDER BY day ASC
     </select>
 </mapper>

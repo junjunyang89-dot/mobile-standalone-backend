@@ -18,15 +18,22 @@
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="config" column="config"/>
+        <result property="flowId" column="flow_id"/>
+        <result property="runTrack" column="run_track"/>
     </resultMap>
     
     <select id="findAll" resultMap="TaskResultMap">
         SELECT * FROM tasks ORDER BY created_at DESC
     </select>
     
+    <!--
+      只认 AUTOMATION 轨。回归批次跑的是生产包，用例写的是本次提测的功能，
+      拿回归的结果给用例贴「通过」等于覆盖率造假。
+      这个字段是后加的，老数据没有，会显示成「未执行」——分不清是哪条轨时，宁可说不知道。
+    -->
     <select id="findLatestByFlowId" resultMap="TaskResultMap">
         SELECT * FROM tasks
-        WHERE config LIKE CONCAT('%"flowId":"', #{flowId}, '"%')
+        WHERE flow_id = #{flowId} AND run_track = 'AUTOMATION'
         ORDER BY COALESCE(updated_at, created_at) DESC
         LIMIT 1
     </select>
@@ -139,8 +146,8 @@
     </select>
     
     <insert id="insert">
-        INSERT INTO tasks (id, name, description, project_path, script_path, platform, device_id, app_id, task_type, scenario_key, status, created_at, updated_at, config)
-        VALUES (#{id}, #{name}, #{description}, #{projectPath}, #{scriptPath}, #{platform}, #{deviceId}, #{appId}, #{taskType}, #{scenarioKey}, #{status}, #{createdAt}, #{updatedAt}, #{config})
+        INSERT INTO tasks (id, name, description, project_path, script_path, platform, device_id, app_id, task_type, scenario_key, status, created_at, updated_at, config, flow_id, run_track)
+        VALUES (#{id}, #{name}, #{description}, #{projectPath}, #{scriptPath}, #{platform}, #{deviceId}, #{appId}, #{taskType}, #{scenarioKey}, #{status}, #{createdAt}, #{updatedAt}, #{config}, #{flowId}, #{runTrack})
     </insert>
 
     <update id="update">

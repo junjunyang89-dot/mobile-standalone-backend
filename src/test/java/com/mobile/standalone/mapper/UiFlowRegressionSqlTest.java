@@ -95,15 +95,36 @@ class UiFlowRegressionSqlTest {
                 .contains("COALESCE(environment, 'PROD')"), "测试也走同一套判断");
     }
 
-    /** 轨道恒定：回归候选永远只看 ONLINE/SHARED，不受环境影响 */
+    /**
+     * 轨道恒定：回归候选永远只看 ONLINE/SHARED，不受环境影响。
+     * <p>
+     * 把住的是 {@code catalog IN} 那一段——它决定哪些流程能进回归批次。
+     * 不能整串搜 'AUTOMATION'：环境那一段现在有个
+     * {@code catalog = 'AUTOMATION' OR ...} 的豁免（自动化流程不绑环境），
+     * 整串搜会把那个豁免误判成「自动化混进了回归批次」。
+     */
     @Test
     void 轨道不随环境变化() {
         for (String env : List.of("PROD", "TEST")) {
             String sql = render("DOMESTIC_ESPORTS", null, env).sql();
             assertTrue(sql.contains("catalog IN ('ONLINE', 'SHARED')"), env + ": " + sql);
-            assertFalse(sql.contains("'AUTOMATION'"), env + ": 仅自动化编排不该进回归批次");
+            assertFalse(sql.contains("catalog IN ('AUTOMATION'"), env + ": 仅自动化编排不该进回归批次");
             assertFalse(sql.contains("'PERFORMANCE'"), env + ": " + sql);
         }
+    }
+
+    /**
+     * 自动化流程不绑环境：同一条流程既能跑线上包也能跑测试包，
+     * 差别只在装哪个包、用哪套数据。回归流程照旧按环境筛。
+     */
+    @Test
+    void 自动化流程豁免环境过滤() {
+        String sql = render("DOMESTIC_ESPORTS", null, "TEST").sql();
+
+        assertTrue(sql.contains("catalog = 'AUTOMATION'"),
+                "缺了豁免，自动化流程就得按环境写两遍：" + sql);
+        assertTrue(sql.contains("COALESCE(environment, 'PROD')"),
+                "回归流程仍要按环境筛：" + sql);
     }
 
     /** 启用、非组件这两条硬约束在任何环境下都在 */

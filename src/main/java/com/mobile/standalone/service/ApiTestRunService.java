@@ -14,6 +14,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.net.URI;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -64,9 +67,56 @@ public class ApiTestRunService {
                         INDEX idx_status_created (status, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
+            // 集合执行要能在报告里认出来（「XX 集合 · 第 12 次」），否则历史就是一串没有上下文的记录
+            ensureColumn("api_test_runs", "collection_id", "VARCHAR(64) NULL COMMENT '按集合执行时记下是哪个集合'");
             log.info("[api-test-runs] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test-runs] 建表失败: {}", e.getMessage());
+        }
+    }
+
+    // ---------- 报告页查询 ----------
+
+    public List<Map<String, Object>> listRuns(String collectionId, int limit) {
+        return runMapper.findRuns(collectionId, Math.max(1, Math.min(limit, 200)));
+    }
+
+    /** 一份报告的详情：概要 + 用例明细（失败在前） */
+    public Map<String, Object> runDetail(String runId) {
+        ApiTestRun run = runMapper.findRunById(runId);
+        if (run == null) {
+            return null;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("run", run);
+        out.put("cases", runMapper.findCasesByRun(runId));
+        return out;
+    }
+
+    /**
+     * 近 N 天趋势。
+     * <p>
+     * 按天聚合而不是把每次执行都画上去：一天里手动重跑十几次很正常，
+     * 那种锯齿看不出任何走向，只会让人以为质量在剧烈波动。
+     */
+    public List<Map<String, Object>> trend(int days) {
+        int d = Math.max(1, Math.min(days, 90));
+        return runMapper.dailyTrend(LocalDateTime.now().minusDays(d));
+    }
+
+    /** 列不存在才加，免得每加一列就要人记着去跑一份 SQL */
+    private void ensureColumn(String table, String column, String definition) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    Integer.class, table, column);
+            if (n != null && n == 0) {
+                jdbcTemplate.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+                log.info("[api-test-runs] 已补充 {}.{} 列", table, column);
+            }
+        } catch (Exception e) {
+            log.debug("[api-test-runs] {}.{} 列检查跳过: {}", table, column, e.getMessage());
         }
     }
 
@@ -86,6 +136,7 @@ public class ApiTestRunService {
             ApiTestRun run = new ApiTestRun();
             run.setId(runId);
             run.setEnvironment(result.getEnvironment());
+            run.setCollectionId(result.getCollectionId());
             run.setTotal(result.getTotal());
             run.setPassed(result.getPassed());
             run.setFailed(result.getFailed());

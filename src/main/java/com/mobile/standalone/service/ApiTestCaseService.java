@@ -81,15 +81,81 @@ public class ApiTestCaseService {
                         INDEX idx_project (project)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
+            // 老表名 api_test_variables 改成 env_variables：这套东西 UI 自动化也要用，
+            // 名字里带 api 会让人以为跟接口测试绑定，于是又去建第二套
+            try {
+                Integer old = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(1) FROM information_schema.TABLES "
+                                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'api_test_variables'",
+                        Integer.class);
+                if (old != null && old > 0) {
+                    jdbcTemplate.execute("RENAME TABLE api_test_variables TO env_variables");
+                    log.info("[env-vars] api_test_variables 已改名为 env_variables");
+                }
+            } catch (Exception e) {
+                log.debug("[env-vars] 改名跳过: {}", e.getMessage());
+            }
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS env_variables (
+                        environment VARCHAR(16) NOT NULL,
+                        name VARCHAR(64) NOT NULL,
+                        value VARCHAR(2048) NULL,
+                        secret TINYINT(1) NOT NULL DEFAULT 0,
+                        enabled TINYINT(1) NOT NULL DEFAULT 1,
+                        description VARCHAR(255) NULL,
+                        sort_order INT NOT NULL DEFAULT 100,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        PRIMARY KEY (environment, name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """);
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS api_test_collections (
+                        id VARCHAR(64) PRIMARY KEY,
+                        project VARCHAR(64) NOT NULL,
+                        name VARCHAR(128) NOT NULL,
+                        description VARCHAR(512) NULL,
+                        enabled TINYINT(1) NOT NULL DEFAULT 1,
+                        sort_order INT NOT NULL DEFAULT 100,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        UNIQUE KEY uk_project_name (project, name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """);
             ensureProjectColumn();
             ensureUrlIdColumn();
             ensureEnvironmentColumn();
+            ensureColumn("api_test_cases", "collection_id",
+                    "VARCHAR(64) NULL COMMENT '归属集合' AFTER project");
+            ensureColumn("api_test_cases", "extract_json",
+                    "TEXT NULL COMMENT '执行后抽变量，如 {\"token\":\"$.result.token\"}' AFTER assertions");
             seedEnvsIfEmpty();
             projectService.ensureExists(PROJECT_DATA_CENTER, "data-center（数据中心）");
             importProjectSeedIfAbsent(PROJECT_DATA_CENTER, "api-test/seed-data-center.json");
             log.info("[api-test] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test] 建表/导入失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 列不存在才加。
+     * <p>
+     * 后加的列都走这里，不再一列写一个 ensureXxxColumn——上面那三个是历史遗留。
+     * 靠人记着去跑 migration.sql 是不行的：漏跑一次就是启动即报「Unknown column」，
+     * 而报错本身看不出该跑哪个文件。
+     */
+    private void ensureColumn(String table, String column, String definition) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    Integer.class, table, column);
+            if (n != null && n == 0) {
+                jdbcTemplate.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+                log.info("[api-test] 已补充 {}.{} 列", table, column);
+            }
+        } catch (Exception e) {
+            log.debug("[api-test] {}.{} 列检查跳过: {}", table, column, e.getMessage());
         }
     }
 
@@ -204,7 +270,7 @@ public class ApiTestCaseService {
                 return 0;
             }
             if (replaceSeedRows) {
-                List<ApiTestCase> existing = caseMapper.findByFilters(project, null, null, null, null, null);
+                List<ApiTestCase> existing = caseMapper.findByFilters(project, null, null, null, null, null, null);
                 for (ApiTestCase c : existing) {
                     if (c.getCreatedBy() != null && c.getCreatedBy().startsWith("seed-")) {
                         caseMapper.deleteById(c.getId());
@@ -294,20 +360,22 @@ public class ApiTestCaseService {
         return envMapper.findByEnvironment(body.getEnvironment());
     }
 
-    public List<ApiTestCase> listCases(String project, String environment, Boolean enabledOnly, String keyword) {
-        return caseMapper.findByFilters(blankToNull(project), normalizeListEnv(environment),
+    public List<ApiTestCase> listCases(String project, String collectionId, String environment,
+                                       Boolean enabledOnly, String keyword) {
+        return caseMapper.findByFilters(blankToNull(project), blankToNull(collectionId), normalizeListEnv(environment),
                 enabledOnly, blankToNull(keyword), null, null);
     }
 
-    public PageResult<ApiTestCase> listCasesPage(String project, String environment, Boolean enabledOnly,
-                                                 String keyword, int page, int size) {
+    public PageResult<ApiTestCase> listCasesPage(String project, String collectionId, String environment,
+                                                 Boolean enabledOnly, String keyword, int page, int size) {
         int p = Math.max(1, page);
         int s = Math.min(200, Math.max(1, size));
         int offset = (p - 1) * s;
         String env = normalizeListEnv(environment);
-        long total = caseMapper.countByFilters(blankToNull(project), env, enabledOnly, blankToNull(keyword));
+        long total = caseMapper.countByFilters(
+                blankToNull(project), blankToNull(collectionId), env, enabledOnly, blankToNull(keyword));
         List<ApiTestCase> content = caseMapper.findByFilters(
-                blankToNull(project), env, enabledOnly, blankToNull(keyword), offset, s);
+                blankToNull(project), blankToNull(collectionId), env, enabledOnly, blankToNull(keyword), offset, s);
         int totalPages = total == 0 ? 0 : (int) ((total + s - 1) / s);
         return new PageResult<>(content, total, totalPages, p, s);
     }

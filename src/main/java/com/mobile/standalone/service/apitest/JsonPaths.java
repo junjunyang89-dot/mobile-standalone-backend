@@ -24,7 +24,15 @@ public final class JsonPaths {
         if (body == null || body.isBlank() || path == null || path.isBlank()) {
             return null;
         }
-        JsonNode cur = JSON.readTree(body);
+        JsonNode cur;
+        try {
+            cur = JSON.readTree(body);
+        } catch (Exception e) {
+            // 响应不是 JSON——网关的 HTML 错误页、502 文本页都会走到这里。
+            // 抛出去会变成「断言解析异常」，把「后端返回了个错误页」说成「断言写错了」，
+            // 指向完全错误的方向。返回 null，让断言正常报「取不到值」，响应原文在 bodyPreview 里能看到
+            return null;
+        }
         String p = path.trim();
         if (p.startsWith("$.")) {
             p = p.substring(2);

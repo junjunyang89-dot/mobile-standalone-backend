@@ -17,6 +17,8 @@
         <result property="headers" column="headers"/>
         <result property="body" column="body"/>
         <result property="assertions" column="assertions"/>
+        <result property="extractJson" column="extract_json"/>
+        <result property="collectionId" column="collection_id"/>
         <result property="fieldNotes" column="field_notes"/>
         <result property="enabled" column="enabled"/>
         <result property="sortOrder" column="sort_order"/>
@@ -28,6 +30,13 @@
     <sql id="FilterWhere">
         <where>
             <if test="project != null and project != ''">AND project = #{project}</if>
+            <!-- '__none__' 表示「还没归组的」，用来找出漏网的用例 -->
+            <if test="collectionId != null and collectionId != ''">
+                <choose>
+                    <when test="collectionId == '__none__'">AND (collection_id IS NULL OR collection_id = '')</when>
+                    <otherwise>AND collection_id = #{collectionId}</otherwise>
+                </choose>
+            </if>
             <if test="environment != null and environment != ''">
                 AND (environment = #{environment} OR environment = 'ANY' OR environment IS NULL OR environment = '')
             </if>
@@ -69,6 +78,11 @@
         SELECT COUNT(1) FROM api_test_cases WHERE project = #{project}
     </select>
 
+    <select id="findByProject" resultMap="ApiTestCaseMap">
+        SELECT * FROM api_test_cases WHERE project = #{project}
+        ORDER BY sort_order ASC, name ASC
+    </select>
+
     <select id="findDistinctProjects" resultType="string">
         SELECT DISTINCT project FROM api_test_cases
         WHERE project IS NOT NULL AND project &lt;&gt; ''
@@ -78,11 +92,11 @@
     <insert id="insert">
         INSERT INTO api_test_cases
         (id, project, environment, name, description, requirement_ref, method, path, url_id, query, headers, body,
-         assertions, field_notes, enabled, sort_order, created_by, created_at, updated_at)
+         assertions, extract_json, field_notes, enabled, sort_order, created_by, created_at, updated_at)
         VALUES
         (#{id}, #{project}, #{environment}, #{name}, #{description}, #{requirementRef}, #{method}, #{path}, #{urlId},
          #{query}, #{headers}, #{body},
-         #{assertions}, #{fieldNotes}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
+         #{assertions}, #{extractJson}, #{fieldNotes}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -99,6 +113,7 @@
             headers = #{headers},
             body = #{body},
             assertions = #{assertions},
+            extract_json = #{extractJson},
             field_notes = #{fieldNotes},
             enabled = #{enabled},
             sort_order = #{sortOrder},

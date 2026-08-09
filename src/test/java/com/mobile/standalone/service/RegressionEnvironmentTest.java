@@ -124,16 +124,47 @@ class RegressionEnvironmentTest {
 
     // ==================== 轨道这一维 ====================
 
-    /** 三个维度各管各的：轨道看 catalog、环境看 environment、启用/组件各自一条 */
+    /**
+     * 轨道仍然是硬过滤：仅自动化编排的流程进不了回归批次。
+     * <p>
+     * 但<b>环境对自动化流程不再是过滤条件</b>——见下一条。
+     */
     @Test
-    void 轨道与环境是两个独立的过滤条件() {
+    void 轨道是硬过滤() {
         UiFlow autoTest = flow("AUTOMATION", "TEST");
 
         assertTrue(service.isBatchEligible(autoTest, TestEnvironment.TEST, RunTrack.AUTOMATION));
-        // 环境对不上
-        assertFalse(service.isBatchEligible(autoTest, TestEnvironment.PROD, RunTrack.AUTOMATION));
-        // 轨道对不上
-        assertFalse(service.isBatchEligible(autoTest, TestEnvironment.TEST, RunTrack.REGRESSION));
+        assertFalse(service.isBatchEligible(autoTest, TestEnvironment.TEST, RunTrack.REGRESSION),
+                "自动化流程不该混进回归批次");
+    }
+
+    /**
+     * 自动化流程不绑环境。
+     * <p>
+     * 一条用例（「协议勾选框可勾选」）在测试包和线上包上是同一件事，它的自动化实现也该是同一条流程。
+     * 绑了环境，同一个用例要写两遍流程，而且一条用例得挂两条流程——关联关系从 N:1 退化成 N:N。
+     * 环境差异只在「装哪个包、用哪套数据」，那是执行时的参数。
+     */
+    @Test
+    void 自动化流程两个环境都能跑() {
+        UiFlow autoTest = flow("AUTOMATION", "TEST");
+
+        assertTrue(service.isBatchEligible(autoTest, TestEnvironment.TEST, RunTrack.AUTOMATION));
+        assertTrue(service.isBatchEligible(autoTest, TestEnvironment.PROD, RunTrack.AUTOMATION),
+                "流程上标着 TEST 也要能跑线上包——环境不再是流程的属性");
+    }
+
+    /**
+     * 回归流程<b>照旧绑环境</b>：线上回归和测试回归本来就走不同的流程
+     * （装包方式、渠道都不同），这一条不能跟着一起放开。
+     */
+    @Test
+    void 回归流程仍然按环境隔离() {
+        UiFlow onlineFlow = flow("ONLINE", "PROD");
+
+        assertTrue(service.isBatchEligible(onlineFlow, TestEnvironment.PROD, RunTrack.REGRESSION));
+        assertFalse(service.isBatchEligible(onlineFlow, TestEnvironment.TEST, RunTrack.REGRESSION),
+                "线上回归的流程不能混进测试环境回归");
     }
 
     /** 「回归 + 自动化编排」跨轨道不跨环境 */

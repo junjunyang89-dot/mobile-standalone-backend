@@ -8,6 +8,8 @@ import java.time.LocalDateTime;
 public class ApiTestRun {
     private String id;
     private String environment;
+    /** 按集合执行时记下是哪个集合，报告里才认得出「XX 集合 · 第 N 次」 */
+    private String collectionId;
     private Integer total;
     private Integer passed;
     private Integer failed;

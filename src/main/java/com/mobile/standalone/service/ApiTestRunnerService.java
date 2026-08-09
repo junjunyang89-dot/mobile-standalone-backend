@@ -9,8 +9,10 @@ import com.mobile.standalone.entity.ApiTestCase;
 import com.mobile.standalone.entity.ApiTestEnv;
 import com.mobile.standalone.entity.ApiUrlEntry;
 import com.mobile.standalone.entity.ApiProject;
+import com.mobile.standalone.entity.ApiTestCollection;
 import com.mobile.standalone.mapper.ApiTestCaseMapper;
-import com.mobile.standalone.service.apitest.ApiTestVariableService;
+import com.mobile.standalone.service.apitest.ApiTestCollectionService;
+import com.mobile.standalone.service.EnvVariableService;
 import com.mobile.standalone.service.apitest.JsonPaths;
 import com.mobile.standalone.service.apitest.VariableResolver;
 import com.mobile.standalone.util.TestEnvironment;
@@ -46,8 +48,9 @@ public class ApiTestRunnerService {
     private final ApiTestCaseMapper caseMapper;
     private final ApiUrlService apiUrlService;
     private final ApiTestRunService runService;
-    private final ApiTestVariableService variableService;
+    private final EnvVariableService variableService;
     private final ApiProjectService projectService;
+    private final ApiTestCollectionService collectionService;
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -55,7 +58,24 @@ public class ApiTestRunnerService {
             .build();
 
     public RunResult run(RunRequest req) {
-        if (req == null || req.getCaseIds() == null || req.getCaseIds().isEmpty()) {
+        if (req == null) {
+            throw new IllegalArgumentException("请求不能为空");
+        }
+        // 按集合执行：顺序由集合内的 sortOrder 决定，不由调用方传。
+        // 顺序在这里是语义的一部分——登录用例排在前面，后面的用例才引用得到它 extract 出来的 token
+        ApiTestCollection collection = null;
+        if (req.getCollectionId() != null && !req.getCollectionId().isBlank()) {
+            collection = collectionService.get(req.getCollectionId());
+            if (collection == null) {
+                throw new IllegalArgumentException("集合不存在: " + req.getCollectionId());
+            }
+            List<String> ids = collectionService.caseIdsOf(collection.getId());
+            if (ids.isEmpty()) {
+                throw new IllegalArgumentException("集合「" + collection.getName() + "」里没有启用的用例");
+            }
+            req.setCaseIds(ids);
+        }
+        if (req.getCaseIds() == null || req.getCaseIds().isEmpty()) {
             throw new IllegalArgumentException("caseIds 不能为空");
         }
         String envKey = TestEnvironment.normalize(req.getEnvironment());
@@ -82,6 +102,10 @@ public class ApiTestRunnerService {
         long t0 = System.currentTimeMillis();
         RunResult out = new RunResult();
         out.setEnvironment(envKey);
+        if (collection != null) {
+            out.setCollectionId(collection.getId());
+            out.setCollectionName(collection.getName());
+        }
         int passed = 0;
         int failed = 0;
         for (String id : req.getCaseIds()) {
@@ -154,7 +178,9 @@ public class ApiTestRunnerService {
             cr.setBodyPreview(truncate(resp.body(), BODY_PREVIEW_MAX));
             List<String> assertMsgs = new ArrayList<>();
             String assertions = withBizCodeAssertion(c, VariableResolver.resolve(c.getAssertions(), runtime, envVars));
-            boolean ok = evaluateAssertions(assertions, resp.statusCode(), resp.body(), assertMsgs);
+            long elapsed = System.currentTimeMillis() - t0;
+            boolean ok = evaluateAssertions(assertions, resp.statusCode(), resp.body(),
+                    resp.headers().map(), elapsed, assertMsgs);
             // extract 放在断言之后、且只在通过时执行：失败的响应里抽出来的多半是错误结构，
             // 让它污染后面所有用例，会把一个失败放大成一片失败，真正的第一现场反而被埋掉
             if (ok) {
@@ -335,7 +361,13 @@ public class ApiTestRunnerService {
         }
     }
 
+    /** 老签名保留给测试与只关心状态码/响应体的调用方 */
     private boolean evaluateAssertions(String assertionsJson, int status, String body, List<String> msgs) {
+        return evaluateAssertions(assertionsJson, status, body, Map.of(), 0L, msgs);
+    }
+
+    private boolean evaluateAssertions(String assertionsJson, int status, String body,
+                                       Map<String, List<String>> headers, long elapsedMs, List<String> msgs) {
         try {
             JsonNode arr = assertionsJson == null || assertionsJson.isBlank()
                     ? JSON.createArrayNode()
@@ -361,6 +393,30 @@ public class ApiTestRunnerService {
                         pass = body != null && v != null && body.contains(v);
                         detail = "bodyIncludes(" + truncate(v, 40) + ")";
                     }
+                    case "header" -> {
+                        String name = text(a, "name");
+                        String actual = headerValue(headers, name);
+                        if (a.has("exists")) {
+                            boolean want = a.path("exists").asBoolean(true);
+                            pass = want == (actual != null);
+                            detail = "header " + name + " exists=" + want;
+                        } else if (a.has("contains")) {
+                            String v = text(a, "contains");
+                            pass = actual != null && v != null && actual.contains(v);
+                            detail = "header " + name + " 含 " + v + " 实际=" + actual;
+                        } else {
+                            String v = text(a, "equals");
+                            pass = actual != null && actual.equals(v);
+                            detail = "header " + name + "==" + v + " 实际=" + actual;
+                        }
+                    }
+                    case "responseTime" -> {
+                        // 接口自动化顺手把耗时兜住：接口「能用但很慢」是最容易在提测阶段漏掉的一类问题，
+                        // 等到线上才发现时，已经不知道是哪次改动引入的
+                        long max = a.path("lessThan").asLong(a.path("max").asLong(0));
+                        pass = max <= 0 || elapsedMs < max;
+                        detail = "耗时 < " + max + "ms 实际=" + elapsedMs + "ms";
+                    }
                     case "jsonPath" -> {
                         String path = text(a, "path");
                         JsonNode node = readJsonPath(body, path);
@@ -373,6 +429,27 @@ public class ApiTestRunnerService {
                             JsonNode expect = a.get("equals");
                             pass = node != null && jsonEquals(node, expect);
                             detail = "jsonPath " + path + "==" + expect + " 实际=" + node;
+                        } else if (a.has("notEquals")) {
+                            JsonNode expect = a.get("notEquals");
+                            pass = node != null && !jsonEquals(node, expect);
+                            detail = "jsonPath " + path + "!=" + expect + " 实际=" + node;
+                        } else if (a.has("contains")) {
+                            String v = text(a, "contains");
+                            String actual = node == null ? null : (node.isValueNode() ? node.asText() : node.toString());
+                            pass = actual != null && v != null && actual.contains(v);
+                            detail = "jsonPath " + path + " 含 " + v + " 实际=" + truncate(actual, 60);
+                        } else if (a.has("gt") || a.has("lt")) {
+                            boolean isGt = a.has("gt");
+                            double bound = (isGt ? a.get("gt") : a.get("lt")).asDouble();
+                            // 非数字节点直接算不通过，别把 null 当 0——那会让「字段没返回」冒充成「值是 0」
+                            pass = node != null && node.isNumber()
+                                    && (isGt ? node.asDouble() > bound : node.asDouble() < bound);
+                            detail = "jsonPath " + path + (isGt ? " > " : " < ") + bound + " 实际=" + node;
+                        } else if (a.has("size")) {
+                            int want = a.path("size").asInt(-1);
+                            pass = node != null && node.isArray() && node.size() == want;
+                            detail = "jsonPath " + path + " 数组长度==" + want
+                                    + " 实际=" + (node != null && node.isArray() ? node.size() : "非数组");
                         } else {
                             pass = node != null && !node.isMissingNode() && !node.isNull();
                             detail = "jsonPath " + path + " 存在";
@@ -396,6 +473,20 @@ public class ApiTestRunnerService {
     /** 断言与 extract 共用一份路径解析，别两边各写一份 */
     static JsonNode readJsonPath(String body, String path) throws Exception {
         return JsonPaths.read(body, path);
+    }
+
+    /** 响应头名大小写不敏感（HTTP 规范如此，人写断言时不该被这个绊住） */
+    private static String headerValue(Map<String, List<String>> headers, String name) {
+        if (headers == null || name == null) {
+            return null;
+        }
+        for (Map.Entry<String, List<String>> e : headers.entrySet()) {
+            if (e.getKey() != null && e.getKey().equalsIgnoreCase(name)) {
+                List<String> v = e.getValue();
+                return v == null || v.isEmpty() ? null : v.get(0);
+            }
+        }
+        return null;
     }
 
     private static boolean jsonEquals(JsonNode actual, JsonNode expect) {

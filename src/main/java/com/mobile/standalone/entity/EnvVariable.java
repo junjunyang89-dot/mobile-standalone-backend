@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
  * 是环境的固有属性；变量是可增删的一堆 kv。混在一起就会出现两个地方能改 baseUrl。
  */
 @Data
-public class ApiTestVariable {
+public class EnvVariable {
     /** TEST | PROD */
     private String environment;
     /** 变量名，用例里写 {{name}} */
