@@ -108,24 +108,21 @@ public class InspectorXmlImportService {
                     result.getSkipped().add(label + "：本批重复定位，跳过");
                     continue;
                 }
-                // 跨页面去重：同应用+同平台+相同定位 = 同一元素
+                String targetPage = resolvedPageId != null ? resolvedPageId : blank(c.getPageId(), null);
+                // 同页+同定位才算真正重复；不同页的「取消」可以各建一条（英文名自动加后缀）
                 UiElement existing = uiElementService.findByExactLocator(
                         appId.trim(), plat, locatorType, locatorValue);
                 if (existing != null) {
-                    result.getSkipped().add(label + "：已存在「"
-                            + blank(existing.getNameZh(), existing.getNameEn())
-                            + "」(page=" + blank(existing.getPageId(), "未归属")
-                            + ", nameEn=" + existing.getNameEn() + ")，跳过");
-                    continue;
-                }
-                // 英文名在同应用同平台任意来源已存在，也视为同一元素（跨页不插）
-                String nameEnBase = slug(blank(c.getNameEn(), label));
-                UiElement byKey = uiElementService.findByKey(appId.trim(), plat, nameEnBase, null);
-                if (byKey != null) {
-                    result.getSkipped().add(label + "：英文名 "
-                            + nameEnBase + " 已存在于页面 "
-                            + blank(byKey.getPageId(), "未归属") + "，跳过");
-                    continue;
+                    String existingPage = blank(existing.getPageId(), "");
+                    String wantPage = blank(targetPage, "");
+                    if (existingPage.equalsIgnoreCase(wantPage)
+                            || (existingPage.isEmpty() && wantPage.isEmpty())) {
+                        result.getSkipped().add(label + "：本页已存在「"
+                                + blank(existing.getNameZh(), existing.getNameEn())
+                                + "」(nameEn=" + existing.getNameEn() + ")，跳过");
+                        continue;
+                    }
+                    // 跨页同定位：继续入库，下面用唯一 nameEn；流程里按页面选不同 key
                 }
 
                 UiElement e = new UiElement();
@@ -135,13 +132,18 @@ public class InspectorXmlImportService {
                 e.setSource("INSPECTOR_XML");
                 e.setStatus(st);
                 e.setNameZh(blank(c.getNameZh(), c.getNameEn()));
-                e.setNameEn(ensureUniqueNameEn(appId.trim(), plat, blank(c.getNameEn(), "el")));
+                // 英文名在同应用同平台全局唯一（执行按 nameEn 查）；冲突则 cancel → cancel_2
+                String preferredNameEn = blank(c.getNameEn(), "el");
+                if (existing != null && targetPage != null && !targetPage.isBlank()) {
+                    preferredNameEn = blank(c.getNameEn(), "el") + "_" + slug(targetPage);
+                }
+                e.setNameEn(ensureUniqueNameEn(appId.trim(), plat, preferredNameEn));
                 e.setLocatorType(locatorType);
                 e.setLocatorValue(locatorValue);
                 e.setLocatorFallbacks(serializeFallbacks(c));
                 e.setVisualHint(c.getVisualHint());
                 e.setModuleTag(blank(moduleTag, blank(c.getModuleTag(), null)));
-                e.setPageId(resolvedPageId != null ? resolvedPageId : blank(c.getPageId(), null));
+                e.setPageId(targetPage);
                 e.setDescription(c.getDescription());
                 e.setEnabled(true);
                 e.setDefaultTimeoutSec(10);
@@ -154,12 +156,13 @@ public class InspectorXmlImportService {
         return result;
     }
 
+    /** 同应用同平台下英文名全局唯一（不限 source），冲突则加 _2、_3… */
     private String ensureUniqueNameEn(String appId, String platform, String base) {
         String name = slug(base);
         if (name.isBlank()) name = "el";
         String candidate = name;
         int i = 2;
-        while (uiElementService.findByKey(appId, platform, candidate, "INSPECTOR_XML") != null) {
+        while (uiElementService.findByKey(appId, platform, candidate, null) != null) {
             candidate = name + "_" + i++;
             if (i > 200) {
                 return name + "_" + System.currentTimeMillis();

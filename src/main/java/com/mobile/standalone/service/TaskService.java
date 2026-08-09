@@ -285,6 +285,9 @@ public class TaskService {
         String deviceId = task.getDeviceId() != null && !task.getDeviceId().isBlank()
                 ? task.getDeviceId().trim() : null;
         if (deviceId != null) {
+            // 让锁服务能判断「这个持有者是不是已经被请求停止了」——
+            // 停止请求发出后超过宽限期还不释放，说明执行线程已经死了，锁该被抢过来
+            deviceLockService.setCancelledCheck(cancelRegistry::isCancelled);
             DeviceLockService.Holder blocker = deviceLockService.tryAcquire(
                     deviceId, DeviceLockService.Kind.TASK, taskId,
                     task.getName() != null ? task.getName() : taskId, parentRefId);

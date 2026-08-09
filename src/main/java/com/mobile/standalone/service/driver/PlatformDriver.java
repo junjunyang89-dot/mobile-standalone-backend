@@ -96,6 +96,15 @@ public interface PlatformDriver {
     }
 
     /**
+     * 回到手机主屏幕（桌面）。
+     * iOS：底部上滑 / Home 键；Android：KEYCODE_HOME。
+     * 不支持时返回 false。
+     */
+    default boolean pressHome(String deviceId) {
+        return false;
+    }
+
+    /**
      * 获取元素中心坐标 [centerX, centerY]，用于在指定位置执行滑动等操作。
      * 不支持或元素不存在时返回 null。
      */

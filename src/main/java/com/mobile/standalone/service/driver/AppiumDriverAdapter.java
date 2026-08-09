@@ -563,21 +563,87 @@ public class AppiumDriverAdapter implements PlatformDriver {
     }
 
     private void pressIosHome(String deviceId) {
-        try {
-            AppiumDriver driver = sessions.get(deviceId);
-            if (driver instanceof IOSDriver iosDriver) {
-                try {
-                    iosDriver.executeScript("mobile: pressButton", Map.of("name", "home"));
-                    log.info("iOS mobile:pressButton home 成功: deviceId={}", deviceId);
-                    return;
-                } catch (Exception e) {
-                    log.warn("iOS pressButton home 失败，尝试备用: {}", e.getMessage());
-                }
-            }
-            // 无会话时无法按 Home；有会话但脚本失败则忽略，由上层感知
-        } catch (Exception e) {
-            log.warn("iOS 按 Home 失败: {}", e.getMessage());
+        goIosHomeScreen(deviceId);
+    }
+
+    /**
+     * 回到 iOS 主屏幕。
+     * <p>
+     * 全面屏机型的正确手势是<strong>屏幕底部中央快速上滑</strong>（Home Indicator），
+     * 不是左右滑，也不是页内慢拖。慢拖会被 App 当成内容滚动/翻页。
+     * 顺序：pressButton home → 底部短促上滑 → 拉起 SpringBoard。
+     */
+    public boolean goIosHomeScreen(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return false;
         }
+        AppiumDriver driver = sessions.get(deviceId);
+        if (!(driver instanceof IOSDriver iosDriver)) {
+            return false;
+        }
+        boolean ok = false;
+
+        // 1) 系统 Home（有实体键 / 部分机型有效；全面屏常无效，不作为唯一手段）
+        try {
+            iosDriver.executeScript("mobile: pressButton", Map.of("name", "home"));
+            log.info("iOS mobile:pressButton home: deviceId={}", deviceId);
+            ok = true;
+            sleepQuiet(350);
+        } catch (Exception e) {
+            log.debug("iOS pressButton home: {}", e.getMessage());
+        }
+
+        // 2) 全面屏：底部中央 → 向上快速轻扫（duration 宜短；长了会进多任务或被当成页内滑）
+        if (iosHomeIndicatorFlick(deviceId, iosDriver)) {
+            ok = true;
+            sleepQuiet(400);
+        }
+
+        // 3) 兜底：直接拉起 SpringBoard（桌面）
+        try {
+            if (deviceManager.launchIosAppCli(deviceId, "com.apple.springboard")) {
+                log.info("iOS 已拉起 SpringBoard 回主屏: deviceId={}", deviceId);
+                ok = true;
+            }
+        } catch (Exception e) {
+            log.debug("拉起 SpringBoard 失败: {}", e.getMessage());
+        }
+        return ok;
+    }
+
+    /**
+     * Face ID / 全面屏回桌面手势：底边中点快速上滑到约 35% 屏高。
+     * 必须竖向（x 不变），禁止左右分量，否则看起来像「从左往右滑」。
+     */
+    private boolean iosHomeIndicatorFlick(String deviceId, IOSDriver driver) {
+        int[] size = getWindowSize(deviceId);
+        if (size == null || size.length < 2 || size[0] <= 0 || size[1] <= 0) {
+            return false;
+        }
+        int w = size[0];
+        int h = size[1];
+        // 竖屏为准；若当前是横屏窗口，仍沿「短边」做底部上滑更接近 Home Indicator
+        int x = w / 2;
+        int fromY = Math.max(h - 3, (int) (h * 0.98));
+        int toY = (int) (h * 0.35);
+
+        // 短促 0.12s：回桌面；过长会像拖内容或进 App Switcher
+        Map<String, Object> args = new HashMap<>();
+        args.put("duration", 0.12);
+        args.put("fromX", x);
+        args.put("fromY", fromY);
+        args.put("toX", x);
+        args.put("toY", toY);
+        try {
+            driver.executeScript("mobile: dragFromToForDuration", args);
+            log.info("iOS 底部上滑回主屏: deviceId={} ({},{})->({},{}) dur=0.12s",
+                    deviceId, x, fromY, x, toY);
+            return true;
+        } catch (Exception e) {
+            log.warn("iOS dragFromToForDuration 回主屏失败，试 W3C 轻扫: {}", e.getMessage());
+        }
+        // W3C 快速 flick，同样保持 x 不变
+        return swipeViaW3c(driver, x, fromY, x, toY, 120);
     }
 
     /** 建 Appium 会话但不 force-stop，用于热启动挂接已在跑的应用。 */
@@ -620,17 +686,7 @@ public class AppiumDriverAdapter implements PlatformDriver {
     }
 
     private void pressAndroidHome(String deviceId) {
-        try {
-            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "keyevent", "KEYCODE_HOME")
-                    .redirectErrorStream(true)
-                    .start();
-            if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                p.destroyForcibly();
-            }
-            log.info("已按 Home 切入后台: deviceId={}", deviceId);
-        } catch (Exception e) {
-            log.warn("按 Home 失败: {}", e.getMessage());
-        }
+        pressAndroidHomeKey(deviceId);
     }
 
     /**
@@ -830,16 +886,36 @@ public class AppiumDriverAdapter implements PlatformDriver {
         }
     }
 
+    /**
+     * WDA 的签名配置。
+     * <p>
+     * 免费个人账号签出来的描述文件<b>只有 7 天</b>，而且每接一台新设备都要先把它注册进 team，
+     * 否则签名对这台机无效——表现就是「WDA 装完立刻被卸载」。
+     * 真要稳定，用付费开发者账号或企业证书，profile 有效期变成一年。
+     */
+    @org.springframework.beans.factory.annotation.Value("${ios.wda.bundle-id:com.travYang.wda.Runner}")
+    private String wdaBundleId;
+
+    @org.springframework.beans.factory.annotation.Value("${ios.wda.xcode-org-id:}")
+    private String xcodeOrgId;
+
+    @org.springframework.beans.factory.annotation.Value("${ios.wda.xcode-signing-id:Apple Development}")
+    private String xcodeSigningId;
+
     private XCUITestOptions buildIosOptions(String deviceId, String bundleId) {
         XCUITestOptions opts = new XCUITestOptions();
         opts.setUdid(deviceId);
         opts.setNewCommandTimeout(Duration.ofSeconds(newCommandTimeout));
         applyIosParallelPorts(opts, deviceId);
         opts.setBundleId(bundleId);
-        // 个人团队不能使用 com.facebook.WebDriverAgentRunner，需唯一 Bundle ID + Team
-        opts.setUpdatedWdaBundleId("com.travYang.wda.Runner");
-        opts.setCapability("appium:xcodeOrgId", "37ZX3X6QJY");
-        opts.setCapability("appium:xcodeSigningId", "Apple Development");
+        // 签名参数不能写死。原来 xcodeOrgId 硬编码成某个具体的个人 team，
+        // 换台执行机、换个开发者账号就全废，而现象是「WDA 装完立刻被卸载」——
+        // 从这个现象反查到「签名 team 不对」中间隔了十万八千里
+        opts.setUpdatedWdaBundleId(wdaBundleId);
+        if (xcodeOrgId != null && !xcodeOrgId.isBlank()) {
+            opts.setCapability("appium:xcodeOrgId", xcodeOrgId.trim());
+        }
+        opts.setCapability("appium:xcodeSigningId", xcodeSigningId);
         opts.setCapability("appium:allowProvisioningUpdates", true);
         // 尽量复用已装好的 WDA，避免每次会话都重新编译/安装到手机上
         opts.setUsePrebuiltWda(true);
@@ -854,13 +930,20 @@ public class AppiumDriverAdapter implements PlatformDriver {
      * 先确保本机 WDA+iproxy 就绪并设置 webDriverAgentUrl，避免 Appium 再去重装 WDA。
      */
     public boolean attachIosUiSession(String deviceId, String bundleId) {
-        return attachIosUiSession(deviceId, bundleId, false);
+        return attachIosUiSession(deviceId, bundleId, false, true);
     }
 
     /**
      * @param forceNew true 时关闭旧会话再挂（App Store 点安装 / 启动目标 App 后必须重挂到正确 bundle）
      */
     public boolean attachIosUiSession(String deviceId, String bundleId, boolean forceNew) {
+        return attachIosUiSession(deviceId, bundleId, forceNew, true);
+    }
+
+    /**
+     * @param activate false 时不 {@code activateApp}，避免把前台系统「安装」弹窗冲掉（蒲公英确认框场景）
+     */
+    public boolean attachIosUiSession(String deviceId, String bundleId, boolean forceNew, boolean activate) {
         if (deviceId == null || bundleId == null || bundleId.isBlank()) {
             return false;
         }
@@ -886,18 +969,20 @@ public class AppiumDriverAdapter implements PlatformDriver {
             opts.setForceAppLaunch(false);
             opts.setShouldTerminateApp(false);
             opts.setWebDriverAgentUrl(wdaUrl);
-            log.info("挂接已运行的 WDA: {} forceNew={} bundle={}", wdaUrl, forceNew, wantBundle);
+            log.info("挂接已运行的 WDA: {} forceNew={} activate={} bundle={}",
+                    wdaUrl, forceNew, activate, wantBundle);
             URL url = new URL(serverUrl);
             IOSDriver driver = new IOSDriver(url, opts);
             driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(Math.min(5, implicitWaitSeconds)));
-            // App Store / 目标 App：确保自动化上下文切到该 bundle（不杀进程重装）
-            try {
-                driver.activateApp(wantBundle);
-            } catch (Exception e) {
-                log.debug("activateApp({}) 忽略: {}", wantBundle, e.getMessage());
+            if (activate) {
+                try {
+                    driver.activateApp(wantBundle);
+                } catch (Exception e) {
+                    log.debug("activateApp({}) 忽略: {}", wantBundle, e.getMessage());
+                }
             }
             sessions.put(deviceId, driver);
-            log.info("iOS UI 会话已挂接（不重启前台 App）: deviceId={}, bundle={}", deviceId, wantBundle);
+            log.info("iOS UI 会话已挂接（activate={}）: deviceId={}, bundle={}", activate, deviceId, wantBundle);
             return true;
         } catch (Exception e) {
             log.error("挂接 iOS UI 会话失败: deviceId={}, bundle={}", deviceId, wantBundle, e);
@@ -2613,6 +2698,47 @@ public class AppiumDriverAdapter implements PlatformDriver {
             }
         }
         return false;
+    }
+
+    /**
+     * 回到主屏幕：iOS 底部上滑 + Home 键；Android 优先 Appium HOME，失败再 adb KEYCODE_HOME。
+     */
+    @Override
+    public boolean pressHome(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return false;
+        }
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver instanceof IOSDriver) {
+            return goIosHomeScreen(deviceId);
+        }
+        if (driver instanceof AndroidDriver androidDriver) {
+            try {
+                androidDriver.pressKey(new KeyEvent(AndroidKey.HOME));
+                log.info("已发送 Android Home 键: deviceId={}", deviceId);
+                return true;
+            } catch (Exception e) {
+                log.warn("Appium 发 Home 失败，改用 adb: deviceId={} err={}", deviceId, e.getMessage());
+            }
+        }
+        return pressAndroidHomeKey(deviceId);
+    }
+
+    private boolean pressAndroidHomeKey(String deviceId) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "keyevent", "KEYCODE_HOME")
+                    .redirectErrorStream(true)
+                    .start();
+            if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return false;
+            }
+            log.info("已按 Home 切入后台: deviceId={}", deviceId);
+            return p.exitValue() == 0;
+        } catch (Exception e) {
+            log.warn("按 Home 失败: {}", e.getMessage());
+            return false;
+        }
     }
 
     private void closeSession(String deviceId) {

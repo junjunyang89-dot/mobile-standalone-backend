@@ -37,6 +37,15 @@ public class DeviceManager {
     @org.springframework.beans.factory.annotation.Value("${app.install.adb-install-timeout-seconds:300}")
     private int installTimeoutSeconds = 300;
 
+    @org.springframework.beans.factory.annotation.Value("${ios.wda.bundle-id:com.travYang.wda.Runner}")
+    private String iosWdaBundleId = "com.travYang.wda.Runner";
+
+    @org.springframework.beans.factory.annotation.Value("${ios.wda.xcode-org-id:37ZX3X6QJY}")
+    private String iosWdaTeamId = "37ZX3X6QJY";
+
+    @org.springframework.beans.factory.annotation.Value("${ios.wda.xcode-signing-id:Apple Development}")
+    private String iosWdaSigningId = "Apple Development";
+
     @Autowired
     private HdcClient hdcClient;
 
@@ -48,6 +57,25 @@ public class DeviceManager {
     private final ConcurrentHashMap<String, Process> iosWdaIproxyProcs = new ConcurrentHashMap<>();
     /** 最近一次 WDA 拉起失败原因（供真机点选等接口回显） */
     private final ConcurrentHashMap<String, String> iosWdaLastError = new ConcurrentHashMap<>();
+    /**
+     * 签名/完整性这类「短时间内再试也没用」的失败：冷却期内不再反复 xcodebuild，
+     * 否则业务步每截一次图都会再装一遍 WebDriverAgent，手机上看到的就是「一直在装 WDA」。
+     */
+    private final ConcurrentHashMap<String, Long> iosWdaCooldownUntilMs = new ConcurrentHashMap<>();
+    private static final long IOS_WDA_HARD_FAIL_COOLDOWN_MS = 10 * 60 * 1000L;
+
+    /**
+     * 认不出的失败连试几次就放弃。
+     * 前几次留给真正的瞬时问题（端口还没起、设备刚插上、xcodebuild 首次编译超时）。
+     */
+    static final int IOS_WDA_MAX_ATTEMPTS = 3;
+
+    /** 认不出的失败的基础冷却，按连续失败次数退避 */
+    static final long IOS_WDA_SOFT_FAIL_COOLDOWN_MS = 2 * 60 * 1000L;
+
+    /** 每台设备连续失败次数；成功即清零 */
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> iosWdaFailCounts =
+            new java.util.concurrent.ConcurrentHashMap<>();
     
     /**
      * 扫描 Android 设备（使用 ADB）
@@ -1391,6 +1419,30 @@ public class DeviceManager {
     }
 
     /**
+     * 用 Safari（优先）或系统能力在真机打开 https / itms-services URL。
+     * 蒲公英 iOS 安装页必须在设备上打开，电脑跟 itms 跳转会得到空文件。
+     */
+    public boolean openIosHttpsUrl(String deviceId, String url) {
+        if (deviceId == null || url == null || url.isBlank()) {
+            return false;
+        }
+        String u = url.trim();
+        if (u.toLowerCase(Locale.ROOT).startsWith("itms-services:")
+                || u.toLowerCase(Locale.ROOT).startsWith("itms-apps:")) {
+            // 深链不经 Safari 更稳
+            if (launchIosWithDevicectl(deviceId, "com.apple.mobilesafari", u)) {
+                return true;
+            }
+            return launchIosWithDevicectl(deviceId, "com.apple.AppStore", u);
+        }
+        if (launchIosWithDevicectl(deviceId, "com.apple.mobilesafari", u)) {
+            return true;
+        }
+        // 部分系统 payload-url 不认 https，退回只拉起 Safari（用户需手动点，但至少不静默失败）
+        return launchIosAppCli(deviceId, "com.apple.mobilesafari");
+    }
+
+    /**
      * 不经 Appium / WDA：用 devicectl 的 payload-url 打开 App Store 详情；失败则 idevicedebug 拉起 App Store。
      */
     public boolean openIosAppStoreUrl(String deviceId, String url) {
@@ -1495,15 +1547,152 @@ public class DeviceManager {
         return iosWdaLastError.get(deviceId.trim());
     }
 
+    /** 供工具箱展示：冷却剩余、失败次数、进程是否在跑。 */
+    public Map<String, Object> getIosWdaRuntimeState(String deviceId) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (deviceId == null || deviceId.isBlank()) {
+            return m;
+        }
+        String id = deviceId.trim();
+        Long coolUntil = iosWdaCooldownUntilMs.get(id);
+        long left = 0;
+        if (coolUntil != null) {
+            left = Math.max(0, (coolUntil - System.currentTimeMillis()) / 1000);
+        }
+        m.put("cooldownLeftSec", left);
+        m.put("failCount", iosWdaFailCounts.getOrDefault(id, 0));
+        m.put("lastError", iosWdaLastError.getOrDefault(id, ""));
+        Process xcode = iosWdaXcodeProcs.get(id);
+        Process iproxy = iosWdaIproxyProcs.get(id);
+        m.put("xcodeAlive", xcode != null && xcode.isAlive());
+        m.put("iproxyAlive", iproxy != null && iproxy.isAlive());
+        return m;
+    }
+
+    /** 证书修好后清冷却，否则业务侧会继续跳过拉起。 */
+    public void clearIosWdaCooldown(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return;
+        }
+        String id = deviceId.trim();
+        iosWdaCooldownUntilMs.remove(id);
+        iosWdaFailCounts.remove(id);
+        log.info("已清除 WDA 冷却: deviceId={}", id);
+    }
+
+    public boolean isIosWdaStatusOk(int localPort) {
+        return isWdaStatusOk(localPort);
+    }
+
+    /** WDA DerivedData / 日志不要放 java.io.tmpdir：IDE/沙箱 TMP 会被 CoreDevice 拒读，表现为装不上 Runner。 */
+    private static Path iosWdaWorkDir(String deviceId) {
+        String safe = deviceId == null ? "unknown" : deviceId.replaceAll("[^A-Za-z0-9_-]", "_");
+        return Path.of(System.getProperty("user.home"), ".mobile-standalone", "wda", safe);
+    }
+
+    private static Path iosWdaDerivedDir(String deviceId) {
+        return iosWdaWorkDir(deviceId).resolve("derived");
+    }
+
+    private static Path iosWdaLogFile(String deviceId, String name) {
+        return iosWdaWorkDir(deviceId).resolve(name);
+    }
+
+    /**
+     * 重新 {@code build-for-testing} 再拉起（工具箱「重新编译并安装」）。
+     *
+     * @return null 表示成功；非 null 为可读失败原因
+     */
+    public synchronized String rebuildAndInstallIosWda(String deviceId, int localPort) {
+        if (deviceId == null || deviceId.isBlank() || localPort <= 0) {
+            return "参数无效";
+        }
+        String wdaDir = System.getProperty("user.home")
+                + "/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent";
+        Path project = Path.of(wdaDir, "WebDriverAgent.xcodeproj");
+        if (!Files.isDirectory(project)) {
+            return "未找到 WDA 工程: " + project;
+        }
+        Path derived = iosWdaDerivedDir(deviceId);
+        Path buildLog = iosWdaLogFile(deviceId, "build.log");
+        try {
+            Files.createDirectories(derived.getParent());
+        } catch (Exception e) {
+            return "无法创建 WDA 工作目录: " + e.getMessage();
+        }
+        destroyQuietly(iosWdaXcodeProcs.remove(deviceId));
+        destroyQuietly(iosWdaIproxyProcs.remove(deviceId));
+        try {
+            List<String> cmd = List.of(
+                    "xcodebuild", "build-for-testing",
+                    "-project", project.toString(),
+                    "-scheme", "WebDriverAgentRunner",
+                    "-destination", "platform=iOS,id=" + deviceId,
+                    "-allowProvisioningUpdates",
+                    "-derivedDataPath", derived.toString(),
+                    "IPHONEOS_DEPLOYMENT_TARGET=17.6",
+                    "DEVELOPMENT_TEAM=" + iosWdaTeamId,
+                    "CODE_SIGN_STYLE=Automatic",
+                    "CODE_SIGN_IDENTITY=" + iosWdaSigningId,
+                    "PRODUCT_BUNDLE_IDENTIFIER=" + iosWdaBundleId,
+                    "GCC_TREAT_WARNINGS_AS_ERRORS=0",
+                    "COMPILER_INDEX_STORE_ENABLE=NO"
+            );
+            log.info("WDA rebuild 开始: deviceId={}, log={}", deviceId, buildLog);
+            ProcessBuilder pb = new ProcessBuilder(cmd)
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.to(buildLog.toFile()));
+            Process build = pb.start();
+            boolean finished = build.waitFor(8, TimeUnit.MINUTES);
+            if (!finished) {
+                build.destroyForcibly();
+                return "build-for-testing 超时（>8 分钟），见日志 " + buildLog;
+            }
+            String text = Files.exists(buildLog) ? Files.readString(buildLog) : "";
+            if (!text.contains("TEST BUILD SUCCEEDED") && build.exitValue() != 0) {
+                if (text.toLowerCase(Locale.ROOT).contains("ambiguous")) {
+                    return "签名身份 ambiguous（新旧证书同名）。请在工具箱先「清理吊销证书」再重试。日志：" + buildLog;
+                }
+                if (text.contains("REVOKED") || text.contains("CSSMERR_TP_CERT_REVOKED")) {
+                    return "开发者证书已吊销。请在 Xcode Accounts 新建证书，再「清理吊销证书」后重试。日志：" + buildLog;
+                }
+                return "build-for-testing 失败（exit=" + build.exitValue() + "），见 " + buildLog;
+            }
+        } catch (Exception e) {
+            return "build-for-testing 异常: " + e.getMessage();
+        }
+        clearIosWdaCooldown(deviceId);
+        if (ensureIosWdaRunning(deviceId, localPort)) {
+            return null;
+        }
+        return nullToDash(getLastIosWdaError(deviceId), "编译成功但拉起 /status 失败，请检查手机是否已信任开发者");
+    }
+
+    private static String nullToDash(String v, String d) {
+        return v == null || v.isBlank() ? d : v;
+    }
+
     public synchronized boolean ensureIosWdaRunning(String deviceId, int localPort) {
         if (deviceId == null || deviceId.isBlank() || localPort <= 0) {
             return false;
         }
         if (isWdaStatusOk(localPort)) {
             iosWdaLastError.remove(deviceId);
+            iosWdaCooldownUntilMs.remove(deviceId);
+            iosWdaFailCounts.remove(deviceId);
             log.info("WDA 已就绪: deviceId={}, port={}", deviceId, localPort);
             return true;
         }
+
+        Long coolUntil = iosWdaCooldownUntilMs.get(deviceId);
+        if (coolUntil != null && System.currentTimeMillis() < coolUntil) {
+            long leftSec = Math.max(1, (coolUntil - System.currentTimeMillis()) / 1000);
+            String prev = iosWdaLastError.getOrDefault(deviceId, "近期 WDA 拉起失败");
+            log.warn("跳过重复拉起 WDA（已连续失败 {} 次，冷却中，{}s 后再试）: deviceId={}, reason={}",
+                    iosWdaFailCounts.getOrDefault(deviceId, 0), leftSec, deviceId, prev);
+            return false;
+        }
+
         String wdaDir = System.getProperty("user.home")
                 + "/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent";
         Path project = Path.of(wdaDir, "WebDriverAgent.xcodeproj");
@@ -1514,8 +1703,12 @@ public class DeviceManager {
             return false;
         }
 
-        Path logFile = Path.of(System.getProperty("java.io.tmpdir"),
-                "wda-" + deviceId.replaceAll("[^A-Za-z0-9_-]", "_") + ".log");
+        Path logFile = iosWdaLogFile(deviceId, "run.log");
+        try {
+            Files.createDirectories(logFile.getParent());
+        } catch (Exception e) {
+            log.warn("无法创建 WDA 日志目录: {}", e.getMessage());
+        }
 
         // 1) xcodebuild test-without-building（复用已装 Runner）
         Process xcode = iosWdaXcodeProcs.get(deviceId);
@@ -1526,16 +1719,18 @@ public class DeviceManager {
                     Files.writeString(logFile, "");
                 } catch (Exception ignored) {
                 }
+                Path derived = iosWdaDerivedDir(deviceId);
                 List<String> cmd = List.of(
                         "xcodebuild", "test-without-building",
                         "-project", project.toString(),
                         "-scheme", "WebDriverAgentRunner",
                         "-destination", "id=" + deviceId,
                         "-allowProvisioningUpdates",
+                        "-derivedDataPath", derived.toString(),
                         "IPHONEOS_DEPLOYMENT_TARGET=17.6",
-                        "DEVELOPMENT_TEAM=37ZX3X6QJY",
-                        "CODE_SIGN_IDENTITY=Apple Development",
-                        "PRODUCT_BUNDLE_IDENTIFIER=com.travYang.wda.Runner",
+                        "DEVELOPMENT_TEAM=" + iosWdaTeamId,
+                        "CODE_SIGN_IDENTITY=" + iosWdaSigningId,
+                        "PRODUCT_BUNDLE_IDENTIFIER=" + iosWdaBundleId,
                         "GCC_TREAT_WARNINGS_AS_ERRORS=0",
                         "COMPILER_INDEX_STORE_ENABLE=NO"
                 );
@@ -1561,13 +1756,13 @@ public class DeviceManager {
                 }
                 if (!ready) {
                     String reason = diagnoseWdaLog(logFile);
-                    iosWdaLastError.put(deviceId, reason);
+                    rememberWdaFailure(deviceId, reason);
                     log.warn("等待 WDA ServerURLHere 超时: deviceId={}, reason={}", deviceId, reason);
                 }
             } catch (Exception e) {
                 String msg = "启动 WDA xcodebuild 失败: " + e.getMessage();
                 log.error(msg);
-                iosWdaLastError.put(deviceId, msg);
+                rememberWdaFailure(deviceId, msg);
                 return false;
             }
         }
@@ -1595,6 +1790,7 @@ public class DeviceManager {
         for (int i = 0; i < 20; i++) {
             if (isWdaStatusOk(localPort)) {
                 iosWdaLastError.remove(deviceId);
+                iosWdaCooldownUntilMs.remove(deviceId);
                 log.info("WDA 就绪: deviceId={}, http://127.0.0.1:{}/status", deviceId, localPort);
                 return true;
             }
@@ -1606,9 +1802,68 @@ public class DeviceManager {
             }
         }
         String reason = diagnoseWdaLog(logFile);
-        iosWdaLastError.put(deviceId, reason);
+        rememberWdaFailure(deviceId, reason);
         log.warn("WDA status 仍不可达: deviceId={}, port={}, reason={}", deviceId, localPort, reason);
         return false;
+    }
+
+    private void rememberWdaFailure(String deviceId, String reason) {
+        if (deviceId == null) {
+            return;
+        }
+        String r = reason == null ? "" : reason;
+        iosWdaLastError.put(deviceId, r);
+        int fails = iosWdaFailCounts.merge(deviceId, 1, Integer::sum);
+        long cooldownMs = cooldownMsFor(r, fails);
+        if (cooldownMs > 0) {
+            iosWdaCooldownUntilMs.put(deviceId, System.currentTimeMillis() + cooldownMs);
+            // 清掉已挂死的 xcode 进程引用，避免冷却结束后误判「还在跑」
+            destroyQuietly(iosWdaXcodeProcs.remove(deviceId));
+            log.warn("WDA 第 {} 次失败，{} 分钟内不再重复 xcodebuild: deviceId={}, reason={}",
+                    fails, cooldownMs / 60_000, deviceId, r);
+        }
+    }
+
+    /**
+     * 这次失败之后要冷却多久（毫秒）；0 表示可以立刻再试。
+     * <p>
+     * 原来只有<b>认识的</b>报错才冷却，认不出的一律当成「可以重试」——
+     * 于是一个没见过的签名错误会让 xcodebuild 无限重装 WDA，跑一晚上还在装。
+     * 默认方向反了：<b>认不出的错应该更保守，而不是更激进</b>，
+     * 因为「不认识」恰恰说明我们不知道再试一次有没有用。
+     * <p>
+     * 现在的规则：
+     * <ul>
+     *   <li>认识的硬失败（签名/描述文件/未信任）——第一次就冷却，再试一百次也是这个结果</li>
+     *   <li>其余失败——连试 {@value #IOS_WDA_MAX_ATTEMPTS} 次仍不行就冷却，
+     *       并按次数退避。前几次留给真正的瞬时问题（端口没起、设备刚插上）</li>
+     * </ul>
+     */
+    static long cooldownMsFor(String reason, int consecutiveFailures) {
+        if (isHardWdaFailure(reason)) {
+            return IOS_WDA_HARD_FAIL_COOLDOWN_MS;
+        }
+        if (consecutiveFailures < IOS_WDA_MAX_ATTEMPTS) {
+            return 0;
+        }
+        // 退避：冷却结束后如果还是不行，下一轮等更久，别一放开又开始狂试
+        int over = consecutiveFailures - IOS_WDA_MAX_ATTEMPTS;
+        long mult = Math.min(1L << Math.min(over, 4), 16L);
+        return IOS_WDA_SOFT_FAIL_COOLDOWN_MS * mult;
+    }
+
+    private static boolean isHardWdaFailure(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return false;
+        }
+        String r = reason.toLowerCase(Locale.ROOT);
+        return r.contains("0xe8008018")
+                || r.contains("0xe8008011")
+                || r.contains("无法安装到真机")
+                || r.contains("描述文件已过期")
+                || r.contains("identity used to sign")
+                || r.contains("no longer valid")
+                || r.contains("未信任开发者");
     }
 
     /** 从 xcodebuild 日志提炼可读失败原因（描述文件过期等）。 */
@@ -1620,19 +1875,31 @@ public class DeviceManager {
             }
         } catch (Exception ignored) {
         }
+        if (text.contains("sandbox") || text.contains("unable to create bookmark")
+                || text.contains("Access to the resource was denied")) {
+            return "WDA 产物路径被沙箱拒绝（DerivedData 勿放在 IDE 临时目录）。请重启后端后再用「iOS WDA 工具箱」重新编译安装";
+        }
         if (text.contains("0xe8008011") || text.toLowerCase(Locale.ROOT).contains("provisioning profile has expired")) {
-            return "WDA 描述文件已过期(0xe8008011)：请用 Xcode 打开 WebDriverAgent，选中真机重新签名并安装 WebDriverAgentRunner（Team=37ZX3X6QJY / Bundle=com.travYang.wda.Runner）";
+            return "WDA 描述文件已过期(0xe8008011)：到设备详情「iOS WDA 工具箱」点「重新编译并安装 WDA」";
         }
         if (text.contains("Developer App Certificate is not trusted")
                 || text.contains("VPN & Device Management")
                 || text.contains("has not been explicitly trusted")) {
-            return "手机未信任开发者证书：请到 iPhone「设置 → 通用 → VPN与设备管理」里信任 Apple Development（trav_yang），再点刷新截图";
+            return "手机未信任开发者证书：设置 → 通用 → VPN与设备管理 → 信任开发者；然后在「iOS WDA 工具箱」点「仅拉起 WDA」";
         }
         if (text.contains("Timed out while enabling automation mode")) {
             return "启用自动化模式超时：请解锁手机，确认「设置 → 隐私与安全性 → 开发者模式」已开启，并允许启用 UI Automation";
         }
-        if (text.contains("无法安装") || text.contains("Failed to install")) {
-            return "WDA 无法安装到真机：请在 Xcode 重新签名 WebDriverAgentRunner，并在手机上信任开发者证书";
+        if (text.contains("ambiguous")) {
+            return "签名身份 ambiguous（新旧证书同名）：到「iOS WDA 工具箱」先「清理吊销证书」再「重新编译并安装」";
+        }
+        if (text.contains("0xe8008018") || text.contains("no longer valid")
+                || text.contains("CSSMERR_TP_CERT_REVOKED")) {
+            return "WDA 无法安装到真机：证书/签名已失效(0xe8008018)。到设备详情「iOS WDA 工具箱」"
+                    + "按步骤清理吊销证书 → 重新编译安装 → 手机上信任开发者";
+        }
+        if (text.contains("Failed to install the app on the device") || text.contains("Failed to install or launch")) {
+            return "WDA Runner 装到真机失败：到「iOS WDA 工具箱」点「重新编译并安装 WDA」，并确认手机已信任开发者";
         }
         if (text.contains("Timed out waiting for") || text.contains("not paired")) {
             return "WDA 启动失败：请确认手机已解锁、已信任本机，且 USB 连接正常";

@@ -582,7 +582,9 @@ public class FailureDiagnosisService {
             }
         }
 
-        row.setSignature(signatureOf(task, row.getFailedStep(), row.getElementKey()));
+        // 落库的签名也要带失败原因，否则「历史记录/发生次数」会把不同原因的失败算成同一个
+        row.setSignature(signatureOf(task, row.getFailedStep(), row.getElementKey(),
+                row.getReason()));
         diagnosisMapper.insert(row);
         log.info("写入失败归因: taskId={}, category={}, source={}, signature={}",
                 taskId, row.getCategory(), row.getSource(), row.getSignature());
@@ -604,6 +606,17 @@ public class FailureDiagnosisService {
      * 不含 taskId：同一条流程每晚回归都会生成新任务，带上 taskId 就永远对不上，去重也就失效了。
      */
     String signatureOf(Task task, String failedStep, String elementKey) {
+        return signatureOf(task, failedStep, elementKey, null);
+    }
+
+    /**
+     * @param errorText 这次的失败原因。<b>必须参与签名</b>——
+     *                  同一条流程的同一步，换了个失败原因就是另一个问题了。
+     *                  不带它的话：修完 bug 重跑，签名没变，直接复用旧结论，
+     *                  报告上还是那段过时的分析，人会以为没修好，然后回去改代码。
+     *                  这种「修对了却看不出来」比归因不准更耗时间。
+     */
+    String signatureOf(Task task, String failedStep, String elementKey, String errorText) {
         if (task == null) {
             return null;
         }
@@ -618,7 +631,27 @@ public class FailureDiagnosisService {
         // 直接安到生产头上
         String env = readEnvironment(task.getConfig());
         return fit(env + "|" + (flowId == null ? task.getTaskType() : flowId)
-                + "|" + step + "|" + key, 255);
+                + "|" + step + "|" + key + "|" + errorFingerprint(errorText), 255);
+    }
+
+    /**
+     * 失败原因的指纹。
+     * <p>
+     * 直接拿原文进签名不行：里面有时间戳、路径、任务 id 这些每次都变的东西，
+     * 那样每次跑都是新签名，复用就永远不会命中——而复用本身是有价值的
+     * （同一个问题重判一次是同样的答案，白花额度）。
+     * <p>
+     * 所以抹掉易变部分、只留能区分「是不是同一类错」的那部分。
+     */
+    static String errorFingerprint(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        String s = raw.trim().toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("\\d+", "#")              // 时间戳、耗时、行号
+                .replaceAll("[/\\\\][\\w.#-]+", "/p")   // 路径
+                .replaceAll("\\s+", " ");
+        return fit(s, 80);
     }
 
     /** 同签名累计发生次数：一个问题挂了 30 次和挂了 1 次，值不值得先修完全不同 */

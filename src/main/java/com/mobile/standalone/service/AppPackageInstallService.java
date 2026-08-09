@@ -88,6 +88,26 @@ public class AppPackageInstallService {
     private int storePollSeconds;
 
     /** 点「获取/安装」后先冷静等待，再开始轮询是否已装上 */
+    /**
+     * 系统「安装」确认框上按钮的文案，逗号分隔，按顺序试。
+     * <p>
+     * 原来写死成 "安装" / "Install" 两个字面量。手机系统语言换成英文、繁中，
+     * 或者 iOS 版本把文案改成「安装 App」，都要改代码重新部署——
+     * 而这种事每年至少发生一次，且现象是「装不上但也没报错」，很难联想到是文案变了。
+     */
+    @Value("${app.install.ios-install-button-labels:安装,Install,安裝,インストール}")
+    private String iosInstallButtonLabels;
+
+    /**
+     * 点不到「安装」时最多再试几轮。
+     * <p>
+     * 每试一次都要 dump 一次 iOS 控件树（1~3 秒），60 秒轮询会试 20 次，
+     * 光这一项就能把轮询拖垮。而点不到通常是弹窗压根没出来（证书没信任、页面没加载），
+     * 再试一百次也一样——这跟 WDA 无限重装是同一类问题。
+     */
+    @Value("${app.install.ios-install-click-attempts:5}")
+    private int iosInstallClickAttempts;
+
     @Value("${app.install.store-grace-seconds:25}")
     private int storeGraceSeconds;
 
@@ -255,10 +275,13 @@ public class AppPackageInstallService {
         if (!Device.isAndroidOrPogAndroid(device.getPlatform()) && !Device.usesIosAutomation(device.getPlatform())) {
             return OpResult.fail("不支持的平台: " + device.getPlatform());
         }
-        // 第一期：非 CHANNEL_PAGE 的 iOS 暂不实现
-        if (Device.usesIosAutomation(device.getPlatform()) && mode != InstallMode.CHANNEL_PAGE) {
-            return OpResult.fail("iOS 暂仅支持 CHANNEL_PAGE（商店/App Store），其它 installMode 后续接入");
-        }
+        // 原来这里拦掉了 iOS 上除 CHANNEL_PAGE 外的所有模式。那道拦截现在可以去掉了：
+        // installLocalPackage 早就会把 iOS 路由到 ideviceinstaller / devicectl，
+        // 蒲公英那边也是 API 下包再从 USB 装，不用扫码、不用 Safari。
+        //
+        // 留下的唯一真限制是 ad-hoc 签名：包只能装进描述文件里列了 UDID 的那几台。
+        // 这个拦不住也不该拦——装的时候会明确报 ApplicationVerificationFailed，
+        // 比事先一句「暂不支持」有用得多，后者会让人以为是平台没做。
 
         return switch (mode) {
             case PGYER -> installViaPgyer(appId, device, req);
@@ -282,6 +305,13 @@ public class AppPackageInstallService {
                     return OpResult.fail("蒲公英安装前卸载失败: " + u.message);
                 }
             }
+
+            // iOS：蒲公英 install 接口会 302 到 itms-services，电脑跟不了、下到的是 0 字节空文件。
+            // 官方要求「在 iOS/Android 系统中打开」——真机 Safari 打开安装页，再轮询是否装上。
+            if (isIosDevice(device)) {
+                return installPgyerOnIosDevice(appId, device, req, pkg);
+            }
+
             if (req.getPgyerBuildKey() != null && !req.getPgyerBuildKey().isBlank()) {
                 PgyerAppService.InstallResult r = pgyerAppService.downloadAndInstall(
                         device.getId(), req.getPgyerBuildKey().trim(), false);
@@ -323,6 +353,225 @@ public class AppPackageInstallService {
             log.warn("蒲公英安装异常: {}", e.getMessage());
             return OpResult.fail("PGYER 安装异常: " + e.getMessage());
         }
+    }
+
+    /**
+     * iOS 蒲公英安装：在真机 Safari 打开官方 install URL（设备侧才能跟 itms-services），
+     * 然后轮询 Bundle ID 是否出现。
+     */
+    private OpResult installPgyerOnIosDevice(String appId, Device device, InstallRequest req, String pkg) {
+        String buildKey = firstNonBlank(req.getPgyerBuildKey(), null);
+        String versionHint = "";
+        if (buildKey == null) {
+            String appKey = firstNonBlank(req.getPgyerAppKey(), resolvePgyerAppKey(appId, device));
+            if (appKey == null) {
+                return OpResult.fail("iOS 蒲公英安装需要 pgyerBuildKey，或在应用字典配置 iOS 蒲公英 Key");
+            }
+            PgyerAppService.PgyerBuildVo latest = pgyerAppService.latestBuild(
+                    appKey, "IOS", resolvePgyerHost(appId, device));
+            if (latest == null || latest.getBuildKey() == null || latest.getBuildKey().isBlank()) {
+                return OpResult.fail("未找到可安装的 iOS 蒲公英版本 | appKey=" + appKey);
+            }
+            buildKey = latest.getBuildKey();
+            versionHint = latest.getBuildVersion() + "(build " + latest.getBuildBuildVersion() + ")";
+        }
+        String installUrl = pgyerAppService.buildInstallPageUrl(buildKey);
+        log.info("iOS 蒲公英改为真机打开安装页: device={}, buildKey={}, url={}",
+                device.getId(), buildKey, installUrl.replaceAll("_api_key=[^&]+", "_api_key=***"));
+
+        // 必须先开安装页。WDA 重编 / activate Safari 都会抢前台，导致「Safari 不动、弹窗出不来」。
+        boolean opened = deviceManager.openIosHttpsUrl(device.getId(), installUrl);
+        if (!opened && appiumDriverAdapter != null) {
+            opened = appiumDriverAdapter.openUrlInSafari(device.getId(), installUrl);
+        }
+        if (!opened) {
+            String loc = pgyerAppService.peekInstallRedirect(buildKey);
+            if (loc != null && loc.toLowerCase(Locale.ROOT).startsWith("itms-services:")) {
+                opened = deviceManager.openIosHttpsUrl(device.getId(), loc)
+                        || (appiumDriverAdapter != null
+                        && appiumDriverAdapter.openDeepLink(device.getId(), loc, "com.apple.mobilesafari"));
+            }
+        }
+        if (!opened) {
+            return OpResult.fail("无法在 iPhone 上打开蒲公英安装页（devicectl/Safari）。"
+                    + "可改用本地 IPA（LOCAL_APK），或手动装好后跳过安装步骤。"
+                    + " buildKey=" + buildKey);
+        }
+
+        int waitSec = Math.max(60, storeWaitSeconds);
+        int pollSec = Math.max(3, storePollSeconds);
+        long deadline = System.currentTimeMillis() + waitSec * 1000L;
+        try {
+            Thread.sleep(Math.min(5_000L, storeGraceSeconds * 1000L));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+
+        // 轻量自动点：不重编 WDA、不 activateApp，失败则仍可人工点「安装」
+        boolean uiReady = softPrepareIosPgyerClickUi(device);
+        boolean clickedInstall = uiReady && tryClickIosPgyerInstallConfirm(device);
+        int clickAttempts = 1;
+        if (clickedInstall) {
+            log.info("iOS 蒲公英：首轮已自动点击系统「安装」");
+        } else {
+            log.info("iOS 蒲公英：首轮未自动点到「安装」 uiReady={}（安装页已打开，可手动点；轮询中仍会轻量重试）",
+                    uiReady);
+        }
+        // 点完「安装」后 Safari 会停在原页，需底部上滑回主屏才能看到桌面安装进度
+        boolean wentHome = false;
+        if (clickedInstall) {
+            wentHome = goIosHomeAfterPgyerConfirm(device);
+        }
+        while (System.currentTimeMillis() < deadline) {
+            if (isInstalled(device, pkg)) {
+                return OpResult.ok("PGYER iOS 真机安装成功: " + pkg
+                        + " | buildKey=" + buildKey
+                        + (versionHint.isBlank() ? "" : " | " + versionHint)
+                        + "（已打开安装页"
+                        + (clickedInstall ? "，已点「安装」" : "")
+                        + (wentHome ? "，已回主屏" : "")
+                        + "）");
+            }
+            // 点不到就一直试是错的：每试一次要 dump 一次 iOS 控件树（1~3 秒），
+            // 60 秒轮询会试 20 次，光这一项就把轮询拖垮。而点不到通常是弹窗压根没出来
+            // （证书没信任、页面没加载完），再试一百次也一样。
+            // 试满就停手，改为纯等待——安装页已经开着，人可以自己点，轮询照样能检测到装好
+            if (!clickedInstall && clickAttempts < Math.max(1, iosInstallClickAttempts)) {
+                clickAttempts++;
+                if (!uiReady) {
+                    uiReady = softPrepareIosPgyerClickUi(device);
+                }
+                if (uiReady && tryClickIosPgyerInstallConfirm(device)) {
+                    clickedInstall = true;
+                    log.info("iOS 蒲公英：轮询中点到「安装」（第 {} 次尝试），接着回主屏", clickAttempts);
+                } else if (clickAttempts >= Math.max(1, iosInstallClickAttempts)) {
+                    log.warn("iOS 蒲公英：试了 {} 次都没点到「安装」，停止自动点击，改为纯等待。"
+                            + "多半是弹窗没出来——检查证书是否已信任、安装页是否加载完",
+                            clickAttempts);
+                }
+            }
+            if (clickedInstall && !wentHome) {
+                wentHome = goIosHomeAfterPgyerConfirm(device);
+            }
+            try {
+                Thread.sleep(pollSec * 1000L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return OpResult.fail("已在 iPhone Safari 打开蒲公英安装页，但 "
+                + waitSec + "s 内未检测到 " + pkg
+                + (clickedInstall
+                        ? "（曾点过「安装」" + (wentHome ? "并已回主屏" : "") + "，请检查企业证书信任）"
+                        : "（未能自动点到「安装」，请手动点确认后上滑回主屏）")
+                + "。或改用本地 IPA。 buildKey=" + buildKey);
+    }
+
+    /**
+     * 点完系统「安装」后离开 Safari：底部上滑 → Home 键 → 拉起 SpringBoard。
+     */
+    private boolean goIosHomeAfterPgyerConfirm(Device device) {
+        if (device == null) {
+            return false;
+        }
+        String deviceId = device.getId();
+        boolean ok = false;
+        try {
+            if (appiumDriverAdapter != null) {
+                ok = appiumDriverAdapter.goIosHomeScreen(deviceId);
+            }
+            // 无 WDA 会话时也能回桌面
+            if (deviceManager.launchIosAppCli(deviceId, "com.apple.springboard")) {
+                log.info("iOS 蒲公英：已拉起 SpringBoard 回主屏 deviceId={}", deviceId);
+                ok = true;
+            }
+            sleep(800);
+        } catch (Exception e) {
+            log.warn("iOS 蒲公英回主屏失败: {}", e.getMessage());
+        }
+        return ok;
+    }
+
+    /**
+     * 轻量挂接：只 ensure WDA，失败不重编；挂会话时不 activateApp，避免冲掉系统安装确认框。
+     */
+    private boolean softPrepareIosPgyerClickUi(Device device) {
+        if (appiumDriverAdapter == null || device == null) {
+            return false;
+        }
+        String deviceId = device.getId();
+        try {
+            deviceManager.clearIosWdaCooldown(deviceId);
+            int wdaPort = appiumDriverAdapter.resolveWdaLocalPort(deviceId);
+            if (!deviceManager.ensureIosWdaRunning(deviceId, wdaPort)) {
+                log.warn("iOS 蒲公英自动点「安装」跳过：WDA 未就绪 port={} lastError={}",
+                        wdaPort, deviceManager.getLastIosWdaError(deviceId));
+                return false;
+            }
+            // 不 activate：安装确认框已在前台，再 activate Safari 会把弹窗冲掉
+            if (appiumDriverAdapter.attachIosUiSession(deviceId, "com.apple.mobilesafari", true, false)) {
+                return true;
+            }
+            log.warn("iOS 蒲公英自动点「安装」：挂接 Safari 会话失败（不激活前台）");
+            return false;
+        } catch (Exception e) {
+            log.warn("iOS 蒲公英软准备 UI 失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 自动点系统「安装」确认（「xxx 想要安装应用」）。
+     */
+    private boolean tryClickIosPgyerInstallConfirm(Device device) {
+        if (appiumDriverAdapter == null || device == null) {
+            return false;
+        }
+        String deviceId = device.getId();
+        try {
+            for (String label : installButtonLabels()) {
+                if (appiumDriverAdapter.dismissIosSpringboardSystemAlert(deviceId, label, 0, 0)
+                        || appiumDriverAdapter.dismissIosSystemAlertButton(deviceId, label)) {
+                    log.info("iOS 蒲公英：已点系统「{}」", label);
+                    return true;
+                }
+            }
+            // 前面几种走的是 Appium 的告警接口，拿不到时才退到控件树——
+            // dump 控件树在 iOS 上要 1~3 秒，能不做就不做
+            PlatformDriver driver = platformRouter.getDriver(device);
+            if (driver != null) {
+                for (String label : installButtonLabels()) {
+                    String sel = "xpath://XCUIElementTypeButton[@name='" + label
+                            + "' or @label='" + label + "']";
+                    if (driver.isElementPresent(deviceId, sel)) {
+                        driver.clickElement(deviceId, sel);
+                        log.info("iOS 蒲公英：xpath 点击「{}」成功", label);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            log.debug("iOS 蒲公英点「安装」本轮未成功: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** 系统语言/版本一变文案就变，所以做成配置而不是字面量 */
+    private List<String> installButtonLabels() {
+        String raw = iosInstallButtonLabels == null || iosInstallButtonLabels.isBlank()
+                ? "安装,Install" : iosInstallButtonLabels;
+        return java.util.Arrays.stream(raw.split(","))
+                .map(String::trim).filter(x -> !x.isEmpty()).toList();
+    }
+
+    private static boolean isIosDevice(Device device) {
+        if (device == null || device.getPlatform() == null) {
+            return false;
+        }
+        String p = device.getPlatform().name();
+        return p != null && p.toUpperCase(Locale.ROOT).contains("IOS");
     }
 
     private OpResult installViaLocalApk(String appId, Device device, InstallRequest req) {

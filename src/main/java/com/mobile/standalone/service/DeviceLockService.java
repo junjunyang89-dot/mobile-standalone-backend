@@ -3,6 +3,7 @@ package com.mobile.standalone.service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
@@ -56,6 +57,48 @@ public class DeviceLockService {
     private final ConcurrentHashMap<String, Holder> holders = new ConcurrentHashMap<>();
 
     /**
+     * 已请求停止后的宽限期。超过就当持有者已经死了，抢过来。
+     * <p>
+     * 「停止」意味着执行线程要么正在退出、要么已经异常死掉。收尾最慢的是 Appium 会话关闭
+     * 和最后一张截图，两分钟足够；再等下去就不是在等收尾，是在等一个永远不会来的释放。
+     */
+    private static final Duration CANCELLED_GRACE = Duration.ofMinutes(2);
+
+    /**
+     * 无人认领的上限。
+     * <p>
+     * 锁是内存里的，只在执行线程正常收尾时释放——线程卡死、进程被 kill、异常路径漏了 finally，
+     * 都会让这台设备<b>永远占着</b>，而现象是「任务明明停了还说被占用」，只能重启后端。
+     * 兜一个上限：最长的性能遍历是 60 分钟，留一倍余量。
+     */
+    private static final Duration MAX_HOLD = Duration.ofHours(2);
+
+    /** 判断某个 refId 是否已被请求停止；由外部注入，避免这里反向依赖执行层 */
+    private volatile java.util.function.Predicate<String> cancelledCheck = ref -> false;
+
+    public void setCancelledCheck(java.util.function.Predicate<String> check) {
+        if (check != null) {
+            this.cancelledCheck = check;
+        }
+    }
+
+    /**
+     * 这个持有者是不是已经没救了。
+     * <p>
+     * 两种：已请求停止且过了宽限期、或者持有时间超过任何任务的合理上限。
+     */
+    boolean isStale(Holder h) {
+        if (h == null || h.since() == null) {
+            return false;
+        }
+        Duration held = Duration.between(h.since(), LocalDateTime.now());
+        if (held.compareTo(MAX_HOLD) > 0) {
+            return true;
+        }
+        return cancelledCheck.test(h.refId()) && held.compareTo(CANCELLED_GRACE) > 0;
+    }
+
+    /**
      * 占用设备。
      *
      * @param parentRefId 上级执行链标识；与当前持有者一致时视为同链重入（如线上回归 run 下派生的子任务），
@@ -83,6 +126,13 @@ public class DeviceLockService {
             // 同一执行链的子级：沿用父持有者，不改写
             if (parentRefId != null && parentRefId.equals(current.refId())) {
                 return current;
+            }
+            // 持有者已经没救了就抢过来。不这么做的话，一次线程异常退出会让这台设备
+            // 一直占到重启后端为止，而人看到的是「任务明明停了还说被占用」
+            if (isStale(current)) {
+                log.warn("抢占失效的设备占用: deviceId={}, 原持有者={}, 自 {} 起",
+                        key, current.refId(), current.since());
+                return desired;
             }
             blocker[0] = current;
             return current;

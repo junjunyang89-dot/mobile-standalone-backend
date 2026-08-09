@@ -61,6 +61,12 @@ public class PgyerAppService {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
+    /** 不跟随跳转：用来读蒲公英 install 的 Location（iOS 会跳到 itms-services://） */
+    private final HttpClient httpNoRedirect = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(30))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build();
+
     public void ensureConfigured() {
         if (!enabled) {
             throw new IllegalStateException("蒲公英未启用：请在 application.yml 设置 pgyer.enabled=true");
@@ -210,27 +216,86 @@ public class PgyerAppService {
         }
     }
 
+    /**
+     * 蒲公英「安装」页 URL（带 apiKey）。文档要求在手机系统里打开；
+     * Android 服务器侧跟 302 能拿到 APK；iOS 会跳 itms-services，只能在真机 Safari 打开。
+     */
+    public String buildInstallPageUrl(String buildKey) {
+        ensureConfigured();
+        if (buildKey == null || buildKey.isBlank()) {
+            throw new IllegalArgumentException("buildKey 不能为空");
+        }
+        return trimSlash(apiBase) + "/apiv2/app/install?_api_key=" + enc(apiKey)
+                + "&buildKey=" + enc(buildKey.trim());
+    }
+
+    /**
+     * 探测 install 接口的跳转目标，不下载文件。
+     *
+     * @return https CDN 直链 / itms-services://… / 或 null
+     */
+    public String peekInstallRedirect(String buildKey) {
+        ensureConfigured();
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(buildInstallPageUrl(buildKey)))
+                    .timeout(Duration.ofSeconds(30))
+                    .GET()
+                    .build();
+            HttpResponse<Void> resp = httpNoRedirect.send(req, HttpResponse.BodyHandlers.discarding());
+            return resp.headers().firstValue("Location").orElse(null);
+        } catch (Exception e) {
+            log.debug("peekInstallRedirect 失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
     public Path downloadBuild(String buildKey) {
         ensureConfigured();
         try {
             Files.createDirectories(Path.of(downloadDir));
-            String url = trimSlash(apiBase) + "/apiv2/app/install?_api_key=" + enc(apiKey)
-                    + "&buildKey=" + enc(buildKey);
+            String installUrl = buildInstallPageUrl(buildKey);
+            HttpRequest probe = HttpRequest.newBuilder()
+                    .uri(URI.create(installUrl))
+                    .timeout(Duration.ofSeconds(60))
+                    .GET()
+                    .build();
+            HttpResponse<Void> head = httpNoRedirect.send(probe, HttpResponse.BodyHandlers.discarding());
+            String location = head.headers().firstValue("Location").orElse("");
+            int code = head.statusCode();
+
+            // iOS：302 → itms-services://…，服务器无法跟跳，也不能拿到 IPA 直链
+            if (location.toLowerCase(Locale.ROOT).startsWith("itms-services:")) {
+                throw new IllegalStateException(
+                        "蒲公英 iOS 包不能在电脑侧直链下载（接口跳到 itms-services）。"
+                                + "请改用真机 Safari 打开安装页，或流程改 LOCAL_APK/已装包启动。"
+                                + " Location=" + location);
+            }
+
+            String downloadUrl = installUrl;
+            if (code >= 300 && code < 400 && location.startsWith("http")) {
+                downloadUrl = location;
+            } else if (code >= 400) {
+                throw new IllegalStateException("下载失败 HTTP " + code);
+            }
+
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
+                    .uri(URI.create(downloadUrl))
                     .timeout(Duration.ofMinutes(10))
                     .GET()
                     .build();
             HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
             if (resp.statusCode() >= 400) {
-                throw new IllegalStateException("下载失败 HTTP " + resp.statusCode());
+                throw new IllegalStateException("下载失败 HTTP " + resp.statusCode() + " url=" + downloadUrl);
             }
             String ext = ".bin";
             String cd = resp.headers().firstValue("Content-Disposition").orElse("");
             String ct = resp.headers().firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
-            if (cd.toLowerCase(Locale.ROOT).contains(".ipa") || ct.contains("iphone") || ct.contains("ios")) {
+            String urlLower = downloadUrl.toLowerCase(Locale.ROOT);
+            if (cd.toLowerCase(Locale.ROOT).contains(".ipa") || ct.contains("iphone") || urlLower.contains(".ipa")) {
                 ext = ".ipa";
-            } else if (cd.toLowerCase(Locale.ROOT).contains(".apk") || ct.contains("android") || ct.contains("apk")) {
+            } else if (cd.toLowerCase(Locale.ROOT).contains(".apk") || ct.contains("android")
+                    || ct.contains("apk") || urlLower.contains(".apk")) {
                 ext = ".apk";
             } else if (cd.contains(".")) {
                 int i = cd.lastIndexOf('.');
@@ -239,7 +304,6 @@ public class PgyerAppService {
                     if (e.length() <= 5) ext = e;
                 }
             }
-            // Content-Disposition 无扩展时，用 view 信息判断
             if (".bin".equals(ext)) {
                 PgyerBuildVo meta = viewBuild(buildKey);
                 if (meta != null) {
@@ -251,11 +315,12 @@ public class PgyerAppService {
                 Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
             }
             long size = Files.size(target);
-            if (size < 1024) {
-                String peek = Files.readString(target, StandardCharsets.UTF_8);
-                if (peek.contains("\"code\"") || peek.contains("<html")) {
-                    throw new IllegalStateException("下载内容不是安装包（可能 API Key 无效或无权限）: " + peek.substring(0, Math.min(200, peek.length())));
-                }
+            if (size < 10_240) {
+                String peek = size == 0 ? "" : Files.readString(target, StandardCharsets.UTF_8);
+                throw new IllegalStateException(
+                        "下载内容不是有效安装包（size=" + size + "）。"
+                                + (peek.isBlank() ? "空文件，多半是 iOS itms 跳转未被处理。"
+                                : "内容预览: " + peek.substring(0, Math.min(200, peek.length()))));
             }
             log.info("蒲公英包已下载: buildKey={}, path={}, size={}", buildKey, target, size);
             return target;

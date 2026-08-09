@@ -137,9 +137,11 @@ public class FailureDiagnosisRunner {
 
         // 同一个问题反复重现时复用近期结论：重判一次是同样的答案、几分钟、一次额度，
         // 更糟的是「归因覆盖率」会虚高——每次都有结论，实际一个问题都没解决
+        // 失败原因参与签名：同一步换了个原因就是另一个问题，不能复用上次的结论
         String signature = diagnosisService.signatureOf(task,
                 ctx.getFailedStep() == null ? null : ctx.getFailedStep().getStep(),
-                ctx.getFailedStep() == null ? null : ctx.getFailedStep().getElementKey());
+                ctx.getFailedStep() == null ? null : ctx.getFailedStep().getElementKey(),
+                ctx.getFailedStep() == null ? null : ctx.getFailedStep().getMessage());
         Verdict verdict = reuseRecent(signature);
         if (verdict != null) {
             log.info("复用近期同签名归因，跳过模型调用 taskId={}, signature={}", taskId, signature);
