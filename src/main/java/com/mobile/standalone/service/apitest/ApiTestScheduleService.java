@@ -1,5 +1,6 @@
 package com.mobile.standalone.service.apitest;
 
+import com.mobile.standalone.config.NodeIdentity;
 import com.mobile.standalone.dto.ApiTestDtos.RunRequest;
 import com.mobile.standalone.dto.ApiTestDtos.RunResult;
 import com.mobile.standalone.entity.ApiTestSchedule;
@@ -33,6 +34,7 @@ public class ApiTestScheduleService {
     private final ApiTestScheduleMapper mapper;
     private final ApiTestRunnerService runnerService;
     private final JdbcTemplate jdbcTemplate;
+    private final NodeIdentity nodeIdentity;
 
     @PostConstruct
     public void ensureTable() {
@@ -121,6 +123,15 @@ public class ApiTestScheduleService {
         return mapper.deleteById(id) > 0;
     }
 
+    public ApiTestSchedule setEnabled(String id, boolean enabled) {
+        ApiTestSchedule s = mapper.findById(id);
+        if (s == null) {
+            throw new IllegalArgumentException("定时任务不存在: " + id);
+        }
+        s.setEnabled(enabled);
+        return save(s);
+    }
+
     /** 立即跑一次，不影响 cron 的下次触发时间 */
     public RunResult runNow(String id) {
         ApiTestSchedule s = mapper.findById(id);
@@ -140,6 +151,10 @@ public class ApiTestScheduleService {
      */
     @Scheduled(fixedDelay = 60_000, initialDelay = 30_000)
     public void tick() {
+        // 执行节点连的是同一份库，不能再扫一遍，否则同一条任务会跑两次
+        if (NodeIdentity.WORKER.equals(nodeIdentity.role())) {
+            return;
+        }
         List<ApiTestSchedule> due;
         try {
             due = mapper.findDue(LocalDateTime.now());
@@ -195,6 +210,11 @@ public class ApiTestScheduleService {
         // 即使这次挂了也要推进下次时间，否则会卡在同一个时间点每分钟重试一次
         patch.setNextRunAt(advance ? safeNext(s.getCron(), now) : s.getNextRunAt());
         mapper.updateAfterRun(patch);
+        if (result == null) {
+            result = new RunResult();
+            result.setOk(false);
+            result.setMessage(message);
+        }
         return result;
     }
 

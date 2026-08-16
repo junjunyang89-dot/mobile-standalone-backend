@@ -78,6 +78,16 @@ public class ApiTestController {
         return ResponseEntity.ok(Map.of("ok", scheduleService.delete(id)));
     }
 
+    @PatchMapping("/schedules/{id}/enabled")
+    public ResponseEntity<?> setScheduleEnabled(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        try {
+            boolean enabled = Boolean.parseBoolean(String.valueOf(body == null ? true : body.getOrDefault("enabled", true)));
+            return ResponseEntity.ok(scheduleService.setEnabled(id, enabled));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
     /** 立即跑一次，不影响 cron 的下次触发时间 */
     @PostMapping("/schedules/{id}/run")
     public ResponseEntity<?> runSchedule(@PathVariable String id) {
