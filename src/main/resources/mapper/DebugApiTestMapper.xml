@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.DebugApiTestMapper">
+
+    <resultMap id="Map" type="com.mobile.standalone.entity.DebugApiTest">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="status" column="status"/>
+        <result property="score" column="score"/>
+        <result property="remark" column="remark"/>
+        <result property="extra" column="extra"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO debug_api_tests (name, status, score, remark, extra, created_at, updated_at)
+        VALUES (#{name}, #{status}, #{score}, #{remark}, #{extra}, NOW(), NOW())
+    </insert>
+
+    <update id="update">
+        UPDATE debug_api_tests
+        SET name = #{name},
+            status = #{status},
+            score = #{score},
+            remark = #{remark},
+            extra = #{extra},
+            updated_at = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM debug_api_tests WHERE id = #{id}
+    </delete>
+
+    <select id="findById" resultMap="Map">
+        SELECT * FROM debug_api_tests WHERE id = #{id}
+    </select>
+
+    <select id="search" resultMap="Map">
+        SELECT * FROM debug_api_tests
+        <where>
+            <if test="status != null and status != ''">
+                AND status = #{status}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (name LIKE CONCAT('%', #{keyword}, '%')
+                  OR remark LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countAll" resultType="int">
+        SELECT COUNT(*) FROM debug_api_tests
+    </select>
+</mapper>

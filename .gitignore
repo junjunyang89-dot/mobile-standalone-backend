@@ -20,6 +20,7 @@ Thumbs.db
 ._*
 
 # ========== 本地调试 / 临时文件 ==========
+dumps/
 screenshots/
 test-results/
 allure-results/
