@@ -3,6 +3,7 @@ package com.mobile.standalone.controller;
 import com.mobile.standalone.entity.OnlineRegressionAccount;
 import com.mobile.standalone.entity.OnlineRegressionRun;
 import com.mobile.standalone.entity.OnlineRegressionStep;
+import com.mobile.standalone.service.FailureCluster;
 import com.mobile.standalone.service.OnlineRegressionOrchestrator;
 import com.mobile.standalone.service.OnlineRegressionOrchestrator.JobDetail;
 import com.mobile.standalone.service.OnlineRegressionOrchestrator.OnlineRegressionRunDetail;
@@ -142,6 +143,20 @@ public class OnlineRegressionController {
         vo.put("startedAt", detail.getRun().getStartedAt());
         vo.put("finishedAt", detail.getRun().getFinishedAt());
         vo.put("errorMessage", detail.getRun().getErrorMessage());
+        // 失败归类：报告顶部先给「其实是几个问题」，逐条查之前先收敛
+        vo.put("failureSummary", detail.getFailureSummary());
+        List<Map<String, Object>> clusters = new ArrayList<>();
+        for (FailureCluster.Cluster c : detail.getFailureClusters() == null
+                ? List.<FailureCluster.Cluster>of() : detail.getFailureClusters()) {
+            Map<String, Object> cv = new HashMap<>();
+            cv.put("reason", c.getReason());
+            cv.put("count", c.getCount());
+            cv.put("samples", c.getSamples());
+            cv.put("rank", c.getRank());
+            cv.put("hint", c.getHint());
+            clusters.add(cv);
+        }
+        vo.put("failureClusters", clusters);
         List<Map<String, Object>> jobs = new ArrayList<>();
         for (JobDetail jd : detail.getJobs()) {
             Map<String, Object> j = new HashMap<>();

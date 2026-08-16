@@ -37,7 +37,20 @@ public final class RunTrack {
     }
 
     /** 该轨道收哪些 catalog 的流程。SHARED 两条轨道都收——它的语义就是「两个入口都进」 */
+    /**
+     * 装包准备。<b>不属于任何一条轨道</b>——它不是用例，是把设备弄成可测状态的前置动作。
+     * <p>
+     * 混在回归/自动化的勾选列表里有两个害处：通过率被稀释（20 条里两条是装包，
+     * 那两条通过不说明任何功能是好的），流程一多也找不着——你要装包时得在几百条用例里翻。
+     */
+    public static final String INSTALL = "INSTALL";
+
     public static List<String> catalogs(String raw) {
         return isAutomation(raw) ? List.of("AUTOMATION", "SHARED") : List.of("ONLINE", "SHARED");
+    }
+
+    /** 装包类流程：单独一个入口取，不进回归/自动化候选 */
+    public static List<String> installCatalogs() {
+        return List.of(INSTALL);
     }
 }

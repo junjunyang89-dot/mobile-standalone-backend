@@ -11,6 +11,8 @@
         <result property="platform" column="platform"/>
         <result property="catalog" column="catalog"/>
         <result property="environment" column="environment"/>
+        <result property="envBound" column="env_bound"/>
+        <result property="releaseStage" column="release_stage"/>
         <result property="isComponent" column="is_component"/>
         <result property="steps" column="steps"/>
         <result property="dependsOn" column="depends_on"/>
@@ -29,6 +31,7 @@
             <if test="catalog != null and catalog != ''">AND catalog = #{catalog}</if>
             <if test="environment != null and environment != ''">AND COALESCE(environment, 'PROD') = #{environment}</if>
             <if test="componentOnly != null and componentOnly">AND is_component = 1</if>
+            <if test="name != null and name != ''">AND name LIKE CONCAT('%', #{name}, '%')</if>
         </where>
         ORDER BY sort_order ASC, updated_at DESC
     </select>
@@ -61,7 +64,16 @@
             环境差异只在装哪个包、用哪套数据，那是执行时的参数。
             回归流程照旧按环境筛——线上回归和测试回归本来就走不同的流程。
           -->
+          <!--
+            跑已发布的线上包时只取 ONLINE 流程：本版新功能的流程在那个包里没有对应界面，
+            跑上去必然失败，而失败原因是「包里没这功能」，跟质量无关——
+            这种红会淹掉真正的问题。
+          -->
+          <if test="onlineOnly">
+              AND COALESCE(release_stage, 'ONLINE') = 'ONLINE'
+          </if>
           AND (catalog = 'AUTOMATION'
+               OR env_bound = 0
                OR COALESCE(environment, 'PROD') =
                   <choose>
                       <when test="environment != null and environment != ''">#{environment}</when>
@@ -92,9 +104,9 @@
 
     <insert id="insert">
         INSERT INTO ui_flows
-        (id, name, description, app_id, platform, catalog, environment, is_component, steps, depends_on, enabled, sort_order, created_by, created_at, updated_at)
+        (id, name, description, app_id, platform, catalog, environment, env_bound, release_stage, is_component, steps, depends_on, enabled, sort_order, created_by, created_at, updated_at)
         VALUES
-        (#{id}, #{name}, #{description}, #{appId}, #{platform}, #{catalog}, #{environment}, #{isComponent}, #{steps}, #{dependsOn},
+        (#{id}, #{name}, #{description}, #{appId}, #{platform}, #{catalog}, #{environment}, #{envBound}, #{releaseStage}, #{isComponent}, #{steps}, #{dependsOn},
          #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
     </insert>
 
@@ -106,6 +118,8 @@
             platform = #{platform},
             catalog = #{catalog},
             environment = #{environment},
+            env_bound = #{envBound},
+            release_stage = #{releaseStage},
             is_component = #{isComponent},
             steps = #{steps},
             depends_on = #{dependsOn},

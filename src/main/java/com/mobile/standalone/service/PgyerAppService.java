@@ -164,6 +164,43 @@ public class PgyerAppService {
                 .orElse(candidates.get(0));
     }
 
+    /**
+     * <b>上一个版本</b>——升级测试要装的那个包。
+     * <p>
+     * 覆盖安装真正要验的是「旧数据 + 新代码」：本地库表结构变了、SharedPreferences 的 key 改了、
+     * 缓存序列化格式变了，这几类<b>全新安装永远测不出来</b>，因为全新安装没有旧数据。
+     * 而线上的真实用户几乎全是覆盖升级。
+     * <p>
+     * 自动取而不是让人填版本号：填的话每发一版都要回来改一次流程，
+     * 而「每版都要改一次」的东西迟早会忘——忘了之后这条流程就在拿新版覆盖新版，测不到任何东西，
+     * 还照样是绿的。
+     *
+     * @return 比最新版更早的那个 build；只有一个版本时返回 null（第一版没有「上一版」）
+     */
+    public PgyerBuildVo previousBuild(String appKey, String platform, String host) {
+        List<PgyerBuildVo> builds = listBuilds(appKey, 1, host);
+        if (builds.size() < 2) {
+            return null;
+        }
+        Integer wantType = wantedBuildType(platform);
+        List<PgyerBuildVo> candidates = builds.stream()
+                .filter(b -> wantType == null || b.getBuildType() <= 0 || b.getBuildType() == wantType)
+                .sorted(java.util.Comparator.comparingInt(PgyerBuildVo::getBuildBuildVersion).reversed())
+                .toList();
+        if (candidates.size() < 2) {
+            return null;
+        }
+        String latestVersion = candidates.get(0).getBuildVersion();
+        // 跳过所有和最新版<b>同版本号</b>的构建：同一个版本常常传好几次（改 bug 重打包），
+        // 取到它等于拿 4.1.4 覆盖 4.1.4，升级路径一步都没走到
+        for (PgyerBuildVo b : candidates) {
+            if (latestVersion == null || !latestVersion.equals(b.getBuildVersion())) {
+                return b;
+            }
+        }
+        return null;
+    }
+
     /** 蒲公英 buildType：1=iOS，2=Android */
     private static Integer wantedBuildType(String platform) {
         if (platform == null || platform.isBlank()) {

@@ -37,7 +37,7 @@ class SettledScreenshotTest {
     @BeforeEach
     void setUp() throws Exception {
         executor = new UiFlowExecutor(null, null, null, null, null, null,
-                new ExecutionCancelRegistry(), null, null);
+                new ExecutionCancelRegistry(), null, null, null);
         screenshotDir = Files.createTempDirectory("settle-shot-test");
         ReflectionTestUtils.setField(executor, "screenshotDir", screenshotDir.toString());
         driver = new ScriptedDriver();
@@ -132,7 +132,7 @@ class SettledScreenshotTest {
         ExecutionCancelRegistry registry = new ExecutionCancelRegistry();
         registry.register("task-1");
         registry.cancel("task-1");
-        UiFlowExecutor cancelled = new UiFlowExecutor(null, null, null, null, null, null, registry, null, null);
+        UiFlowExecutor cancelled = new UiFlowExecutor(null, null, null, null, null, null, registry, null, null, null);
         ReflectionTestUtils.setField(cancelled, "screenshotDir", screenshotDir.toString());
         driver.alwaysChanging = true;
 

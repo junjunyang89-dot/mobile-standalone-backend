@@ -13,6 +13,7 @@ import com.mobile.standalone.entity.TaskExecution;
 import com.mobile.standalone.mapper.DeviceMapper;
 import com.mobile.standalone.mapper.TaskMapper;
 import com.mobile.standalone.mapper.TaskExecutionMapper;
+import com.mobile.standalone.config.NodeIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
@@ -54,6 +55,7 @@ public class TaskService {
     private final DeviceLockService deviceLockService;
     private final ExecutionCancelRegistry cancelRegistry;
     private final FailureDiagnosisRunner diagnosisRunner;
+    private final NodeIdentity nodeIdentity;
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, Process> runningTasks = new ConcurrentHashMap<>();
 
@@ -198,6 +200,9 @@ public class TaskService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public Task insertNewTask(Task task) {
         fillFlowColumns(task);
+        if (task.getWorkerId() == null || task.getWorkerId().isBlank()) {
+            task.setWorkerId(nodeIdentity.id());
+        }
         taskMapper.insert(task);
         return task;
     }

@@ -4,8 +4,10 @@ import com.mobile.standalone.entity.App;
 import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.mapper.AppMapper;
 import com.mobile.standalone.mapper.DeviceMapper;
+import com.mobile.standalone.config.NodeIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -23,6 +25,7 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@DependsOn("workerNodeService")
 @Slf4j
 public class DeviceService {
     
@@ -30,6 +33,7 @@ public class DeviceService {
     private final AppMapper appMapper;
     private final DeviceManager deviceManager;
     private final PlatformTransactionManager transactionManager;
+    private final NodeIdentity nodeIdentity;
     
     /**
      * 返回所有设备，并过滤掉明显无效的记录（如 adb 错误被误入库的）
@@ -37,6 +41,7 @@ public class DeviceService {
     public List<Device> getAllDevices() {
         return deviceMapper.findAll().stream()
                 .filter(this::isValidDeviceRecord)
+                .filter(d -> !nodeIdentity.executesLocally() || belongsToThisNode(d))
                 .toList();
     }
 
@@ -446,6 +451,9 @@ public class DeviceService {
      */
     @Scheduled(fixedRateString = "${app.device-scan-interval:5000}")
     public void scanDevices() {
+        if (!nodeIdentity.executesLocally()) {
+            return;
+        }
         try {
             List<Device> scanned = new ArrayList<>();
             scanned.addAll(deviceManager.scanAndroidDevices());
@@ -490,10 +498,12 @@ public class DeviceService {
                 existingDevice.setStatus(status);
                 // 未授权/离线也更新 lastSeen，避免被误判成「彻底消失」
                 existingDevice.setLastSeen(now);
+                existingDevice.setWorkerId(nodeIdentity.id());
                 deviceMapper.update(existingDevice);
             } else {
                 scannedDevice.setStatus(status);
                 scannedDevice.setLastSeen(now);
+                scannedDevice.setWorkerId(nodeIdentity.id());
                 deviceMapper.insert(scannedDevice);
                 log.info("发现新设备: {} ({}) status={}", scannedDevice.getName(), scannedDevice.getId(), status);
             }
@@ -508,6 +518,9 @@ public class DeviceService {
         LocalDateTime threshold = LocalDateTime.now().minusSeconds(45); // 与落库节流匹配，避免误标断开
         
         for (Device device : allDevices) {
+            if (!belongsToThisNode(device)) {
+                continue;
+            }
             if (device.getStatus() == Device.DeviceStatus.CONNECTED) {
                 if (device.getLastSeen() == null || device.getLastSeen().isBefore(threshold)) {
                     device.setStatus(Device.DeviceStatus.DISCONNECTED);
@@ -516,5 +529,14 @@ public class DeviceService {
                 }
             }
         }
+    }
+
+    /** 只动本节点扫到的设备，避免执行节点 A 把 B 的手机标成断开 */
+    private boolean belongsToThisNode(Device device) {
+        String wid = device.getWorkerId();
+        if (wid == null || wid.isBlank()) {
+            return true;
+        }
+        return nodeIdentity.id().equals(wid);
     }
 }

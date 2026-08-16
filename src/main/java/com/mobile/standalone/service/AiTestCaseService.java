@@ -89,6 +89,220 @@ public class AiTestCaseService {
         } catch (Exception e) {
             log.debug("[ai-test-cases] 存量 ONLINE 回填跳过: {}", e.getMessage());
         }
+        seedInstallUninstallCases();
+    }
+
+    /**
+     * 安装/卸载用例种子数据（幂等：同 category + title 已存在则跳过）。
+     * case_id 由 nextCaseId() 顺次分配，格式与其他用例一致（TC-XXX）。
+     */
+    private void seedInstallUninstallCases() {
+        try {
+            Object[][] rows = installUninstallSeedRows();
+            int inserted = 0;
+            for (Object[] r : rows) {
+                // r = {category, module, subModule, title, priority, type, precondition, stepsJson, expectedResult, releaseStage, platform, appId}
+                String category = (String) r[0];
+                String title    = (String) r[3];
+                Integer exists  = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(1) FROM ai_test_cases WHERE category=? AND title=?",
+                        Integer.class, category, title);
+                if (exists != null && exists > 0) continue;
+
+                AiTestCase tc = new AiTestCase();
+                tc.setCategory(category);
+                tc.setModule((String) r[1]);
+                tc.setSubModule((String) r[2]);
+                tc.setTitle(title);
+                tc.setPriority((String) r[4]);
+                tc.setType((String) r[5]);
+                tc.setPrecondition((String) r[6]);
+                tc.setStepsJson((String) r[7]);
+                tc.setExpectedResult((String) r[8]);
+                tc.setReleaseStage((String) r[9]);
+                tc.setPlatform((String) r[10]);
+                tc.setAppId((String) r[11]);
+                tc.setStatus("APPROVED");
+                tc.setSource("MANUAL");
+                createManual(tc);
+                inserted++;
+            }
+            if (inserted > 0) {
+                log.info("[ai-test-cases] 安装/卸载种子用例已写入：{} 条", inserted);
+            }
+        } catch (Exception e) {
+            log.warn("[ai-test-cases] 安装/卸载种子写入跳过: {}", e.getMessage());
+        }
+    }
+
+    private static Object[][] installUninstallSeedRows() {
+        // {category, module, subModule, title, priority, type, precondition, stepsJson, expectedResult, releaseStage, platform, appId}
+        return new Object[][] {
+            // ── iOS ──────────────────────────────────────────────────────────────
+            {"wmpvp-ios","安装","App Store 安装",
+             "【首次安装】通过 App Store 搜索并安装电竞 App","P0","功能测试",
+             "设备已退出 Apple ID；被测版本已上架 App Store；App 未安装",
+             "[{\"step\":1,\"action\":\"打开\",\"target\":\"App Store\",\"expected\":\"App Store 主页正常展示\"},"
+             +"{\"step\":2,\"action\":\"搜索\",\"target\":\"搜索框输入完美世界电竞\",\"expected\":\"搜索结果出现目标 App\"},"
+             +"{\"step\":3,\"action\":\"进入详情页\",\"target\":\"点击 App 图标\",\"expected\":\"展示名称、截图、版本号、大小\"},"
+             +"{\"step\":4,\"action\":\"点击获取\",\"target\":\"获取按钮\",\"expected\":\"进入 Apple ID 验证流程\"},"
+             +"{\"step\":5,\"action\":\"完成验证\",\"target\":\"Face ID / 密码\",\"expected\":\"开始下载，状态圈出现\"},"
+             +"{\"step\":6,\"action\":\"等待安装完成\",\"target\":\"桌面图标\",\"expected\":\"图标出现在桌面\"},"
+             +"{\"step\":7,\"action\":\"点击打开\",\"target\":\"App Store 内打开按钮\",\"expected\":\"App 正常启动，展示首页，无 Crash\"}]",
+             "安装成功，首次启动正常，无崩溃，图标在桌面正常显示","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-ios","安装","渠道页安装",
+             "【渠道页安装】通过企业渠道/蒲公英扫码安装","P0","功能测试",
+             "设备已信任企业证书或蒲公英描述文件；被测包已上传渠道页；App 未安装",
+             "[{\"step\":1,\"action\":\"访问\",\"target\":\"内测渠道二维码/链接\",\"expected\":\"落地页展示版本号、包大小\"},"
+             +"{\"step\":2,\"action\":\"点击安装\",\"target\":\"安装按钮\",\"expected\":\"弹出系统确认弹框\"},"
+             +"{\"step\":3,\"action\":\"确认安装\",\"target\":\"系统弹框安装按钮\",\"expected\":\"开始下载，桌面出现灰色图标\"},"
+             +"{\"step\":4,\"action\":\"信任证书\",\"target\":\"设置 > 通用 > VPN与设备管理\",\"expected\":\"证书状态变为已信任\"},"
+             +"{\"step\":5,\"action\":\"启动 App\",\"target\":\"桌面图标\",\"expected\":\"正常启动，无不受信任提示，展示首页\"}]",
+             "渠道包安装成功，证书信任后可正常启动","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-ios","安装","覆盖升级",
+             "【覆盖升级】低版本覆盖安装高版本","P1","功能测试",
+             "设备已安装旧版本且保有登录态；新版本包已就绪",
+             "[{\"step\":1,\"action\":\"记录当前版本号\",\"target\":\"App 关于页\",\"expected\":\"记录成功\"},"
+             +"{\"step\":2,\"action\":\"通过市场/渠道安装新版\",\"target\":\"安装入口\",\"expected\":\"提示版本升级\"},"
+             +"{\"step\":3,\"action\":\"完成后启动\",\"target\":\"桌面图标\",\"expected\":\"版本号已更新\"},"
+             +"{\"step\":4,\"action\":\"检查登录态\",\"target\":\"首页/个人中心\",\"expected\":\"登录态保留，无需重新登录\"},"
+             +"{\"step\":5,\"action\":\"验证核心功能\",\"target\":\"赛事、首页、个人中心\",\"expected\":\"功能正常\"}]",
+             "升级成功，版本号更新，登录态保留，核心功能正常","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-ios","安装","安装异常",
+             "【存储不足】设备存储空间不足时安装","P2","功能测试",
+             "设备剩余存储 < App 包大小",
+             "[{\"step\":1,\"action\":\"尝试安装\",\"target\":\"App Store 获取按钮\",\"expected\":\"安装失败\"},"
+             +"{\"step\":2,\"action\":\"观察提示\",\"target\":\"系统弹框\",\"expected\":\"弹出存储空间不足提示\"},"
+             +"{\"step\":3,\"action\":\"释放空间后重试\",\"target\":\"获取按钮\",\"expected\":\"安装成功\"}]",
+             "存储不足时有明确提示；释放空间后可正常安装","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-ios","卸载","正常卸载",
+             "【正常卸载】长按桌面图标删除 App","P1","功能测试",
+             "App 已安装；处于桌面",
+             "[{\"step\":1,\"action\":\"长按\",\"target\":\"桌面 App 图标\",\"expected\":\"进入抖动模式，出现×删除角标\"},"
+             +"{\"step\":2,\"action\":\"点击删除角标\",\"target\":\"×按钮\",\"expected\":\"弹出删除确认对话框\"},"
+             +"{\"step\":3,\"action\":\"点击删除\",\"target\":\"弹框删除按钮\",\"expected\":\"图标消失，App 已从桌面移除\"},"
+             +"{\"step\":4,\"action\":\"验证 App Store\",\"target\":\"搜索同名 App\",\"expected\":\"状态变为获取而非打开\"},"
+             +"{\"step\":5,\"action\":\"检查存储\",\"target\":\"设置 > iPhone 储存空间\",\"expected\":\"App 条目消失，占用降低\"}]",
+             "卸载成功，图标消失，App Store 可重新安装，存储释放","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-ios","卸载","设置中卸载",
+             "【设置卸载】通过设置 > iPhone 储存空间删除 App","P2","功能测试",
+             "App 已安装",
+             "[{\"step\":1,\"action\":\"进入\",\"target\":\"设置 > 通用 > iPhone 储存空间\",\"expected\":\"列出所有已安装 App\"},"
+             +"{\"step\":2,\"action\":\"找到目标 App\",\"target\":\"App 条目\",\"expected\":\"展示大小与文稿数据\"},"
+             +"{\"step\":3,\"action\":\"点击删除 App\",\"target\":\"删除 App 按钮\",\"expected\":\"弹出确认提示\"},"
+             +"{\"step\":4,\"action\":\"确认删除\",\"target\":\"确认按钮\",\"expected\":\"App 从列表消失\"},"
+             +"{\"step\":5,\"action\":\"返回桌面\",\"target\":\"桌面\",\"expected\":\"App 图标消失\"}]",
+             "通过设置删除成功，桌面图标消失，存储数据释放","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-ios","卸载","卸载后重装",
+             "【卸载后重装】验证重装后新用户引导与数据清空","P1","功能测试",
+             "App 已完整卸载",
+             "[{\"step\":1,\"action\":\"重新安装\",\"target\":\"App Store / 渠道页\",\"expected\":\"安装成功\"},"
+             +"{\"step\":2,\"action\":\"启动 App\",\"target\":\"桌面图标\",\"expected\":\"展示新用户引导或隐私协议弹框，无旧账号自动登录\"},"
+             +"{\"step\":3,\"action\":\"完成引导\",\"target\":\"引导流程\",\"expected\":\"进入首页，功能正常\"},"
+             +"{\"step\":4,\"action\":\"检查本地缓存\",\"target\":\"设置 > 缓存\",\"expected\":\"缓存为空，无旧数据残留\"}]",
+             "重装后为新用户态，无旧数据，功能正常","ONLINE","IOS","DOMESTIC_ESPORTS"},
+
+            // ── Android ──────────────────────────────────────────────────────────
+            {"wmpvp-android","安装","应用市场安装",
+             "【首次安装】通过应用市场搜索安装电竞 App","P0","功能测试",
+             "目标版本已在应用市场上架；App 未安装；设备联网",
+             "[{\"step\":1,\"action\":\"打开\",\"target\":\"系统应用市场\",\"expected\":\"应用市场首页正常展示\"},"
+             +"{\"step\":2,\"action\":\"搜索\",\"target\":\"搜索完美世界电竞\",\"expected\":\"结果出现目标 App\"},"
+             +"{\"step\":3,\"action\":\"进入详情页\",\"target\":\"点击 App\",\"expected\":\"展示版本号、包大小、截图\"},"
+             +"{\"step\":4,\"action\":\"点击安装\",\"target\":\"安装按钮\",\"expected\":\"通知栏出现下载进度\"},"
+             +"{\"step\":5,\"action\":\"等待完成\",\"target\":\"详情页按钮\",\"expected\":\"按钮变为打开\"},"
+             +"{\"step\":6,\"action\":\"点击打开\",\"target\":\"打开按钮\",\"expected\":\"App 正常启动，无 Crash\"}]",
+             "首次安装成功，App 正常启动，桌面出现图标，无崩溃","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","安装","APK 直装",
+             "【APK 直装】通过 APK 文件直接安装","P0","功能测试",
+             "已启用安装未知来源权限；APK 文件已传至设备；App 未安装",
+             "[{\"step\":1,\"action\":\"找到 APK\",\"target\":\"文件管理器或下载目录\",\"expected\":\"文件可见，显示正确版本号\"},"
+             +"{\"step\":2,\"action\":\"点击 APK\",\"target\":\"APK 文件\",\"expected\":\"弹出安装确认页，显示权限列表\"},"
+             +"{\"step\":3,\"action\":\"点击安装\",\"target\":\"安装按钮\",\"expected\":\"进度条出现\"},"
+             +"{\"step\":4,\"action\":\"等待完成\",\"target\":\"安装进度\",\"expected\":\"弹出应用已安装提示\"},"
+             +"{\"step\":5,\"action\":\"点击打开\",\"target\":\"打开按钮\",\"expected\":\"App 正常启动，无 Crash\"}]",
+             "APK 安装成功，App 正常启动","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","安装","蒲公英/渠道页安装",
+             "【渠道安装】通过蒲公英或内测渠道页下载安装","P0","功能测试",
+             "已获取内测链接；设备已开启安装未知来源权限；App 未安装",
+             "[{\"step\":1,\"action\":\"访问\",\"target\":\"蒲公英/渠道页链接\",\"expected\":\"落地页展示版本号、包大小\"},"
+             +"{\"step\":2,\"action\":\"点击下载 APK\",\"target\":\"下载按钮\",\"expected\":\"通知栏出现下载进度\"},"
+             +"{\"step\":3,\"action\":\"点击安装\",\"target\":\"下载完成提示\",\"expected\":\"系统安装确认页弹出\"},"
+             +"{\"step\":4,\"action\":\"确认安装\",\"target\":\"安装按钮\",\"expected\":\"安装成功\"},"
+             +"{\"step\":5,\"action\":\"打开 App\",\"target\":\"桌面图标\",\"expected\":\"正常启动，展示首页\"}]",
+             "渠道包安装成功，正常启动","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","安装","覆盖升级",
+             "【覆盖升级】低版本覆盖安装高版本","P1","功能测试",
+             "设备已安装旧版本且保有登录态；新版本 APK 或市场更新已准备好",
+             "[{\"step\":1,\"action\":\"记录当前版本\",\"target\":\"App 关于页\",\"expected\":\"版本号记录成功\"},"
+             +"{\"step\":2,\"action\":\"安装新版本\",\"target\":\"市场/APK\",\"expected\":\"提示覆盖安装，无需卸载\"},"
+             +"{\"step\":3,\"action\":\"完成后启动\",\"target\":\"桌面图标\",\"expected\":\"版本号已更新\"},"
+             +"{\"step\":4,\"action\":\"检查登录态\",\"target\":\"首页/个人中心\",\"expected\":\"登录态保留\"},"
+             +"{\"step\":5,\"action\":\"验证核心功能\",\"target\":\"赛事、首页、个人中心\",\"expected\":\"功能正常\"}]",
+             "升级成功，版本号更新，登录态保留","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","安装","权限异常",
+             "【权限未开启】未开启安装未知来源权限时安装 APK","P2","功能测试",
+             "安装未知来源权限未授予；APK 已下载到设备",
+             "[{\"step\":1,\"action\":\"点击 APK\",\"target\":\"APK 文件\",\"expected\":\"系统弹出权限引导，提示不允许安装\"},"
+             +"{\"step\":2,\"action\":\"跟随引导进入设置\",\"target\":\"设置入口\",\"expected\":\"跳转至安装权限页\"},"
+             +"{\"step\":3,\"action\":\"开启权限后重试\",\"target\":\"允许来自此来源的应用\",\"expected\":\"可正常进入安装流程\"}]",
+             "未授权有明确提示，引导开权限后可正常安装","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","安装","存储空间不足",
+             "【存储不足】设备存储不足时安装失败提示","P2","功能测试",
+             "设备剩余存储 < App 包大小",
+             "[{\"step\":1,\"action\":\"尝试安装\",\"target\":\"应用市场或 APK\",\"expected\":\"安装失败\"},"
+             +"{\"step\":2,\"action\":\"观察提示\",\"target\":\"系统弹框\",\"expected\":\"出现存储空间不足提示\"},"
+             +"{\"step\":3,\"action\":\"释放空间后重试\",\"target\":\"安装入口\",\"expected\":\"安装成功\"}]",
+             "存储不足时有清晰提示，释放空间后可正常安装","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","卸载","桌面卸载",
+             "【正常卸载】长按桌面图标卸载 App","P1","功能测试",
+             "App 已安装；处于桌面",
+             "[{\"step\":1,\"action\":\"长按\",\"target\":\"桌面 App 图标\",\"expected\":\"弹出快捷菜单或拖拽模式\"},"
+             +"{\"step\":2,\"action\":\"点击卸载\",\"target\":\"卸载选项\",\"expected\":\"弹出卸载确认对话框\"},"
+             +"{\"step\":3,\"action\":\"确认卸载\",\"target\":\"确认按钮\",\"expected\":\"App 正在卸载\"},"
+             +"{\"step\":4,\"action\":\"验证\",\"target\":\"设置 > 应用管理\",\"expected\":\"应用列表中无该 App\"}]",
+             "卸载成功，图标消失，应用列表中已移除","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","卸载","设置中卸载",
+             "【设置卸载】通过设置 > 应用管理卸载","P1","功能测试",
+             "App 已安装",
+             "[{\"step\":1,\"action\":\"进入\",\"target\":\"设置 > 应用管理\",\"expected\":\"列出所有 App\"},"
+             +"{\"step\":2,\"action\":\"找到目标 App\",\"target\":\"App 条目\",\"expected\":\"展示版本、存储占用\"},"
+             +"{\"step\":3,\"action\":\"点击卸载\",\"target\":\"卸载按钮\",\"expected\":\"弹出确认\"},"
+             +"{\"step\":4,\"action\":\"确认\",\"target\":\"确认按钮\",\"expected\":\"卸载进行中\"},"
+             +"{\"step\":5,\"action\":\"检查\",\"target\":\"应用列表与桌面\",\"expected\":\"App 已不在列表，图标消失\"}]",
+             "通过设置卸载成功，图标与应用列表均已移除","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","卸载","卸载后重装",
+             "【卸载后重装】验证重装后新用户引导与数据清空","P1","功能测试",
+             "App 已完整卸载",
+             "[{\"step\":1,\"action\":\"重新安装\",\"target\":\"应用市场/APK\",\"expected\":\"安装成功\"},"
+             +"{\"step\":2,\"action\":\"启动 App\",\"target\":\"桌面图标\",\"expected\":\"展示新用户引导，无旧账号自动登录\"},"
+             +"{\"step\":3,\"action\":\"完成引导\",\"target\":\"引导流程\",\"expected\":\"进入首页，功能正常\"},"
+             +"{\"step\":4,\"action\":\"检查缓存\",\"target\":\"设置 > 缓存\",\"expected\":\"无旧数据残留\"}]",
+             "重装后为新用户态，无旧数据，功能正常","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+
+            {"wmpvp-android","卸载","进程运行时卸载",
+             "【运行时卸载】App 后台运行时卸载","P2","功能测试",
+             "App 在后台或前台运行",
+             "[{\"step\":1,\"action\":\"保持 App 在后台\",\"target\":\"按 Home 键\",\"expected\":\"App 转后台\"},"
+             +"{\"step\":2,\"action\":\"进入应用详情\",\"target\":\"设置 > 应用管理 > 目标 App\",\"expected\":\"展示运行状态\"},"
+             +"{\"step\":3,\"action\":\"强制停止\",\"target\":\"强制停止按钮\",\"expected\":\"App 进程已终止\"},"
+             +"{\"step\":4,\"action\":\"卸载\",\"target\":\"卸载按钮\",\"expected\":\"卸载成功，图标消失\"}]",
+             "App 运行时可强制停止后正常卸载，不留残余进程","ONLINE","ANDROID","DOMESTIC_ESPORTS"},
+        };
     }
 
     private void ensureTaskColumn(String column, String definition) {
@@ -333,7 +547,38 @@ public class AiTestCaseService {
         }
         row.setReleaseStage("ONLINE");
         aiTestCaseMapper.update(row);
+        promoteLinkedFlow(row);
         return aiTestCaseMapper.findById(id);
+    }
+
+    /**
+     * 用例转正时，把它的自动化实现一起转正。
+     * <p>
+     * 「这条用例可以进线上回归了」和「它的自动化流程可以进线上回归了」本来就是同一个判断。
+     * 不联动的话，每个版本都要把同一个决定做两遍——先在用例这边点一次，
+     * 再去流程那边找到对应的一条再点一次。漏掉第二次的后果很隐蔽：
+     * 用例显示已覆盖，而流程压根没进线上回归的批次，等于没跑。
+     * <p>
+     * 反向不做（提升流程不动用例）：用例是源头，反着来会让两边谁说了算变得不清楚。
+     */
+    private void promoteLinkedFlow(AiTestCase row) {
+        if (uiFlowService == null || isBlank(row.getFlowId())) {
+            return;
+        }
+        try {
+            UiFlow flow = uiFlowService.get(row.getFlowId());
+            if (flow == null || "ONLINE".equalsIgnoreCase(
+                    flow.getReleaseStage() == null ? "ONLINE" : flow.getReleaseStage())) {
+                return;
+            }
+            flow.setReleaseStage("ONLINE");
+            uiFlowService.update(flow.getId(), flow);
+            log.info("[ai-test-cases] 用例 {} 转正，关联流程「{}」一并提升为线上",
+                    row.getCaseId(), flow.getName());
+        } catch (Exception e) {
+            // 流程没提升不该让用例转正失败——用例是源头，先落地；流程那边可以手动补
+            log.warn("[ai-test-cases] 联动提升流程失败 flowId={}: {}", row.getFlowId(), e.getMessage());
+        }
     }
 
     /** 批量提升为线上稳定 */
@@ -464,9 +709,9 @@ public class AiTestCaseService {
         if (!automationCapable(flow)) {
             throw new IllegalArgumentException(
                     "流程「" + flow.getName() + "」的用途是「" + catalogLabel(flow.getCatalog())
-                            + "」，不能用来覆盖用例。回归和自动化是两条独立的轨——"
-                            + "回归验的是「这个包能不能用」，不对应任何一条用例。"
-                            + "要让它覆盖用例，把用途改成「仅自动化编排」");
+                            + "」，不能用来覆盖用例。装包准备不执行任何用例步骤（它是把设备弄成可测状态），"
+                            + "仅性能测试采的是资源曲线、不验功能——这两类挂上去必然是假覆盖。"
+                            + "把用途改成「仅回归」「仅自动化编排」或「回归+自动化」都可以");
         }
         if (isBlank(casePlatform) || isBlank(flow.getPlatform())) {
             return;
@@ -479,18 +724,21 @@ public class AiTestCaseService {
     }
 
     /**
-     * 只有<b>用途＝仅自动化编排</b>的流程才算覆盖了用例。
+     * 这条流程能不能算某条用例的自动化实现。
      * <p>
-     * 回归和自动化是两条互不相干的轨：回归验的是「这个包能不能用」，
-     * 自动化替代的是「人工执行某条用例」。所以 SHARED（回归 + 自动化编排）也不行——
-     * 它进回归批次，就属于回归那一套；其中的「自动化编排」只是能在本页单跑调试，
-     * 不代表它是某条用例的自动化实现。
+     * 判断依据是<b>它做没做那件事</b>，不是它出现在哪个入口——
+     * 一条登录流程既进回归批次、又确实执行了 TC-007 的步骤，那它就是 TC-007 的实现，
+     * 硬要在「回归」和「自动化」里二选一是把两个正交的东西绑在了一起。
      * <p>
-     * 挂错了不会报错，只会得到一个「已覆盖却从来没跑过」的绿标记——
-     * 因为用例的执行状态只认 AUTOMATION 轨。那正是覆盖率造假最典型的形态。
+     * 排除的只有两类：<b>装包准备</b>（不执行任何用例步骤，它是把设备弄成可测状态）、
+     * <b>仅性能测试</b>（采的是资源曲线，不验功能）。这两类挂上去必然是假覆盖。
      */
     static boolean automationCapable(UiFlow flow) {
-        return flow != null && "AUTOMATION".equals(flow.getCatalog());
+        if (flow == null) {
+            return false;
+        }
+        String c = flow.getCatalog() == null ? "SHARED" : flow.getCatalog().trim().toUpperCase();
+        return !"INSTALL".equals(c) && !"PERFORMANCE".equals(c);
     }
 
     private static String catalogLabel(String c) {

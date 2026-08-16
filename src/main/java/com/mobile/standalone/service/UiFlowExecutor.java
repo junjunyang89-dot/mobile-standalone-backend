@@ -83,6 +83,7 @@ public class UiFlowExecutor implements FlowRuntime {
     private final ExecutionCancelRegistry cancelRegistry;
     private final KeywordRegistry keywordRegistry;
     private final EnvVariableService envVariableService;
+    private final PgyerAppService pgyerAppService;
 
     @Autowired(required = false)
     private AppiumDriverAdapter appiumDriverAdapter;
@@ -465,6 +466,11 @@ public class UiFlowExecutor implements FlowRuntime {
     @Override
     public AppPackageInstallService appPackageInstallService() {
         return appPackageInstallService;
+    }
+
+    @Override
+    public PgyerAppService pgyerAppService() {
+        return pgyerAppService;
     }
 
     /**

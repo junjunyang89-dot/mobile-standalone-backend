@@ -13,6 +13,7 @@ import com.mobile.standalone.entity.OnlineRegressionStep;
 import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.entity.TaskExecution;
 import com.mobile.standalone.entity.UiFlow;
+import com.mobile.standalone.entity.UiApp;
 import com.mobile.standalone.util.RunTrack;
 import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.mapper.ApplicationMapper;
@@ -61,6 +62,8 @@ public class OnlineRegressionOrchestrator {
 
     public static final String APP_DOMESTIC = "DOMESTIC_ESPORTS";
     public static final String APP_POG = "OVERSEAS_POGPOG";
+    /** 纯血鸿蒙独立应用（与国内 Android/iOS 不是同一产物） */
+    public static final String APP_HARMONY = "DOMESTIC_ESPORTS_HARMONY";
 
     /** Android 国内电竞包名片段（匹配用）/ 完整包名 */
     private static final String PKG_ESPORTS_ANDROID = "com.pwrd.steam.esports";
@@ -98,9 +101,11 @@ public class OnlineRegressionOrchestrator {
     private final TaskExecutionMapper taskExecutionMapper;
     private final TaskService taskService;
     private final UiFlowService uiFlowService;
+    private final UiAppService uiAppService;
     private final DeviceLockService deviceLockService;
     private final ExecutionCancelRegistry cancelRegistry;
     private final PushPlusNotifyService pushPlusNotifyService;
+    private final AppPackageInstallService appPackageInstallService;
 
     @Value("${app.online-regression.alert.detail-url-template:}")
     private String alertDetailUrlTemplate;
@@ -279,11 +284,13 @@ public class OnlineRegressionOrchestrator {
 
         List<OnlineRegressionJob> jobs = new ArrayList<>();
         for (String appId : req.getAppIds()) {
-            String appName = APP_POG.equals(appId) ? "海外 PogPog" : "国内电竞";
+            String appName = appDisplayName(appId);
             List<Device> appDevices = new ArrayList<>();
             for (Device device : devices) {
                 String endpoint = endpointOf(device.getPlatform());
                 if ("other".equals(endpoint)) continue;
+                // 鸿蒙是独立应用：国内/海外卡不能配鸿蒙机，鸿蒙卡不能配 Android/iOS
+                if (APP_HARMONY.equals(appId) != "harmony".equals(endpoint)) continue;
                 String jobKey = appId + "__" + device.getId();
                 if (req.getExcludeJobKeys() != null && req.getExcludeJobKeys().contains(jobKey)) continue;
                 appDevices.add(device);
@@ -447,7 +454,27 @@ public class OnlineRegressionOrchestrator {
             jobDetails.add(jd);
         }
         detail.setJobs(jobDetails);
+        fillFailureClusters(detail, jobDetails);
         return detail;
+    }
+
+    /** 把这一批的失败按原因归类，挂到详情上 */
+    private void fillFailureClusters(OnlineRegressionRunDetail detail, List<JobDetail> jobDetails) {
+        List<FailureCluster.Failure> failures = new ArrayList<>();
+        for (JobDetail jd : jobDetails) {
+            for (OnlineRegressionStep st : jd.getSteps() == null ? List.<OnlineRegressionStep>of() : jd.getSteps()) {
+                if (!OnlineRegressionStep.Status.FAILED.name().equals(st.getStatus())) {
+                    continue;
+                }
+                failures.add(new FailureCluster.Failure(
+                        st.getStepLabel() != null ? st.getStepLabel() : st.getStepId(),
+                        st.getStepLabel(),
+                        st.getErrorMessage()));
+            }
+        }
+        List<FailureCluster.Cluster> clusters = FailureCluster.cluster(failures);
+        detail.setFailureClusters(clusters);
+        detail.setFailureSummary(FailureCluster.summarize(failures.size(), clusters));
     }
 
     /** 历史批次摘要（不含步骤明细；详情用 {@link #getRunDetail}） */
@@ -702,6 +729,73 @@ public class OnlineRegressionOrchestrator {
         }
     }
 
+    /**
+     * 批次开始前按策略装一次包。
+     *
+     * @return true＝可以继续跑流程（含「不装包」这一档）
+     */
+    private boolean prepareInstall(OnlineRegressionJob job, StartRunRequest req) {
+        BatchInstallStrategy strategy = BatchInstallStrategy.from(req.getInstallStrategy());
+        if (strategy == BatchInstallStrategy.NONE) {
+            return true;
+        }
+        Device device = deviceMapper.findById(job.getDeviceId());
+        if (device == null) {
+            log.warn("[regression] 装包跳过：设备不存在 {}", job.getDeviceId());
+            return false;
+        }
+        try {
+            // 升级测试：先垫一个上一版，全新装（要干净的旧环境）。
+            // 「用一遍产生数据」由批次里勾的流程完成，不在这里做——
+            // 那一步是业务操作，只有流程知道该点哪里
+            if (strategy.needsPreviousFirst()) {
+                // buildKey 必须显式取：不传的话走的是「装最新版」，
+                // 那就成了拿新版覆盖新版，升级路径一步没走到，还照样是绿的
+                String prevKey = appPackageInstallService.resolvePreviousBuildKey(job.getAppId(), device);
+                if (prevKey == null) {
+                    job.setErrorMessage("升级测试：蒲公英上只有一个版本，没有「上一版」可装");
+                    log.warn("[regression] 升级测试取不到上一版 app={}", job.getAppId());
+                    return false;
+                }
+                InstallRequest prev = InstallRequest.builder()
+                        .installMode(InstallMode.PGYER)
+                        .pgyerBuildKey(prevKey)
+                        .uninstallFirst(true)
+                        .build();
+                AppPackageInstallService.OpResult r =
+                        appPackageInstallService.install(job.getAppId(), device, prev);
+                if (!r.success) {
+                    job.setErrorMessage("升级测试：上一版装不上 " + r.message);
+                    log.warn("[regression] 升级测试：上一版装不上 {}", r.message);
+                    return false;
+                }
+                log.info("[regression] 升级测试：已装上一版 buildKey={}，等流程跑完再覆盖装最新版", prevKey);
+                // 覆盖装最新版留到流程之后——先让流程把本地数据造出来，
+                // 否则「旧数据 + 新代码」就无从谈起，覆盖安装退化成装了个包
+                return true;
+            }
+            InstallRequest install = InstallRequest.builder()
+                    .installMode(InstallMode.PGYER)
+                    .pgyerBuildKey(strategy == BatchInstallStrategy.SPECIFIC
+                            ? blankToNull(req.getInstallBuildKey()) : null)
+                    .uninstallFirst(true)
+                    .build();
+            AppPackageInstallService.OpResult r =
+                    appPackageInstallService.install(job.getAppId(), device, install);
+            if (!r.success) {
+                job.setErrorMessage("装包失败：" + r.message);
+                log.warn("[regression] 装包失败 device={}: {}", device.getId(), r.message);
+                return false;
+            }
+            log.info("[regression] 装包完成 device={} 策略={}", device.getId(), strategy.describe());
+            return true;
+        } catch (Exception e) {
+            job.setErrorMessage("装包异常：" + e.getMessage());
+            log.warn("[regression] 装包异常 device={}: {}", job.getDeviceId(), e.getMessage());
+            return false;
+        }
+    }
+
     private void executeJob(String runId, OnlineRegressionJob job, StartRunRequest req) {
         job.setStatus(OnlineRegressionJob.Status.RUNNING.name());
         job.setUpdatedAt(LocalDateTime.now());
@@ -713,6 +807,29 @@ public class OnlineRegressionOrchestrator {
         String resetFlowId = resetFlowIdOf(req);
         // 自动化轨道失败不中断整批，得记着最后把作业判成失败
         boolean anyFailed = false;
+
+        // 装包在所有流程之前做一次，不作为流程步骤。
+        // 它不是用例：跑通不说明任何功能是好的，混进步骤列表只会稀释通过率；
+        // 而且「一批只装一次」靠这里保证，比靠人把安装流程排在第一条可靠得多
+        if (!prepareInstall(job, req)) {
+            job.setStatus(OnlineRegressionJob.Status.FAILED.name());
+            job.setCurrentStepLabel("装包失败");
+            job.setUpdatedAt(LocalDateTime.now());
+            jobMapper.update(job);
+            // 包都没装上，后面的流程验的会是设备上那个旧包——那种结果比失败更糟，
+            // 它是绿的但验错了对象。所以整批直接跳过
+            for (OnlineRegressionStep st : stepMapper.findByJobId(job.getId())) {
+                if (OnlineRegressionStep.Status.PENDING.name().equals(st.getStatus())) {
+                    st.setStatus(OnlineRegressionStep.Status.SKIPPED.name());
+                    st.setErrorMessage("装包失败，未执行——避免拿旧包跑出一份看着是绿的结果");
+                    st.setFinishedAt(LocalDateTime.now());
+                    st.setUpdatedAt(LocalDateTime.now());
+                    stepMapper.update(st);
+                }
+            }
+            return;
+        }
+
         List<OnlineRegressionStep> steps = stepMapper.findByJobId(job.getId());
         steps.sort(Comparator.comparingInt(s -> s.getSortOrder() != null ? s.getSortOrder() : 0));
 
@@ -838,6 +955,13 @@ public class OnlineRegressionOrchestrator {
             }
         }
 
+        // 升级测试的后半程：流程已经把本地数据造出来了，现在覆盖装最新版。
+        // 顺序不能反——先覆盖再跑，验的就是「空数据 + 新代码」，那是全新安装，
+        // 而全新安装永远测不出库表升级、缓存格式变更这几类问题
+        if (!finishUpgradeInstall(job, req, anyFailed)) {
+            anyFailed = true;
+        }
+
         job.setProgress(100);
         job.setStatus(anyFailed
                 ? OnlineRegressionJob.Status.FAILED.name()
@@ -845,6 +969,54 @@ public class OnlineRegressionOrchestrator {
         job.setCurrentStepLabel(anyFailed ? "已跑完，有失败" : "全部完成");
         job.setUpdatedAt(LocalDateTime.now());
         jobMapper.update(job);
+    }
+
+    /**
+     * 升级测试的覆盖安装：流程跑完之后，拿最新版覆盖装在上一版之上。
+     * <p>
+     * 装完<b>不再自动跑一遍流程</b>——覆盖后要看的是「打开还在不在、旧数据还认不认」，
+     * 那是人看一眼的事；自动重跑一遍会让通过率变成两轮的混合值，反而看不出是哪轮挂的。
+     *
+     * @return true＝这一档不适用，或者覆盖装成功
+     */
+    private boolean finishUpgradeInstall(OnlineRegressionJob job, StartRunRequest req, boolean anyFailed) {
+        BatchInstallStrategy strategy = BatchInstallStrategy.from(req.getInstallStrategy());
+        if (!strategy.needsPreviousFirst()) {
+            return true;
+        }
+        if (anyFailed) {
+            // 前面的流程没跑完，本地数据是残的。这时候覆盖装，验出来的东西说明不了问题，
+            // 而「覆盖装成功」还会给人一种升级路径已经验过的错觉
+            job.setCurrentStepLabel("流程有失败，跳过覆盖安装");
+            log.info("[regression] 升级测试：流程有失败，跳过覆盖装最新版 job={}", job.getJobKey());
+            return true;
+        }
+        Device device = deviceMapper.findById(job.getDeviceId());
+        if (device == null) {
+            job.setErrorMessage("覆盖安装失败：设备不存在");
+            return false;
+        }
+        try {
+            InstallRequest latest = InstallRequest.builder()
+                    .installMode(InstallMode.PGYER)
+                    // 关键就在这里：不卸载。卸载了旧数据就没了，覆盖安装退化成全新安装
+                    .uninstallFirst(false)
+                    .build();
+            AppPackageInstallService.OpResult r =
+                    appPackageInstallService.install(job.getAppId(), device, latest);
+            if (!r.success) {
+                job.setErrorMessage("覆盖装最新版失败：" + r.message);
+                log.warn("[regression] 升级测试：覆盖装最新版失败 {}", r.message);
+                return false;
+            }
+            job.setCurrentStepLabel("已覆盖装最新版，请人工确认升级后表现");
+            log.info("[regression] 升级测试：已覆盖装最新版 device={}", device.getId());
+            return true;
+        } catch (Exception e) {
+            job.setErrorMessage("覆盖安装异常：" + e.getMessage());
+            log.warn("[regression] 升级测试：覆盖安装异常 device={}", job.getDeviceId(), e);
+            return false;
+        }
     }
 
     /**
@@ -1006,6 +1178,8 @@ public class OnlineRegressionOrchestrator {
         String exactPkg = resolveTargetPackage(appId, ios);
         String matchHint = APP_POG.equals(appId)
                 ? (ios ? "egamesintl" : "egames.intl")
+                : APP_HARMONY.equals(appId)
+                ? (exactPkg.contains(".") ? exactPkg.substring(exactPkg.lastIndexOf('.') + 1) : exactPkg)
                 : (ios ? "esportapp" : "steam.esports");
         List<Application> list = applicationMapper.findByDeviceId(device.getId());
         if (list != null) {
@@ -1013,7 +1187,7 @@ public class OnlineRegressionOrchestrator {
                 String pn = a.getPackageName();
                 if (pn == null) continue;
                 String lower = pn.toLowerCase(Locale.ROOT);
-                if (exactPkg.equalsIgnoreCase(pn) || lower.contains(matchHint.toLowerCase(Locale.ROOT))) {
+                if (exactPkg.equalsIgnoreCase(pn) || (!matchHint.isBlank() && lower.contains(matchHint.toLowerCase(Locale.ROOT)))) {
                     return a;
                 }
             }
@@ -1021,7 +1195,7 @@ public class OnlineRegressionOrchestrator {
         // 设备应用列表未必已扫描到包名：创建占位记录供任务外键，启动场景仍可按固定包名运行
         Application stub = new Application();
         stub.setId("or-app-" + UUID.randomUUID());
-        stub.setName(APP_POG.equals(appId) ? "PogPog" : "完美世界电竞");
+        stub.setName(appDisplayName(appId));
         stub.setPackageName(exactPkg);
         stub.setDeviceId(device.getId());
         stub.setPlatform(Application.Platform.valueOf(taskPlatform.name()));
@@ -1035,7 +1209,21 @@ public class OnlineRegressionOrchestrator {
         if (APP_POG.equals(appId)) {
             return ios ? PKG_POG_IOS : PKG_POG_ANDROID;
         }
+        if (APP_HARMONY.equals(appId)) {
+            // 鸿蒙独立应用：包名暂存在应用字典的 android_package（该应用没有安卓包）
+            UiApp dict = uiAppService.get(appId);
+            if (dict != null && dict.getAndroidPackage() != null && !dict.getAndroidPackage().isBlank()) {
+                return dict.getAndroidPackage().trim();
+            }
+            return "harmony.bundle.pending";
+        }
         return ios ? PKG_ESPORTS_IOS : PKG_ESPORTS_ANDROID;
+    }
+
+    private static String appDisplayName(String appId) {
+        if (APP_POG.equals(appId)) return "海外 PogPog";
+        if (APP_HARMONY.equals(appId)) return "国内电竞·鸿蒙";
+        return "国内电竞";
     }
 
     /**
@@ -1352,6 +1540,7 @@ public class OnlineRegressionOrchestrator {
     private static String endpointOf(Device.Platform p) {
         if (Device.isAndroidOrPogAndroid(p)) return "android";
         if (Device.usesIosAutomation(p)) return "ios";
+        if (p == Device.Platform.HARMONYOS) return "harmony";
         return "other";
     }
 
@@ -1387,6 +1576,19 @@ public class OnlineRegressionOrchestrator {
          * 执行逻辑一个字都不变：两个环境包名相同、元素通用、跑的是同一套关键字。
          */
         private String environment;
+        /**
+         * 装包策略：NONE / LATEST / SPECIFIC / PREVIOUS_THEN_LATEST。
+         * <p>
+         * 装包从流程里提出来，因为它<b>不是用例</b>：
+         * <ul>
+         *   <li>版本是执行时的参数，流程是静态的——写死每版要改，不写死就选不了</li>
+         *   <li>一批只该装一次，靠「排在第一条」保证太脆，重跑某一条时就崩了</li>
+         *   <li>混在勾选列表里会稀释通过率：两条装包通过不说明任何功能是好的</li>
+         * </ul>
+         */
+        private String installStrategy;
+        /** SPECIFIC 时指定的蒲公英 buildKey */
+        private String installBuildKey;
         /**
          * 轨道：REGRESSION（默认）/ AUTOMATION。
          * <p>
@@ -1427,6 +1629,16 @@ public class OnlineRegressionOrchestrator {
     public static class OnlineRegressionRunDetail {
         private OnlineRegressionRun run;
         private List<JobDetail> jobs;
+        /**
+         * 失败按原因归类。
+         * <p>
+         * 一批红 20 条，逐条查是最费时间的做法——那 20 条里往往 18 条是同一个原因
+         * （登录服务挂了、设备掉线、token 过期）。打开报告第一眼该看到「实际上是 3 个问题」，
+         * 而不是 20 行红。先收敛再逐个查，顺序反了会把时间花在重复现象上。
+         */
+        private List<FailureCluster.Cluster> failureClusters;
+        /** 一句话结论，直接贴在报告顶部 */
+        private String failureSummary;
     }
 
     @Data

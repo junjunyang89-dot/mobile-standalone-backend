@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class RegressionEnvironmentTest {
 
-    private final UiFlowService service = new UiFlowService(null, null);
+    private final UiFlowService service = new UiFlowService(null, null, null);
 
     private static UiFlow flow(String catalog, String environment) {
         UiFlow f = new UiFlow();
@@ -154,6 +154,84 @@ class RegressionEnvironmentTest {
                 "流程上标着 TEST 也要能跑线上包——环境不再是流程的属性");
     }
 
+    // ==================== 包里有没有这个功能 ====================
+
+    /**
+     * 本组最要紧的一条。
+     * <p>
+     * 「发版前线上回归」和「APP 线上回归」<b>都是生产环境</b>，但跑的包不同：
+     * 前者是本次待发布的 debug 包（有新功能），后者是上个版本的线上包（没有）。
+     * 本版新功能的流程跑到线上包上必然失败，而失败原因是「包里没这功能」，跟质量无关——
+     * 这种红会把真问题淹掉。environment 这一维表达不了这个区别。
+     */
+    @Test
+    void 跑已发布线上包时排除本版新功能的流程() {
+        UiFlow newFeature = flow("ONLINE", "PROD");
+        newFeature.setReleaseStage("TESTING");
+
+        assertTrue(service.isBatchEligible(newFeature, TestEnvironment.PROD, RunTrack.REGRESSION, false),
+                "发版前线上回归跑的是 debug 包，新功能流程要跑");
+        assertFalse(service.isBatchEligible(newFeature, TestEnvironment.PROD, RunTrack.REGRESSION, true),
+                "APP 线上回归跑的是上个版本线上包，里面没有这个功能");
+    }
+
+    /** 存量流程一条都不能掉出线上回归——没设过 releaseStage 的按 ONLINE 处理 */
+    @Test
+    void 没设过阶段的按线上处理() {
+        UiFlow legacy = flow("ONLINE", "PROD");
+
+        assertTrue(service.isBatchEligible(legacy, TestEnvironment.PROD, RunTrack.REGRESSION, true),
+                "默认值判错会让存量流程整批从线上回归里消失，而且不报错");
+    }
+
+    @Test
+    void 已上线的流程两种包都跑() {
+        UiFlow stable = flow("ONLINE", "PROD");
+        stable.setReleaseStage("ONLINE");
+
+        assertTrue(service.isBatchEligible(stable, TestEnvironment.PROD, RunTrack.REGRESSION, false));
+        assertTrue(service.isBatchEligible(stable, TestEnvironment.PROD, RunTrack.REGRESSION, true));
+    }
+
+    // ==================== 纯功能验证流程可以不绑环境 ====================
+
+    /**
+     * 真实场景：测试环境回归通过后，同一个 debug 包切到生产环境再跑一遍「发版前线上回归」。
+     * 这一轮要跑的流程和测试环境回归<b>完全一样</b>——差别只在后端连哪边，
+     * 而后端是包里配的，不是流程的属性。按环境隔离的话，刚在测试环境写好的新流程
+     * 在线上这边看不见，只能重写一遍。
+     */
+    @Test
+    void 不绑环境的回归流程两个环境都能跑() {
+        UiFlow f = flow("ONLINE", "TEST");
+        f.setEnvBound(false);
+
+        assertTrue(service.isBatchEligible(f, TestEnvironment.TEST, RunTrack.REGRESSION));
+        assertTrue(service.isBatchEligible(f, TestEnvironment.PROD, RunTrack.REGRESSION),
+                "标了 TEST 也要能进线上回归——功能验证跟连哪个后端无关");
+    }
+
+    /**
+     * 这一条守住的是安全边界：装包类流程<b>必须</b>绑环境。
+     * 测试环境装蒲公英 debug 包、线上装渠道包，是两套完全不同的路径，
+     * 混了会在线上回归里装上一个 debug 包。
+     */
+    @Test
+    void 默认仍然绑环境() {
+        UiFlow f = flow("ONLINE", "PROD");
+
+        assertFalse(service.isBatchEligible(f, TestEnvironment.TEST, RunTrack.REGRESSION),
+                "没显式标不绑的一律按绑处理——存量流程一条都不能改行为");
+    }
+
+    @Test
+    void 显式标了绑定就按绑处理() {
+        UiFlow f = flow("ONLINE", "PROD");
+        f.setEnvBound(true);
+
+        assertFalse(service.isBatchEligible(f, TestEnvironment.TEST, RunTrack.REGRESSION));
+    }
+
     /**
      * 回归流程<b>照旧绑环境</b>：线上回归和测试回归本来就走不同的流程
      * （装包方式、渠道都不同），这一条不能跟着一起放开。
@@ -186,11 +264,11 @@ class RegressionEnvironmentTest {
 
     // ==================== 标签 ====================
 
-    /** 生产的任务名不带后缀——存量报告的名字不能因为加了这个功能集体变样 */
+    /** 任务名两边都带环境标记，列表里不用点开就能分清 */
     @Test
-    void 只有测试环境带标签() {
-        assertEquals("", TestEnvironment.tag(null));
-        assertEquals("", TestEnvironment.tag(TestEnvironment.PROD));
+    void 任务名带环境标记() {
+        assertEquals("[生产环境]", TestEnvironment.tag(null));
+        assertEquals("[生产环境]", TestEnvironment.tag(TestEnvironment.PROD));
         assertEquals("[测试环境]", TestEnvironment.tag(TestEnvironment.TEST));
         assertEquals("生产环境", TestEnvironment.label(null));
         assertEquals("测试环境", TestEnvironment.label("TEST"));

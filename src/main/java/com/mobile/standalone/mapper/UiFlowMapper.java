@@ -14,7 +14,8 @@ public interface UiFlowMapper {
             @Param("platform") String platform,
             @Param("catalog") String catalog,
             @Param("componentOnly") Boolean componentOnly,
-            @Param("environment") String environment
+            @Param("environment") String environment,
+            @Param("name") String name
     );
 
     /**
@@ -27,7 +28,9 @@ public interface UiFlowMapper {
             @Param("appId") String appId,
             @Param("platform") String platform,
             @Param("environment") String environment,
-            @Param("catalogs") List<String> catalogs
+            @Param("catalogs") List<String> catalogs,
+            /** 已发布的线上包只跑 ONLINE 流程——它里面没有本版新功能 */
+            @Param("onlineOnly") boolean onlineOnly
     );
 
     UiFlow findById(@Param("id") String id);

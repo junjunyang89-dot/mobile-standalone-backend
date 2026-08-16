@@ -34,8 +34,8 @@ public final class TestEnvironment {
         return isTest(raw) ? "测试环境" : "生产环境";
     }
 
-    /** 任务名后缀：只有测试环境才加，避免存量生产任务的名字集体变样 */
+    /** 任务名里的环境标记，方便列表一眼区分本次跑的是哪边 */
     public static String tag(String raw) {
-        return isTest(raw) ? "[测试环境]" : "";
+        return isTest(raw) ? "[测试环境]" : "[生产环境]";
     }
 }

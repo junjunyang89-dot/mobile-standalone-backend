@@ -20,6 +20,7 @@
         <result property="config" column="config"/>
         <result property="flowId" column="flow_id"/>
         <result property="runTrack" column="run_track"/>
+        <result property="workerId" column="worker_id"/>
     </resultMap>
     
     <select id="findAll" resultMap="TaskResultMap">
@@ -27,13 +28,15 @@
     </select>
     
     <!--
-      只认 AUTOMATION 轨。回归批次跑的是生产包，用例写的是本次提测的功能，
-      拿回归的结果给用例贴「通过」等于覆盖率造假。
-      这个字段是后加的，老数据没有，会显示成「未执行」——分不清是哪条轨时，宁可说不知道。
+      任何一次执行都算。
+      原来只认 AUTOMATION 轨，理由是「回归跑的是生产包、用例写的是新功能，贴过去是造假」。
+      那个理由现在不成立了：回归批次跑线上老包时，本版新功能的流程已经被 release_stage
+      过滤掉了，能跑到的流程一定是「这个包里有这个功能」——那就是一次有效执行。
+      继续只认一条轨的话，SHARED 流程只在回归里跑过就会显示「已覆盖但从没跑过」。
     -->
     <select id="findLatestByFlowId" resultMap="TaskResultMap">
         SELECT * FROM tasks
-        WHERE flow_id = #{flowId} AND run_track = 'AUTOMATION'
+        WHERE flow_id = #{flowId}
         ORDER BY COALESCE(updated_at, created_at) DESC
         LIMIT 1
     </select>
@@ -146,8 +149,8 @@
     </select>
     
     <insert id="insert">
-        INSERT INTO tasks (id, name, description, project_path, script_path, platform, device_id, app_id, task_type, scenario_key, status, created_at, updated_at, config, flow_id, run_track)
-        VALUES (#{id}, #{name}, #{description}, #{projectPath}, #{scriptPath}, #{platform}, #{deviceId}, #{appId}, #{taskType}, #{scenarioKey}, #{status}, #{createdAt}, #{updatedAt}, #{config}, #{flowId}, #{runTrack})
+        INSERT INTO tasks (id, name, description, project_path, script_path, platform, device_id, app_id, task_type, scenario_key, status, created_at, updated_at, config, flow_id, run_track, worker_id)
+        VALUES (#{id}, #{name}, #{description}, #{projectPath}, #{scriptPath}, #{platform}, #{deviceId}, #{appId}, #{taskType}, #{scenarioKey}, #{status}, #{createdAt}, #{updatedAt}, #{config}, #{flowId}, #{runTrack}, #{workerId})
     </insert>
 
     <update id="update">

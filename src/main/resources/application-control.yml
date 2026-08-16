@@ -1,0 +1,5 @@
+# 控制面：不扫本机 USB、不跑 Appium。库仍是这一台的 MySQL。
+# 启动：mvn spring-boot:run -Dspring-boot.run.profiles=control
+app:
+  node:
+    role: CONTROL

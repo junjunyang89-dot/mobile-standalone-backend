@@ -4,6 +4,7 @@ import com.mobile.standalone.dto.ExecutionLogEntryDto;
 import com.mobile.standalone.service.AppPackageInstallService;
 import com.mobile.standalone.service.InstallMode;
 import com.mobile.standalone.service.InstallRequest;
+import com.mobile.standalone.service.PgyerAppService;
 import com.mobile.standalone.service.keyword.KeywordContext;
 import com.mobile.standalone.service.keyword.KeywordHandler;
 import com.mobile.standalone.service.keyword.ParamDef;
@@ -87,6 +88,13 @@ public class InstallAppHandler implements KeywordHandler {
                 ParamDef.string("apkPath", "本地包路径"),
                 ParamDef.string("qrPayload", "扫码安装页URL"),
                 ParamDef.bool("uninstallFirst", "安装前先卸载", true)
+                        .withHelp("关掉＝覆盖安装（保留旧数据）。升级测试必须关，"
+                                + "否则测的还是全新安装，验不到数据迁移"),
+                ParamDef.enumOf("useVersion", "装哪个版本",
+                                List.of("LATEST", "PREVIOUS"), "LATEST")
+                        .withHelp("LATEST＝最新版；PREVIOUS＝<b>上一个版本</b>，自动从蒲公英取，"
+                                + "用来搭升级测试的第一步。自动取而不是填死版本号——"
+                                + "填死的话每发一版都要回来改流程，忘了就变成拿新版覆盖新版，测不到东西还照样是绿的")
         );
     }
 
@@ -155,13 +163,44 @@ public class InstallAppHandler implements KeywordHandler {
      * 那就是他这次的意图。若沿用通用规则，流程里哪天被填进一个 buildKey，选择器就会静默失效——
      * 界面上选了 A，实际装的是 B，而日志显示「安装成功」。
      */
-    private String resolveBuildKey(KeywordContext ctx) {
+    private String resolveBuildKey(KeywordContext ctx) throws Exception {
         String picked = ctx.getExecParams() == null ? null
                 : ctx.getExecParams().get("pgyerBuildKeyOverride");
         if (picked != null && !picked.isBlank()) {
             return picked.trim();
         }
-        return ctx.strOrExec("pgyerBuildKey");
+        String explicit = ctx.strOrExec("pgyerBuildKey");
+        if (explicit != null && !explicit.isBlank()) {
+            return explicit;
+        }
+        // 「装上一个版本」：升级测试的第一步，自动取，不用人每版回来改版本号
+        if ("PREVIOUS".equalsIgnoreCase(ctx.strOrExec("useVersion"))) {
+            return resolvePreviousBuildKey(ctx);
+        }
+        return null;
+    }
+
+    /**
+     * @return 上一个版本的 buildKey；只有一个版本时抛出——
+     *         那说明这条升级流程建在了一个还没有历史版本的应用上，
+     *         静默退回装最新版的话，跑出来是绿的但什么都没验到
+     */
+    private String resolvePreviousBuildKey(KeywordContext ctx) throws Exception {
+        PgyerAppService pgyer = ctx.getRuntime().pgyerAppService();
+        if (pgyer == null) {
+            throw ctx.fail("安装应用", "蒲公英服务不可用，取不到上一个版本", null,
+                    "「装哪个版本＝上一版」需要蒲公英；改成 LATEST 或手填 buildKey");
+        }
+        String appKey = ctx.strOrExec("pgyerAppKey");
+        PgyerAppService.PgyerBuildVo prev = pgyer.previousBuild(
+                appKey, ctx.isIos() ? "IOS" : "ANDROID", null);
+        if (prev == null) {
+            throw ctx.fail("安装应用", "蒲公英上只有一个版本，没有「上一版」可装", null,
+                    "升级测试要求至少有两个不同版本。等下次发版后再跑这条流程");
+        }
+        ctx.ok("选版本", "上一个版本：" + prev.getBuildVersion()
+                + "(build " + prev.getBuildBuildVersion() + ")");
+        return prev.getBuildKey();
     }
 
     private boolean resolveUninstallFirst(KeywordContext ctx) {

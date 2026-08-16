@@ -93,7 +93,7 @@ class AiTestCaseFlowLinkTest {
         final Map<String, UiFlow> flows = new HashMap<>();
 
         FakeFlowService() {
-            super(null, null);
+            super(null, null, null);
         }
 
         @Override
@@ -269,23 +269,33 @@ class AiTestCaseFlowLinkTest {
     // ==================== 只有自动化编排轨的流程能覆盖用例 ====================
 
     /**
-     * 「小米手机渠道包登录完美世界电竞」这种仅回归的流程，挂到用例上会得到一个
-     * 「已覆盖却从来没跑过」的绿标记——它永远不会在自动化轨上执行。
+     * 判断依据是「这条流程做没做那件事」，不是它出现在哪个入口。
+     * 一条仅回归的登录流程确实执行了这条用例的步骤，那它就是这条用例的实现。
      */
     @Test
-    void 仅回归的流程不能关联用例() {
-        flows.put("uif-reg", "小米手机渠道包登录完美世界电竞", "Android", "ONLINE");
+    void 仅回归的流程也能关联用例() {
+        flows.put("uif-reg", "登录流程", "Android", "ONLINE");
+        AiTestCase c = service.createManual(newCase("协议勾选框", "Android"));
+
+        assertEquals("uif-reg",
+                service.updateManual(c.getId(), patchOf("flowId", "uif-reg")).getFlowId());
+    }
+
+    /** 装包不执行任何用例步骤——它是把设备弄成可测状态，挂上去必然是假覆盖 */
+    @Test
+    void 装包准备不能关联用例() {
+        flows.put("uif-install", "安装蒲公英回归包", "Android", "INSTALL");
         AiTestCase c = service.createManual(newCase("协议勾选框", "Android"));
 
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> service.updateManual(c.getId(), patchOf("flowId", "uif-reg")));
+                () -> service.updateManual(c.getId(), patchOf("flowId", "uif-install")));
 
-        assertTrue(e.getMessage().contains("仅回归"), e.getMessage());
-        assertTrue(e.getMessage().contains("自动化编排"), "要说清楚怎么才能关联：" + e.getMessage());
+        assertTrue(e.getMessage().contains("假覆盖"), e.getMessage());
     }
 
+    /** 性能流程采的是资源曲线，不验功能 */
     @Test
-    void 仅性能的流程也不能关联() {
+    void 仅性能的流程不能关联() {
         flows.put("uif-perf", "启动耗时", "Android", "PERFORMANCE");
         AiTestCase c = service.createManual(newCase("协议勾选框", "Android"));
 
@@ -294,19 +304,18 @@ class AiTestCaseFlowLinkTest {
     }
 
     /**
-     * 「回归 + 自动化编排」也不行。它进回归批次，就属于回归那一套；
-     * 其中的「自动化编排」只是能在本页单跑调试，不代表它是某条用例的自动化实现。
-     * 「测试环境发版前回归-登录」就是这一类。
+     * 本组核心。「回归 + 自动化编排」是大多数流程的用途，必须能关联——
+     * 一条流程既进回归批次、又确实执行了某条用例的步骤，这两件事是正交的，
+     * 硬要二选一等于让大多数流程都关联不上用例，覆盖率永远是 0。
      */
     @Test
-    void 回归加自动化的流程也不能关联() {
+    void 回归加自动化的流程能关联() {
         flows.put("uif-shared", "测试环境发版前回归-登录", "Android", "SHARED");
         AiTestCase c = service.createManual(newCase("协议勾选框", "Android"));
 
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> service.updateManual(c.getId(), patchOf("flowId", "uif-shared")));
-
-        assertTrue(e.getMessage().contains("仅自动化编排"), "要说清楚该改成什么：" + e.getMessage());
+        assertEquals("uif-shared",
+                service.updateManual(c.getId(), patchOf("flowId", "uif-shared")).getFlowId());
+        assertEquals(Boolean.TRUE, service.toView(mapper.findById(c.getId())).get("automated"));
     }
 
     @Test
@@ -322,27 +331,27 @@ class AiTestCaseFlowLinkTest {
      * 存量脏数据：之前已经挂上去的回归流程，不用写迁移脚本改数据——
      * 视图里直接判成未覆盖，因为它本来就没被自动化覆盖。
      */
+    /** 挂了装包流程的用例显示为未覆盖，并标出是「挂错了流程」而不是「没挂」 */
     @Test
-    void 存量挂了回归流程的用例显示为未覆盖() {
-        flows.put("uif-reg", "小米手机渠道包登录", "Android", "ONLINE");
+    void 挂了装包流程的用例显示为未覆盖() {
+        flows.put("uif-install", "安装蒲公英回归包", "Android", "INSTALL");
         AiTestCase c = service.createManual(newCase("协议勾选框", "Android"));
-        c.setFlowId("uif-reg");
+        c.setFlowId("uif-install");
         mapper.update(c);
 
         Map<String, Object> view = service.toView(mapper.findById(c.getId()));
 
-        assertEquals(Boolean.FALSE, view.get("automated"),
-                "回归流程不在自动化轨上跑，算已覆盖就是骗人");
-        assertEquals(Boolean.TRUE, view.get("flowNotAutomation"), "要能看出是「挂错了流程」而不是「没挂」");
+        assertEquals(Boolean.FALSE, view.get("automated"), "装包跑通不说明任何功能是好的");
+        assertEquals(Boolean.TRUE, view.get("flowNotAutomation"));
     }
 
     @Test
-    void 从流程侧也拦住仅回归的流程() {
-        flows.put("uif-reg", "回归流程", "Android", "ONLINE");
+    void 从流程侧也拦住装包流程() {
+        flows.put("uif-install", "安装包", "Android", "INSTALL");
         AiTestCase c = service.createManual(newCase("协议勾选框", "Android"));
 
         assertThrows(IllegalArgumentException.class,
-                () -> service.setFlowCases("uif-reg", List.of(c.getId())));
+                () -> service.setFlowCases("uif-install", List.of(c.getId())));
     }
 
     // ==================== 从流程侧批量设置 ====================

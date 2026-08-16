@@ -96,6 +96,442 @@ public class ReleaseDocService {
         return fetchWikiViewHtml(props.getIssueListPageId());
     }
 
+    /**
+     * 版本归档：按 Wiki 汇总页版本标题拉全部 JIRA 单（不过滤状态，便于历史留档）。
+     */
+    public List<IssueRow> listIssuesForArchive(String versionLabel) {
+        requireCreds();
+        if (versionLabel == null || versionLabel.isBlank()) {
+            throw new IllegalArgumentException("请填写版本定位文案（如 8.6 国内客户端）");
+        }
+        String version = versionLabel.trim();
+        GenerateResult out = new GenerateResult();
+        out.setVersion(version);
+        String storageOrHtml = fetchWikiStoragePrefer(props.getIssueListPageId());
+        List<IssueRef> refs = findIssuesUnderVersion(storageOrHtml, version, out, true);
+        if (refs.isEmpty()) {
+            throw new IllegalStateException("在汇总页未找到版本「" + version + "」下的 JIRA 单，请检查文案是否与 Wiki 标题一致");
+        }
+        log.info("[version-archive] 版本「{}」JIRA 命中 {} 单（含全部状态）", version, refs.size());
+        String jiraBase = resolveJiraBase(refs);
+        List<IssueRow> rows = new ArrayList<>();
+        for (IssueRef ref : refs) {
+            rows.add(fetchIssueRowForArchive(jiraBase, ref));
+        }
+        return rows;
+    }
+
+    /**
+     * 重新打开并流转到 Testing，再分配给指定 QA（经办人 + QA Assignee）。
+     * 典型路径：已关闭 → Reopen → 重新打开 → Start Progress → 处理中 → Submit for QA → Testing。
+     */
+    public String reopenAndAssign(String issueKey, String username, String comment) {
+        requireCreds();
+        if (issueKey == null || issueKey.isBlank()) {
+            throw new IllegalArgumentException("issueKey 必填");
+        }
+        if (username == null || username.isBlank()) {
+            throw new IllegalArgumentException("username 必填");
+        }
+        String key = issueKey.trim().toUpperCase(Locale.ROOT);
+        String user = username.trim();
+        String jiraBase = resolveJiraBase(List.of());
+        try {
+            List<String> path = new ArrayList<>();
+            boolean commentSent = false;
+            for (int step = 0; step < 8; step++) {
+                String status = fetchIssueStatus(jiraBase, key);
+                if (isTestingStatus(status)) {
+                    break;
+                }
+                JsonNode transitions = fetchTransitions(jiraBase, key);
+                JsonNode pick = pickTowardTesting(transitions);
+                if (pick == null) {
+                    throw new IllegalStateException(key + " 状态=" + status
+                            + "，无法继续转到 Testing。当前可选: " + summarizeTransitions(transitions)
+                            + (path.isEmpty() ? "" : "；已走: " + String.join(" → ", path)));
+                }
+                String tName = pick.path("name").asText("?");
+                String toName = pick.path("to").path("name").asText("");
+                String tId = pick.path("id").asText("");
+                String cmt = null;
+                if (!commentSent && comment != null && !comment.isBlank()) {
+                    cmt = comment;
+                    commentSent = true;
+                }
+                doTransition(jiraBase, key, tId, cmt, false);
+                path.add(tName + "→" + toName);
+                log.info("[release-doc] {} 流转 {}", key, path.get(path.size() - 1));
+            }
+
+            String statusAfter = fetchIssueStatus(jiraBase, key);
+            if (!isTestingStatus(statusAfter)) {
+                throw new IllegalStateException(key + " 结束后状态仍为「" + statusAfter + "」，期望 Testing。"
+                        + " 已走: " + String.join(" → ", path));
+            }
+
+            assignIssue(jiraBase, key, user);
+            path.add("assign=" + user);
+            return String.join(" → ", path) + "（当前状态=" + statusAfter + "）";
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("重新打开到 Testing/分配 " + key + " 失败: " + e.getMessage(), e);
+        }
+    }
+
+    private static boolean isTestingStatus(String status) {
+        if (status == null || status.isBlank()) return false;
+        String s = status.trim().toLowerCase(Locale.ROOT);
+        return s.equals("testing") || status.contains("测试中");
+    }
+
+    /** 优先通向 Testing；否则按 Reopen → Start Progress → Submit for QA 顺序推进 */
+    private static JsonNode pickTowardTesting(JsonNode transitions) {
+        if (transitions == null || !transitions.isArray()) return null;
+        JsonNode toTesting = null;
+        JsonNode submitQa = null;
+        JsonNode startProgress = null;
+        JsonNode reopen = null;
+        JsonNode other = null;
+        for (JsonNode t : transitions) {
+            String name = t.path("name").asText("");
+            String lower = name.toLowerCase(Locale.ROOT);
+            String toName = t.path("to").path("name").asText("");
+            String toLower = toName.toLowerCase(Locale.ROOT);
+            if (toLower.equals("testing") || toName.contains("测试中")) {
+                toTesting = t;
+            } else if (lower.contains("submit") && lower.contains("qa")
+                    || name.contains("提交") && (name.contains("QA") || name.contains("测试"))) {
+                submitQa = t;
+            } else if (lower.contains("start progress") || toName.contains("处理中")
+                    || toLower.contains("progress") && !toLower.contains("stop")) {
+                startProgress = t;
+            } else if (lower.contains("reopen") || name.contains("重新打开") || name.contains("重开")
+                    || toName.contains("重新打开") || toLower.contains("reopened")) {
+                reopen = t;
+            } else if (other == null && !isTerminalClosedStatus(toName)) {
+                other = t;
+            }
+        }
+        if (toTesting != null) return toTesting;
+        if (submitQa != null) return submitQa;
+        if (startProgress != null) return startProgress;
+        if (reopen != null) return reopen;
+        return other;
+    }
+
+    private void assignIssue(String jiraBase, String key, String username) throws Exception {
+        // 经办人
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("assignee", Map.of("name", username));
+
+        // 尝试写入 QA Assignee 自定义字段（多为多选用户，需数组）
+        String qaField = findQaAssigneeFieldId(jiraBase, key);
+        if (qaField != null) {
+            fields.put(qaField, List.of(Map.of("name", username)));
+        }
+
+        Map<String, Object> body = Map.of("fields", fields);
+        String url = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(key, StandardCharsets.UTF_8);
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(60))
+                .header("Authorization", basicAuthHeader())
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .method("PUT", HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body)))
+                .build();
+        HttpResponse<String> resp = send(req);
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            // 仅 assignee 再试一次
+            Map<String, Object> bare = Map.of("fields", Map.of("assignee", Map.of("name", username)));
+            HttpRequest r2 = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(60))
+                    .header("Authorization", basicAuthHeader())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .method("PUT", HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(bare)))
+                    .build();
+            HttpResponse<String> r2resp = send(r2);
+            if (r2resp.statusCode() < 200 || r2resp.statusCode() >= 300) {
+                throw new IllegalStateException("分配失败 HTTP " + resp.statusCode() + ": "
+                        + truncate(resp.body(), 400));
+            }
+        }
+        log.info("[release-doc] {} 已分配给 {}", key, username);
+    }
+
+    private String findQaAssigneeFieldId(String jiraBase, String key) {
+        try {
+            String url = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(key, StandardCharsets.UTF_8)
+                    + "?expand=names&fields=*navigable";
+            HttpResponse<String> resp = send(authGet(url));
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) return null;
+            JsonNode names = JSON.readTree(resp.body()).path("names");
+            if (!names.isObject()) return null;
+            var it = names.fields();
+            while (it.hasNext()) {
+                var e = it.next();
+                String display = e.getValue().asText("");
+                if (display.equalsIgnoreCase("QA Assignee") || display.equalsIgnoreCase("Qa Assignee")
+                        || display.equals("QA") || display.contains("QA Assignee")) {
+                    return e.getKey();
+                }
+            }
+        } catch (Exception ignored) {
+            // ignore
+        }
+        return null;
+    }
+
+    /**
+     * 通过 JIRA transition 关单。
+     * Testing 等状态往往没有直接「关闭」，会先走 Resolve/已解决，再 Close（最多 5 步）。
+     * @return 使用的流转路径，如 {@code Resolve Issue → Close Issue}
+     */
+    public String closeIssue(String issueKey, String comment) {
+        requireCreds();
+        if (issueKey == null || issueKey.isBlank()) {
+            throw new IllegalArgumentException("issueKey 必填");
+        }
+        String key = issueKey.trim().toUpperCase(Locale.ROOT);
+        String jiraBase = resolveJiraBase(List.of());
+        List<String> path = new ArrayList<>();
+        boolean commentSent = false;
+        try {
+            for (int step = 0; step < 5; step++) {
+                String status = fetchIssueStatus(jiraBase, key);
+                if (isTerminalClosedStatus(status)) {
+                    if (path.isEmpty()) {
+                        return "已是关闭状态(" + status + ")";
+                    }
+                    return String.join(" → ", path);
+                }
+
+                JsonNode transitions = fetchTransitions(jiraBase, key);
+                JsonNode pick = pickCloseTransition(transitions);
+                if (pick == null) {
+                    pick = pickResolveTransition(transitions);
+                }
+                if (pick == null) {
+                    throw new IllegalStateException(key + " 状态=" + status
+                            + "，无可通向关闭的流转。当前可选: " + summarizeTransitions(transitions));
+                }
+
+                String tName = pick.path("name").asText("?");
+                String tId = pick.path("id").asText("");
+                String commentThisStep = null;
+                if (!commentSent && comment != null && !comment.isBlank()) {
+                    commentThisStep = comment;
+                    commentSent = true;
+                }
+                boolean resolveLike = isResolveTransition(pick);
+                doTransition(jiraBase, key, tId, commentThisStep, resolveLike);
+                path.add(tName);
+                log.info("[release-doc] {} 流转 {} (status was {})", key, tName, status);
+            }
+            String status = fetchIssueStatus(jiraBase, key);
+            if (isTerminalClosedStatus(status)) {
+                return String.join(" → ", path);
+            }
+            throw new IllegalStateException(key + " 多步流转后仍为「" + status + "」: " + String.join(" → ", path));
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("关闭 " + key + " 失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String fetchIssueStatus(String jiraBase, String key) throws Exception {
+        String url = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(key, StandardCharsets.UTF_8)
+                + "?fields=status";
+        HttpResponse<String> resp = send(authGet(url));
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            throw new IllegalStateException("读取状态失败 HTTP " + resp.statusCode());
+        }
+        return JSON.readTree(resp.body()).path("fields").path("status").path("name").asText("");
+    }
+
+    private JsonNode fetchTransitions(String jiraBase, String key) throws Exception {
+        String tUrl = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(key, StandardCharsets.UTF_8)
+                + "/transitions?expand=transitions.fields";
+        HttpResponse<String> tResp = send(authGet(tUrl));
+        if (tResp.statusCode() < 200 || tResp.statusCode() >= 300) {
+            throw new IllegalStateException("获取流转失败 HTTP " + tResp.statusCode() + ": "
+                    + truncate(tResp.body(), 300));
+        }
+        return JSON.readTree(tResp.body()).path("transitions");
+    }
+
+    private static boolean isTerminalClosedStatus(String status) {
+        if (status == null || status.isBlank()) return false;
+        String s = status.trim().toLowerCase(Locale.ROOT);
+        return status.contains("已关闭") || s.equals("closed") || s.equals("done");
+    }
+
+    private static JsonNode pickCloseTransition(JsonNode transitions) {
+        if (transitions == null || !transitions.isArray()) return null;
+        for (JsonNode t : transitions) {
+            if (isCloseTransition(t)) return t;
+        }
+        return null;
+    }
+
+    private static JsonNode pickResolveTransition(JsonNode transitions) {
+        if (transitions == null || !transitions.isArray()) return null;
+        for (JsonNode t : transitions) {
+            if (isResolveTransition(t)) return t;
+        }
+        return null;
+    }
+
+    private static boolean isCloseTransition(JsonNode t) {
+        String name = t.path("name").asText("");
+        String lower = name.toLowerCase(Locale.ROOT);
+        String toName = t.path("to").path("name").asText("");
+        String toLower = toName.toLowerCase(Locale.ROOT);
+        if (name.contains("关闭") || lower.contains("close") || lower.equals("done")
+                || name.contains("已关闭")) {
+            return true;
+        }
+        return toName.contains("已关闭") || toLower.equals("closed") || toLower.equals("done");
+    }
+
+    private static boolean isResolveTransition(JsonNode t) {
+        String name = t.path("name").asText("");
+        String lower = name.toLowerCase(Locale.ROOT);
+        String toName = t.path("to").path("name").asText("");
+        // 不要把 Close 再当成 Resolve
+        if (isCloseTransition(t)) return false;
+        if (lower.contains("resolve") || name.contains("解决") || name.contains("已解决")
+                || lower.contains("fixed") || name.contains("完成") && !lower.contains("incomplete")) {
+            return true;
+        }
+        return toName.contains("已解决") || toName.equalsIgnoreCase("resolved")
+                || toName.contains("解决");
+    }
+
+    private static String summarizeTransitions(JsonNode transitions) {
+        if (transitions == null || !transitions.isArray() || transitions.isEmpty()) {
+            return "（无）";
+        }
+        List<String> names = new ArrayList<>();
+        for (JsonNode t : transitions) {
+            String name = t.path("name").asText("?");
+            String to = t.path("to").path("name").asText("");
+            names.add(to.isBlank() ? name : name + "→" + to);
+        }
+        return String.join(", ", names);
+    }
+
+    private void doTransition(String jiraBase, String key, String transitionId,
+                              String comment, boolean withResolution) throws Exception {
+        String tUrl = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(key, StandardCharsets.UTF_8)
+                + "/transitions";
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("transition", Map.of("id", transitionId));
+        if (withResolution) {
+            // Testing → Resolve 常要求填 resolution，缺了会 400
+            body.put("fields", Map.of("resolution", Map.of("name", "Fixed")));
+        }
+        if (comment != null && !comment.isBlank()) {
+            body.put("update", Map.of(
+                    "comment", List.of(Map.of(
+                            "add", Map.of("body", comment)
+                    ))
+            ));
+        }
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(tUrl))
+                .timeout(Duration.ofSeconds(60))
+                .header("Authorization", basicAuthHeader())
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body)))
+                .build();
+        HttpResponse<String> resp = send(req);
+        if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
+            return;
+        }
+        // resolution 名不对时去掉重试一次（部分项目用 Done / 完成）
+        if (withResolution && resp.statusCode() == 400) {
+            for (String resName : List.of("Done", "完成", "Fixed")) {
+                Map<String, Object> retry = new LinkedHashMap<>();
+                retry.put("transition", Map.of("id", transitionId));
+                retry.put("fields", Map.of("resolution", Map.of("name", resName)));
+                if (comment != null && !comment.isBlank()) {
+                    retry.put("update", Map.of(
+                            "comment", List.of(Map.of("add", Map.of("body", comment)))
+                    ));
+                }
+                HttpRequest r2 = HttpRequest.newBuilder()
+                        .uri(URI.create(tUrl))
+                        .timeout(Duration.ofSeconds(60))
+                        .header("Authorization", basicAuthHeader())
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(retry)))
+                        .build();
+                HttpResponse<String> r2resp = send(r2);
+                if (r2resp.statusCode() >= 200 && r2resp.statusCode() < 300) {
+                    return;
+                }
+            }
+            // 最后再不带 resolution 试一次
+            Map<String, Object> bare = new LinkedHashMap<>();
+            bare.put("transition", Map.of("id", transitionId));
+            if (comment != null && !comment.isBlank()) {
+                bare.put("update", Map.of(
+                        "comment", List.of(Map.of("add", Map.of("body", comment)))
+                ));
+            }
+            HttpRequest r3 = HttpRequest.newBuilder()
+                    .uri(URI.create(tUrl))
+                    .timeout(Duration.ofSeconds(60))
+                    .header("Authorization", basicAuthHeader())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(bare)))
+                    .build();
+            HttpResponse<String> r3resp = send(r3);
+            if (r3resp.statusCode() >= 200 && r3resp.statusCode() < 300) {
+                return;
+            }
+            throw new IllegalStateException("流转失败 HTTP " + resp.statusCode() + ": "
+                    + truncate(resp.body(), 400));
+        }
+        throw new IllegalStateException("流转失败 HTTP " + resp.statusCode() + ": "
+                + truncate(resp.body(), 400));
+    }
+
+    /** 归档专用：不过滤状态 */
+    private IssueRow fetchIssueRowForArchive(String jiraBase, IssueRef ref) {
+        try {
+            String url = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(ref.key, StandardCharsets.UTF_8)
+                    + "?fields=summary,status,assignee";
+            HttpResponse<String> resp = send(authGet(url));
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                throw new IllegalStateException("JIRA " + ref.key + " HTTP " + resp.statusCode());
+            }
+            JsonNode fields = JSON.readTree(resp.body()).path("fields");
+            IssueRow row = new IssueRow();
+            row.setIssueKey(ref.key);
+            row.setIssueUrl(trimSlash(jiraBase) + "/browse/" + ref.key);
+            row.setSummary(fields.path("summary").asText(ref.key));
+            row.setStatusName(fields.path("status").path("name").asText(""));
+            row.setAssignee(fields.path("assignee").path("displayName").asText(""));
+            String qa = fields.path("assignee").path("displayName").asText("");
+            row.setQaAssignee(qa);
+            return row;
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("拉取 JIRA " + ref.key + " 失败: " + e.getMessage(), e);
+        }
+    }
+
     public GenerateResult generate(GenerateRequest req) {
         GenerateResult out = new GenerateResult();
         out.setPreviewOnly(Boolean.TRUE.equals(req.getPreviewOnly()));
@@ -127,7 +563,7 @@ public class ReleaseDocService {
 
         logStep(out, "读取汇总页 pageId=" + props.getIssueListPageId());
         String storageOrHtml = fetchWikiStoragePrefer(props.getIssueListPageId());
-        List<IssueRef> refs = findIssuesUnderVersion(storageOrHtml, out.getVersion(), out);
+        List<IssueRef> refs = findIssuesUnderVersion(storageOrHtml, out.getVersion(), out, false);
         if (refs.isEmpty()) {
             throw new IllegalStateException("在汇总页未找到版本「" + out.getVersion() + "」下的 JIRA 单，请检查文案是否与 Wiki 标题一致（如 7.20 海外H5）");
         }
@@ -313,8 +749,14 @@ public class ReleaseDocService {
     /**
      * Wiki 上版本区是「Jira 宏」：按标题匹配后抽出 jqlQuery，用 JIRA search 拿摘要列表（可点击的那些单）。
      * 抽不到宏时，回退 fixVersion = 版本名 的默认 JQL。
+     *
+     * @param allStatuses true=归档用，不过滤状态；false=发版文档用，仅 include-statuses
      */
     List<IssueRef> findIssuesUnderVersion(String html, String version, GenerateResult out) {
+        return findIssuesUnderVersion(html, version, out, false);
+    }
+
+    List<IssueRef> findIssuesUnderVersion(String html, String version, GenerateResult out, boolean allStatuses) {
         String jql = extractJqlForVersion(html, version);
         if (jql == null || jql.isBlank()) {
             jql = "project = APP AND fixVersion = \"" + version.trim() + "\" AND issuetype != Sub-task order by created DESC";
@@ -322,7 +764,7 @@ public class ReleaseDocService {
         } else {
             logStep(out, "从 Wiki Jira 宏解析到 JQL: " + jql);
         }
-        return searchJiraIssues(jql, out);
+        return searchJiraIssues(jql, out, allStatuses);
     }
 
     /**
@@ -373,38 +815,61 @@ public class ReleaseDocService {
     }
 
     private List<IssueRef> searchJiraIssues(String jql, GenerateResult out) {
+        return searchJiraIssues(jql, out, false);
+    }
+
+    private List<IssueRef> searchJiraIssues(String jql, GenerateResult out, boolean allStatuses) {
         try {
             String jiraBase = trimSlash(
                     props.getJiraBaseUrl() != null && !props.getJiraBaseUrl().isBlank()
                             ? props.getJiraBaseUrl()
                             : "https://jira.shdev.net");
-            String url = jiraBase + "/rest/api/2/search"
-                    + "?jql=" + URLEncoder.encode(jql, StandardCharsets.UTF_8)
-                    + "&fields=summary,key,status"
-                    + "&maxResults=100";
-            HttpResponse<String> resp = send(authGet(url));
-            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-                throw new IllegalStateException("JIRA 搜索失败 HTTP " + resp.statusCode() + ": " + truncate(resp.body(), 300));
-            }
-            JsonNode root = JSON.readTree(resp.body());
             List<IssueRef> list = new ArrayList<>();
             List<String> skipped = new ArrayList<>();
-            for (JsonNode issue : root.path("issues")) {
-                String key = issue.path("key").asText("");
-                if (key.isBlank()) continue;
-                String statusName = issue.path("fields").path("status").path("name").asText("");
-                if (!isIncludedStatus(statusName)) {
-                    skipped.add(key + "(" + (statusName.isBlank() ? "?" : statusName) + ")");
-                    continue;
+            int startAt = 0;
+            final int pageSize = 100;
+            int total = Integer.MAX_VALUE;
+            while (startAt < total) {
+                String url = jiraBase + "/rest/api/2/search"
+                        + "?jql=" + URLEncoder.encode(jql, StandardCharsets.UTF_8)
+                        + "&fields=summary,key,status"
+                        + "&startAt=" + startAt
+                        + "&maxResults=" + pageSize;
+                HttpResponse<String> resp = send(authGet(url));
+                if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                    throw new IllegalStateException("JIRA 搜索失败 HTTP " + resp.statusCode() + ": "
+                            + truncate(resp.body(), 300));
                 }
-                list.add(new IssueRef(key, jiraBase + "/browse/" + key));
+                JsonNode root = JSON.readTree(resp.body());
+                total = root.path("total").asInt(0);
+                JsonNode issues = root.path("issues");
+                if (!issues.isArray() || issues.isEmpty()) {
+                    break;
+                }
+                for (JsonNode issue : issues) {
+                    String key = issue.path("key").asText("");
+                    if (key.isBlank()) continue;
+                    String statusName = issue.path("fields").path("status").path("name").asText("");
+                    if (!allStatuses && !isIncludedStatus(statusName)) {
+                        skipped.add(key + "(" + (statusName.isBlank() ? "?" : statusName) + ")");
+                        continue;
+                    }
+                    list.add(new IssueRef(key, jiraBase + "/browse/" + key));
+                }
+                startAt += issues.size();
+                if (issues.size() < pageSize) {
+                    break;
+                }
             }
             if (!skipped.isEmpty()) {
                 logStep(out, "按状态跳过 " + skipped.size() + " 单: " + String.join(", ", skipped)
                         + "（仅统计: " + String.join("、", includeStatusList()) + "）");
             }
-            logStep(out, "JIRA search 命中可统计 " + list.size() + " 单: "
-                    + list.stream().map(IssueRef::key).reduce((a, b) -> a + ", " + b).orElse("-"));
+            logStep(out, "JIRA search 命中"
+                    + (allStatuses ? "（全部状态）" : "可统计")
+                    + " " + list.size() + " 单 / total≈" + (total == Integer.MAX_VALUE ? "?" : total) + ": "
+                    + list.stream().map(IssueRef::key).limit(30).reduce((a, b) -> a + ", " + b).orElse("-")
+                    + (list.size() > 30 ? "…" : ""));
             return list;
         } catch (IllegalStateException e) {
             throw e;

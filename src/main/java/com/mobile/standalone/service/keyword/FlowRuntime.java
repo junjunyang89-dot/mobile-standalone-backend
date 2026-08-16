@@ -68,4 +68,9 @@ public interface FlowRuntime {
     AppiumServerManager appiumServerManager();
 
     AppPackageInstallService appPackageInstallService();
+
+    /** 取蒲公英版本列表用；升级测试要装「上一个版本」 */
+    default com.mobile.standalone.service.PgyerAppService pgyerAppService() {
+        return null;
+    }
 }

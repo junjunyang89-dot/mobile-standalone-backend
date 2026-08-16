@@ -35,6 +35,8 @@ public class Task {
      * 而用例写的是本次提测的功能，拿前者的结果给后者贴「通过」是错的。
      */
     private String runTrack;
+    /** 在哪台执行节点跑的；列表里能看出是谁的机器 */
+    private String workerId;
     
     public enum Platform {
         ANDROID, IOS, HARMONYOS,

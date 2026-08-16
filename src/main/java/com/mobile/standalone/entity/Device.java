@@ -20,6 +20,8 @@ public class Device {
      * 迟早会配错一次，而配错的现象是「登录失败」，指向的方向完全不对。
      */
     private String environment;
+    /** 哪台执行节点扫到的这台手机；控制面自己不扫设备 */
+    private String workerId;
     
     public enum Platform {
         ANDROID, IOS, HARMONYOS,

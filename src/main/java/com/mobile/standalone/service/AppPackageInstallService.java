@@ -190,6 +190,26 @@ public class AppPackageInstallService {
                 : blankToNullStr(app.getPgyerAppKeyAndroid());
     }
 
+    /**
+     * 升级测试要装的<b>上一版</b>的 buildKey。
+     * <p>
+     * 必须显式取出来传给安装：不传 buildKey 走的是「装最新版」，
+     * 那就成了拿新版覆盖新版——一步升级路径都没走到，还照样是绿的。
+     *
+     * @return null＝取不到上一版（只有一个版本，或没配 appKey）
+     */
+    public String resolvePreviousBuildKey(String appId, Device device) {
+        String appKey = resolvePgyerAppKey(appId, device);
+        if (appKey == null) {
+            return null;
+        }
+        PgyerAppService.PgyerBuildVo prev = pgyerAppService.previousBuild(
+                appKey,
+                Device.usesIosAutomation(device.getPlatform()) ? "IOS" : "ANDROID",
+                resolvePgyerHost(appId, device));
+        return prev == null ? null : blankToNullStr(prev.getBuildKey());
+    }
+
     /** 该应用该平台的分发域名；没配则返回 null，由 PgyerAppService 退回全局默认 */
     private String resolvePgyerHost(String appId, Device device) {
         if (appId == null || appId.isBlank()) {

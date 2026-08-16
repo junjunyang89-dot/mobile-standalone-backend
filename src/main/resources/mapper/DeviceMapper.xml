@@ -12,6 +12,7 @@
         <result property="lastSeen" column="last_seen"/>
         <result property="config" column="config"/>
         <result property="environment" column="environment"/>
+        <result property="workerId" column="worker_id"/>
     </resultMap>
     
     <select id="findAll" resultMap="DeviceResultMap">
@@ -27,8 +28,8 @@
     </select>
     
     <insert id="insert">
-        INSERT INTO devices (id, name, platform, version, status, last_seen, config, environment)
-        VALUES (#{id}, #{name}, #{platform}, #{version}, #{status}, #{lastSeen}, #{config}, #{environment})
+        INSERT INTO devices (id, name, platform, version, status, last_seen, config, environment, worker_id)
+        VALUES (#{id}, #{name}, #{platform}, #{version}, #{status}, #{lastSeen}, #{config}, #{environment}, #{workerId})
     </insert>
     
     <update id="update">
@@ -40,7 +41,8 @@
             last_seen = #{lastSeen},
             config = #{config},
             <!-- 刷新设备时不传 environment，不能因此把人配好的环境清掉 -->
-            environment = COALESCE(#{environment}, environment)
+            environment = COALESCE(#{environment}, environment),
+            worker_id = COALESCE(#{workerId}, worker_id)
         WHERE id = #{id}
     </update>
     

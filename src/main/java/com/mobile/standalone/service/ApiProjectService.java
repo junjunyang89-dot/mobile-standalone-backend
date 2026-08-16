@@ -45,6 +45,7 @@ public class ApiProjectService {
             ensureColumn("success_code_path", "VARCHAR(128) NULL COMMENT '业务成功码路径，如 $.code'");
             ensureColumn("success_code_value", "VARCHAR(64) NULL COMMENT '业务成功码的值，如 0'");
             seedIfEmpty();
+            seedClientProjects();
             log.info("[api-projects] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-projects] 建表失败: {}", e.getMessage());
@@ -81,6 +82,23 @@ public class ApiProjectService {
         p.setUpdatedAt(now);
         projectMapper.insert(p);
         log.info("[api-projects] 已种子项目 data-center");
+    }
+
+    /**
+     * 客户端项目：按平台拆分；Android / iOS 再按国内电竞、海外 PogPog。
+     * 用 ensureExists，表里已有 data-center 时也会补上。
+     */
+    private void seedClientProjects() {
+        ensureExists("android-domestic-esports", "Android · 国内电竞",
+                "完美世界电竞 Android 客户端", 20);
+        ensureExists("android-overseas-pogpog", "Android · 海外 PogPog",
+                "PogPog 海外 Android 客户端", 30);
+        ensureExists("ios-domestic-esports", "iOS · 国内电竞",
+                "完美世界电竞 iOS 客户端", 40);
+        ensureExists("ios-overseas-pogpog", "iOS · 海外 PogPog",
+                "PogPog 海外 iOS 客户端", 50);
+        ensureExists("harmonyos-domestic-esports", "HarmonyOS · 国内电竞",
+                "完美世界电竞 纯血鸿蒙客户端", 60);
     }
 
     public List<ApiProject> list(Boolean enabledOnly) {
@@ -145,18 +163,24 @@ public class ApiProjectService {
 
     /** 确保编码存在（种子/导入时可调用） */
     public void ensureExists(String code, String nameIfCreate) {
+        ensureExists(code, nameIfCreate, null, 100);
+    }
+
+    public void ensureExists(String code, String nameIfCreate, String description, int sortOrder) {
         if (code == null || code.isBlank()) return;
         if (projectMapper.findByCode(code) != null) return;
         ApiProject p = new ApiProject();
         p.setCode(code.trim());
         p.setName(nameIfCreate != null && !nameIfCreate.isBlank() ? nameIfCreate : code);
+        p.setDescription(description);
         p.setEnabled(true);
-        p.setSortOrder(100);
+        p.setSortOrder(sortOrder);
         LocalDateTime now = LocalDateTime.now();
         p.setCreatedAt(now);
         p.setUpdatedAt(now);
         try {
             projectMapper.insert(p);
+            log.info("[api-projects] 已补项目 {} ({})", p.getCode(), p.getName());
         } catch (Exception e) {
             log.debug("[api-projects] ensureExists 跳过: {}", e.getMessage());
         }

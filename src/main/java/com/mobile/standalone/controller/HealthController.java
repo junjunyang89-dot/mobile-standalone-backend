@@ -26,11 +26,20 @@ public class HealthController {
     @Autowired(required = false)
     private com.mobile.standalone.service.driver.AppiumDriverAdapter appiumDriverAdapter;
 
+    @Autowired(required = false)
+    private com.mobile.standalone.config.NodeIdentity nodeIdentity;
+
     @GetMapping
     public ResponseEntity<Map<String, Object>> health() {
         Map<String, Object> response = new HashMap<>();
         response.put("status", "ok");
         response.put("timestamp", LocalDateTime.now().toString());
+        if (nodeIdentity != null) {
+            response.put("nodeId", nodeIdentity.id());
+            response.put("nodeRole", nodeIdentity.role());
+            response.put("executesLocally", nodeIdentity.executesLocally());
+            response.put("advertiseUrl", nodeIdentity.advertiseUrl());
+        }
         return ResponseEntity.ok(response);
     }
 

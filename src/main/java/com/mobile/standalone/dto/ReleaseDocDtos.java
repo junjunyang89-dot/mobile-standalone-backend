@@ -27,6 +27,8 @@ public final class ReleaseDocDtos {
         private String issueKey;
         private String summary;
         private String issueUrl;
+        private String statusName;
+        private String assignee;
         private String branches;
         private String dbChanges;
         private String configChanges;

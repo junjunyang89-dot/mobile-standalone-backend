@@ -31,6 +31,11 @@ public class UiAppService {
             ensureColumn("pgyer_host_ios", "VARCHAR(255) NULL COMMENT 'iOS 分发平台域名，留空用全局默认'");
             seed("DOMESTIC_ESPORTS", "完美世界电竞（国内）", "国内电竞正式包",
                     "com.pwrd.steam.esports", "com.wmzq.esportapp", 10);
+            // 纯血鸿蒙独立应用（与 Android/iOS 国内包不是同一产物）。包名未知时先留空，
+            // 到「应用字典」把鸿蒙 bundle 填进 Android 包名字段即可（该应用只用鸿蒙）。
+            seed("DOMESTIC_ESPORTS_HARMONY", "完美世界电竞（鸿蒙）",
+                    "纯血鸿蒙独立包；元素/流程与安卓分开。包名请到应用字典补全（暂填 Android 包名字段）",
+                    null, null, 15);
             seed("OVERSEAS_POGPOG", "PogPog（海外）", "海外电竞正式包",
                     "com.arca.egames.intl", "com.arca.egamesintl", 20);
         } catch (Exception e) {

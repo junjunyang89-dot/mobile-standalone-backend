@@ -35,12 +35,12 @@ class TestEnvironmentTest {
         assertFalse(TestEnvironment.isTest("STAGING"));
     }
 
-    /** 任务名后缀只加在测试环境，避免存量生产任务的名字集体变样 */
+    /** 任务名两边都带环境标记，列表里不用点开就能分清 */
     @Test
-    void 只有测试环境才加任务名后缀() {
+    void 任务名带环境标记() {
         assertEquals("[测试环境]", TestEnvironment.tag("TEST"));
-        assertEquals("", TestEnvironment.tag("PROD"));
-        assertEquals("", TestEnvironment.tag(null));
+        assertEquals("[生产环境]", TestEnvironment.tag("PROD"));
+        assertEquals("[生产环境]", TestEnvironment.tag(null));
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.mobile.standalone.util.RunTrack;
 import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.entity.UiFlow;
+import com.mobile.standalone.service.FlowDependencyResolver;
 import com.mobile.standalone.service.TaskAppResolver;
 import com.mobile.standalone.service.TaskService;
 import com.mobile.standalone.service.UiFlowService;
@@ -32,6 +33,37 @@ public class UiFlowController {
     private final TaskService taskService;
     private final TaskAppResolver taskAppResolver;
     private final com.mobile.standalone.service.AiTestCaseService aiTestCaseService;
+
+    /**
+     * 勾了这批流程，还缺哪些前置。
+     * <p>
+     * 回归轨<b>刻意不自动补</b>：批次有人盯着、顺序是刻意排的，静默塞进两条流程会让人
+     * 发现「我勾了 12 条怎么跑了 14 条」。但也不能不管——忘勾「切环境」这种前置，
+     * 后面十几条会全部失败，而失败现象看着像功能 bug（数据不对、找不到元素），
+     * 没人会联想到是少跑了第一步。
+     * <p>
+     * 所以：当场告诉人缺什么，补不补由人定。
+     */
+    @PostMapping("/resolve-dependencies")
+    public ResponseEntity<?> resolveDependencies(@RequestBody Map<String, List<String>> body) {
+        List<String> ids = body == null ? List.of() : body.getOrDefault("flowIds", List.of());
+        try {
+            FlowDependencyResolver.Result r = FlowDependencyResolver.resolve(ids, uiFlowService::get);
+            List<Map<String, String>> missing = new java.util.ArrayList<>();
+            for (String id : r.autoAdded()) {
+                UiFlow f = uiFlowService.get(id);
+                missing.add(Map.of("id", id, "name", f == null || f.getName() == null ? id : f.getName()));
+            }
+            return ResponseEntity.ok(Map.of(
+                    "orderedIds", r.orderedIds(),
+                    "missing", missing));
+        } catch (FlowDependencyResolver.CycleException e) {
+            // 成环时把完整环路给出来——只说「依赖成环」人得自己去一条条翻
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
 
     // ---------- 这条流程覆盖了哪些用例 ----------
     //
@@ -75,12 +107,21 @@ public class UiFlowController {
              */
             @RequestParam(required = false) String environment,
             /** 批量执行候选：REGRESSION（默认）/ AUTOMATION，与 forRegression 配合用 */
-            @RequestParam(required = false) String track
+            @RequestParam(required = false) String track,
+            /**
+             * true＝跑已发布的线上包（上个版本），只列「已上线」的流程。
+             * 本版新功能的流程在那个包里没有对应界面，跑上去必然失败——
+             * 那种红跟质量无关，只会把真问题淹掉。
+             */
+            @RequestParam(required = false) Boolean releasedPackage,
+            /** 流程名称模糊搜索 */
+            @RequestParam(required = false) String name
     ) {
         if (Boolean.TRUE.equals(forRegression)) {
-            return ResponseEntity.ok(uiFlowService.listForBatch(appId, platform, environment, track));
+            return ResponseEntity.ok(uiFlowService.listForBatch(
+                    appId, platform, environment, track, Boolean.TRUE.equals(releasedPackage)));
         }
-        return ResponseEntity.ok(uiFlowService.list(appId, platform, catalog, componentOnly, environment));
+        return ResponseEntity.ok(uiFlowService.list(appId, platform, catalog, componentOnly, environment, name));
     }
 
     @GetMapping("/{id}")
@@ -126,6 +167,27 @@ public class UiFlowController {
             return ResponseEntity.notFound().build();
         }
         return ResponseEntity.ok(uiFlowService.collectLocatorVariables(flow));
+    }
+
+    /**
+     * 检查跨环境可用性：扫出步骤里写死的手机号 / 赛事 ID / 按文案定位。
+     * <p>
+     * 只报不改——参数里那串数字是手机号还是订单号只有人知道。
+     */
+    @GetMapping("/{id}/env-data-scan")
+    public ResponseEntity<?> envDataScan(@PathVariable String id) {
+        UiFlow flow = uiFlowService.get(id);
+        if (flow == null) {
+            return ResponseEntity.notFound().build();
+        }
+        List<com.mobile.standalone.service.FlowDataScanner.Hit> hits = uiFlowService.scanEnvData(id);
+        return ResponseEntity.ok(Map.of(
+                "flowId", id,
+                "flowName", flow.getName() == null ? "" : flow.getName(),
+                "hits", hits,
+                "summary", hits.isEmpty()
+                        ? "没扫到写死的环境数据，这条流程换个环境可以直接跑"
+                        : "扫到 " + hits.size() + " 处写死的环境数据，换环境跑之前先改掉"));
     }
 
     /**
