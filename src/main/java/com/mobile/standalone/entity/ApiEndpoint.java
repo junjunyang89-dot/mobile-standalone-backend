@@ -60,4 +60,18 @@ public class ApiEndpoint {
     // ---- 查询时拼上的统计，不落库 ----
     /** 这个接口下有多少条用例 */
     private Integer caseCount;
+    /**
+     * 其中真正验了返回字段的有几条。
+     * <p>
+     * 和 {@link #caseCount} 分开统计，是因为「有用例」和「验过了」不是一回事：
+     * 只断言 HTTP 200 的用例，在接口返回 {@code {"code":500}} 时照样是绿的。
+     */
+    private Integer strongCaseCount;
+    /**
+     * 其中<b>启用中</b>的有几条。
+     * <p>
+     * 停用的用例什么都不验——有人把一条不稳定的用例停掉，清单如果还算它覆盖，
+     * 就会立刻变绿，而实际上这个接口从此没人验了。
+     */
+    private Integer enabledCaseCount;
 }

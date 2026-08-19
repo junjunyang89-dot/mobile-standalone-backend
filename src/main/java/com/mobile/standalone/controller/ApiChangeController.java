@@ -6,7 +6,9 @@ import com.mobile.standalone.mapper.ApiProjectMapper;
 import com.mobile.standalone.service.ApiChangeReportService;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer;
 import lombok.Data;
+import com.mobile.standalone.service.apitest.EndpointChangeFlag;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,6 +22,7 @@ import java.util.Map;
  * <p>
  * 只读地跑 git，不会碰你正在开发的工作区。分析成功后自动落库快照，便于复看。
  */
+@Slf4j
 @RestController
 @RequestMapping("/api-changes")
 @RequiredArgsConstructor
@@ -30,6 +33,44 @@ public class ApiChangeController {
     private final com.mobile.standalone.mapper.ApiTestCaseMapper apiTestCaseMapper;
     private final com.mobile.standalone.mapper.ApiTableSchemaMapper apiTableSchemaMapper;
     private final ApiChangeReportService apiChangeReportService;
+    private final com.mobile.standalone.service.apitest.ApiEndpointService apiEndpointService;
+
+    /**
+     * 把这份报告同步进接口清单。
+     * <p>
+     * 跟着分析自动做，不做成一个要人记得点的按钮：你的流程是「拉分支 → 录入接口清单」，
+     * 中间多一次点击，迟早会有一版忘了点，而忘了的表现是清单看着干净、实际是上一版的。
+     * <p>
+     * 同步失败不影响报告本身——分析结果是主产物，清单是派生的。
+     */
+    private Map<String, Object> syncToEndpointCatalog(ApiChangeAnalyzer.Report report, String projectCode) {
+        if (report == null || projectCode == null || projectCode.isBlank()) {
+            return null;
+        }
+        try {
+            List<com.mobile.standalone.service.apitest.ApiEndpointService.EndpointChange> changes =
+                    new java.util.ArrayList<>();
+            for (ApiChangeAnalyzer.EndpointChange e : report.getEndpoints()) {
+                EndpointChangeFlag.Input in = new EndpointChangeFlag.Input(
+                        e.getChangeType(), e.getRisk(),
+                        e.getParams() == null ? 0 : e.getParams().size(),
+                        e.getFields() == null ? 0 : e.getFields().size(),
+                        e.getBodyFields() == null ? 0 : e.getBodyFields().size(),
+                        e.getChangedImpls() == null ? 0 : e.getChangedImpls().size());
+                changes.add(new com.mobile.standalone.service.apitest.ApiEndpointService.EndpointChange(
+                        e.getHttpMethod(), e.getPath(), e.getHandler(), e.getSummary(), e.getFile(),
+                        e.getChangeType(),
+                        EndpointChangeFlag.of(in),
+                        EndpointChangeFlag.note(in, e.getRisk()),
+                        topLevelFieldNames(e)));
+            }
+            var r = apiEndpointService.syncFromChangeReport(projectCode, report.getHeadRef(), changes);
+            return Map.of("created", r.created(), "updated", r.updated(), "deprecated", r.deprecated());
+        } catch (Exception ex) {
+            log.warn("[api-changes] 同步接口清单失败（不影响本次报告）: {}", ex.getMessage());
+            return null;
+        }
+    }
 
     /**
      * 给报告里的表挂上建表语句与测试注意事项。
@@ -97,6 +138,20 @@ public class ApiChangeController {
             }
             e.setTestCases(n);
         }
+    }
+
+    /** 返回体的顶层字段名，「生成用例」按它出断言 */
+    private List<String> topLevelFieldNames(ApiChangeAnalyzer.EndpointChange e) {
+        List<String> out = new java.util.ArrayList<>();
+        if (e.getResponseFields() == null) {
+            return out;
+        }
+        for (var node : e.getResponseFields()) {
+            if (node != null && node.getName() != null && !node.getName().isBlank()) {
+                out.add(node.getName().trim());
+            }
+        }
+        return out;
     }
 
     /** 列出配了仓库路径的项目，以及各自的分支，供页面下拉 */
@@ -181,6 +236,10 @@ public class ApiChangeController {
             markCoverage(report, p.getCode());
             attachTableSchemas(report, p.getCode());
             apiChangeReportService.saveSnapshot(p.getCode(), report);
+            Map<String, Object> sync = syncToEndpointCatalog(report, p.getCode());
+            if (sync != null) {
+                report.setCatalogSync(sync);
+            }
             return ResponseEntity.ok(report);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
@@ -207,6 +266,10 @@ public class ApiChangeController {
             markCoverage(report, body.getProject());
             attachTableSchemas(report, body.getProject());
             apiChangeReportService.saveSnapshot(body.getProject(), report);
+            Map<String, Object> sync = syncToEndpointCatalog(report, body.getProject());
+            if (sync != null) {
+                report.setCatalogSync(sync);
+            }
             return ResponseEntity.ok(report);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));

@@ -62,6 +62,13 @@ public class ApiChangeAnalyzer {
         private List<String> notes = new ArrayList<>();
         /** 从代码里能确证的安全与字段设计问题 */
         private List<ApiRiskScanner.Finding> findings = new ArrayList<>();
+        /**
+         * 这份报告同步进接口清单的结果，{@code {created, updated, deprecated}}。
+         * <p>
+         * 回给前端是为了让人当场看见「清单已经跟着更新了」——
+         * 不显示的话，同步做没做过全靠猜，而猜错的方向是「以为同步了其实没有」。
+         */
+        private Map<String, Object> catalogSync;
     }
 
     @Data

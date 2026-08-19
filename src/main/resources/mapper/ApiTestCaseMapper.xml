@@ -19,6 +19,7 @@
         <result property="assertions" column="assertions"/>
         <result property="extractJson" column="extract_json"/>
         <result property="collectionId" column="collection_id"/>
+        <result property="endpointId" column="endpoint_id"/>
         <result property="fieldNotes" column="field_notes"/>
         <result property="enabled" column="enabled"/>
         <result property="sortOrder" column="sort_order"/>
@@ -92,11 +93,12 @@
     <insert id="insert">
         INSERT INTO api_test_cases
         (id, project, environment, name, description, requirement_ref, method, path, url_id, query, headers, body,
-         assertions, extract_json, field_notes, enabled, sort_order, created_by, created_at, updated_at)
+         assertions, extract_json, field_notes, enabled, sort_order, created_by, endpoint_id, created_at, updated_at)
         VALUES
         (#{id}, #{project}, #{environment}, #{name}, #{description}, #{requirementRef}, #{method}, #{path}, #{urlId},
          #{query}, #{headers}, #{body},
-         #{assertions}, #{extractJson}, #{fieldNotes}, #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
+         #{assertions}, #{extractJson}, #{fieldNotes}, #{enabled}, #{sortOrder}, #{createdBy}, #{endpointId},
+         #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -117,6 +119,7 @@
             field_notes = #{fieldNotes},
             enabled = #{enabled},
             sort_order = #{sortOrder},
+            endpoint_id = #{endpointId},
             updated_at = #{updatedAt}
         WHERE id = #{id}
     </update>

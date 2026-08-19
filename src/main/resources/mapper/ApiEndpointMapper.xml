@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ApiEndpointMapper">
+
+    <resultMap id="endpointMap" type="com.mobile.standalone.entity.ApiEndpoint">
+        <id property="id" column="id"/>
+        <result property="project" column="project"/>
+        <result property="httpMethod" column="http_method"/>
+        <result property="path" column="path"/>
+        <result property="handler" column="handler"/>
+        <result property="sourceFile" column="source_file"/>
+        <result property="summary" column="summary"/>
+        <result property="status" column="status"/>
+        <result property="changeFlag" column="change_flag"/>
+        <result property="sourceBranch" column="source_branch"/>
+        <result property="changeNote" column="change_note"/>
+        <result property="fieldsSnapshot" column="fields_snapshot"/>
+        <result property="lastSyncedAt" column="last_synced_at"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="caseCount" column="case_count"/>
+        <result property="strongCaseCount" column="strong_case_count"/>
+        <result property="enabledCaseCount" column="enabled_case_count"/>
+    </resultMap>
+
+    <sql id="cols">
+        e.id, e.project, e.http_method, e.path, e.handler, e.source_file, e.summary,
+        e.status, e.change_flag, e.source_branch, e.change_note, e.fields_snapshot,
+        e.last_synced_at, e.created_at, e.updated_at
+    </sql>
+
+    <select id="search" resultMap="endpointMap">
+        SELECT <include refid="cols"/>,
+               (SELECT COUNT(1) FROM api_test_cases c
+                 WHERE c.endpoint_id = e.id AND c.enabled = 1
+                   AND c.assertions LIKE '%jsonPath%') AS strong_case_count,
+               (SELECT COUNT(1) FROM api_test_cases c
+                 WHERE c.endpoint_id = e.id AND c.enabled = 1) AS enabled_case_count,
+               (SELECT COUNT(1) FROM api_test_cases c WHERE c.endpoint_id = e.id) AS case_count
+        FROM api_endpoints e
+        <where>
+            <if test="project != null and project != ''">AND e.project = #{project}</if>
+            <if test="status != null and status != ''">AND e.status = #{status}</if>
+            <if test="changeFlag != null and changeFlag != ''">
+                <choose>
+                    <!-- 「本次有变更」是个筛选意图，不是某一个具体标记值 -->
+                    <when test="changeFlag == 'ANY_CHANGE'">AND e.change_flag IS NOT NULL AND e.change_flag &lt;&gt; ''</when>
+                    <otherwise>AND e.change_flag = #{changeFlag}</otherwise>
+                </choose>
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (e.path LIKE CONCAT('%', #{keyword}, '%')
+                     OR e.handler LIKE CONCAT('%', #{keyword}, '%')
+                     OR e.summary LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        <!-- 待办的排前面：新增和有变更的才需要人动手，已覆盖和未覆盖是常态 -->
+        ORDER BY
+            CASE WHEN e.status = 'DEPRECATED' THEN 0
+                 WHEN e.change_flag IS NOT NULL AND e.change_flag &lt;&gt; '' THEN 1
+                 ELSE 2 END,
+            e.path
+    </select>
+
+    <select id="findById" resultMap="endpointMap">
+        SELECT <include refid="cols"/>,
+               (SELECT COUNT(1) FROM api_test_cases c
+                 WHERE c.endpoint_id = e.id AND c.enabled = 1
+                   AND c.assertions LIKE '%jsonPath%') AS strong_case_count,
+               (SELECT COUNT(1) FROM api_test_cases c
+                 WHERE c.endpoint_id = e.id AND c.enabled = 1) AS enabled_case_count,
+               (SELECT COUNT(1) FROM api_test_cases c WHERE c.endpoint_id = e.id) AS case_count
+        FROM api_endpoints e WHERE e.id = #{id}
+    </select>
+
+    <select id="findByKey" resultMap="endpointMap">
+        SELECT <include refid="cols"/>, 0 AS case_count
+        FROM api_endpoints e
+        WHERE e.project = #{project} AND e.http_method = #{httpMethod} AND e.path = #{path}
+    </select>
+
+    <select id="countByProject" resultType="int">
+        SELECT COUNT(1) FROM api_endpoints
+        <where><if test="project != null and project != ''">project = #{project}</if></where>
+    </select>
+
+    <insert id="insert" parameterType="com.mobile.standalone.entity.ApiEndpoint">
+        INSERT INTO api_endpoints
+            (id, project, http_method, path, handler, source_file, summary, status,
+             change_flag, source_branch, change_note, fields_snapshot, last_synced_at,
+             created_at, updated_at)
+        VALUES
+            (#{id}, #{project}, #{httpMethod}, #{path}, #{handler}, #{sourceFile}, #{summary},
+             #{status}, #{changeFlag}, #{sourceBranch}, #{changeNote}, #{fieldsSnapshot},
+             #{lastSyncedAt}, NOW(), NOW())
+    </insert>
+
+    <update id="update" parameterType="com.mobile.standalone.entity.ApiEndpoint">
+        UPDATE api_endpoints
+        <set>
+            <if test="handler != null">handler = #{handler},</if>
+            <if test="sourceFile != null">source_file = #{sourceFile},</if>
+            <if test="summary != null">summary = #{summary},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="changeFlag != null">change_flag = #{changeFlag},</if>
+            <if test="sourceBranch != null">source_branch = #{sourceBranch},</if>
+            <if test="changeNote != null">change_note = #{changeNote},</if>
+            <if test="fieldsSnapshot != null">fields_snapshot = #{fieldsSnapshot},</if>
+            <if test="lastSyncedAt != null">last_synced_at = #{lastSyncedAt},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id}
+    </update>
+
+    <update id="markDeprecatedNotIn">
+        UPDATE api_endpoints SET status = 'DEPRECATED', updated_at = NOW()
+        WHERE project = #{project} AND status &lt;&gt; 'DEPRECATED'
+        <if test="keepIds != null and keepIds.size() > 0">
+            AND id NOT IN
+            <foreach collection="keepIds" item="kid" open="(" separator="," close=")">#{kid}</foreach>
+        </if>
+    </update>
+
+    <update id="clearChangeFlags">
+        UPDATE api_endpoints SET change_flag = NULL, change_note = NULL, updated_at = NOW()
+        WHERE project = #{project} AND change_flag IS NOT NULL
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM api_endpoints WHERE id = #{id}
+    </delete>
+
+    <!--
+        迁移用：从现有用例反推出接口清单。
+        handler 取 requirement_ref（当初扫代码时写的就是 Controller 名），
+        summary 取任意一条用例名——同一个接口多条用例时取哪条都行，人一眼能认出来就够
+    -->
+    <select id="distinctEndpointsFromCases" resultMap="endpointMap">
+        SELECT NULL AS id, c.project AS project, c.method AS http_method, c.path AS path,
+               MAX(c.requirement_ref) AS handler, NULL AS source_file,
+               MAX(c.name) AS summary, 'ACTIVE' AS status,
+               NULL AS change_flag, NULL AS source_branch, NULL AS change_note,
+               NULL AS fields_snapshot, NULL AS last_synced_at,
+               NULL AS created_at, NULL AS updated_at,
+               COUNT(1) AS case_count
+        FROM api_test_cases c
+        WHERE c.project IS NOT NULL AND c.project &lt;&gt; ''
+          AND (c.endpoint_id IS NULL OR c.endpoint_id = '')
+        GROUP BY c.project, c.method, c.path
+    </select>
+
+    <update id="linkCasesToEndpoint">
+        UPDATE api_test_cases
+        SET endpoint_id = #{endpointId}
+        WHERE project = #{project} AND method = #{httpMethod} AND path = #{path}
+          AND (endpoint_id IS NULL OR endpoint_id = '')
+    </update>
+
+    <select id="countUnlinkedCases" resultType="int">
+        SELECT COUNT(1) FROM api_test_cases
+        WHERE project IS NOT NULL AND project &lt;&gt; '' AND (endpoint_id IS NULL OR endpoint_id = '')
+    </select>
+
+</mapper>

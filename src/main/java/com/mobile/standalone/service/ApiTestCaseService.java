@@ -33,6 +33,8 @@ import java.util.UUID;
 public class ApiTestCaseService {
 
     public static final String PROJECT_DATA_CENTER = "data-center";
+    /** 接口对比调试用的 CRUD 样例项目，和真实业务项目分开放 */
+    public static final String PROJECT_DEBUG_TESTS = "debug-tests";
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> METHODS = Set.of("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD");
@@ -41,6 +43,14 @@ public class ApiTestCaseService {
     private final ApiTestEnvMapper envMapper;
     private final ApiProjectService projectService;
     private final JdbcTemplate jdbcTemplate;
+    /**
+     * 用例保存时自动挂接口。用 setter 注入而不是构造器：
+     * {@code ApiEndpointService} 上有 {@code @DependsOn("apiTestCaseService")}，
+     * 构造器注入会绕成循环依赖，启动直接失败
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    @org.springframework.context.annotation.Lazy
+    private com.mobile.standalone.service.apitest.ApiEndpointService endpointService;
 
     @PostConstruct
     public void ensureTablesAndSeed() {
@@ -131,6 +141,12 @@ public class ApiTestCaseService {
             seedEnvsIfEmpty();
             projectService.ensureExists(PROJECT_DATA_CENTER, "data-center（数据中心）");
             importProjectSeedIfAbsent(PROJECT_DATA_CENTER, "api-test/seed-data-center.json");
+            // 接口对比调试用的那套 CRUD 用例。
+            // 原来是一个要手跑的 seed_debug_api_test_cases.sql，里面先 DELETE 再 INSERT——
+            // 那种写法不能放到启动时跑：每次重启都会把人改过的断言冲掉，
+            // 而表现是「我明明改过的用例又变回去了」。走 IfAbsent，只在这个项目一条用例都没有时导一次
+            projectService.ensureExists(PROJECT_DEBUG_TESTS, "debug-tests（接口对比调试）");
+            importProjectSeedIfAbsent(PROJECT_DEBUG_TESTS, "api-test/seed-debug-tests.json");
             log.info("[api-test] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test] 建表/导入失败: {}", e.getMessage());
@@ -406,6 +422,7 @@ public class ApiTestCaseService {
             throw new IllegalArgumentException("id 已存在: " + body.getId());
         }
         defaults(body);
+        linkEndpoint(body);
         LocalDateTime now = LocalDateTime.now();
         body.setCreatedAt(now);
         body.setUpdatedAt(now);
@@ -420,6 +437,9 @@ public class ApiTestCaseService {
         body.setId(id);
         validateCase(body);
         defaults(body);
+        // 路径或方法被改过时要重新挂：改完还挂在老接口上，
+        // 清单两边的用例数就都是错的
+        linkEndpoint(body);
         body.setCreatedAt(existing.getCreatedAt());
         body.setCreatedBy(existing.getCreatedBy());
         body.setUpdatedAt(LocalDateTime.now());
@@ -430,6 +450,21 @@ public class ApiTestCaseService {
     @Transactional
     public boolean deleteCase(String id) {
         return caseMapper.deleteById(id) > 0;
+    }
+
+    /**
+     * 按 项目+方法+路径 把用例挂到接口清单上。
+     * <p>
+     * 放在服务层而不是让调用方填：靠调用方记着填，迟早有一条漏了，
+     * 而漏了的表现是清单上那个接口显示「0 条用例」，于是有人去补一条已经存在的用例。
+     */
+    private void linkEndpoint(ApiTestCase body) {
+        if (endpointService == null) {
+            return;
+        }
+        body.setEndpointId(endpointService.ensureEndpointFor(
+                body.getProject(), body.getMethod(), body.getPath(),
+                body.getRequirementRef(), body.getName()));
     }
 
     private void validateCase(ApiTestCase body) {

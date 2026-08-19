@@ -491,6 +491,7 @@ public class TrackingCheckService {
             return HttpClient.newBuilder()
                     .version(HttpClient.Version.HTTP_1_1)
                     .sslContext(ssl)
+                    .proxy(HttpClient.Builder.NO_PROXY)
                     .connectTimeout(Duration.ofSeconds(20))
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();

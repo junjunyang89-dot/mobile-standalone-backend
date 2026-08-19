@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import java.net.Proxy;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -49,6 +50,22 @@ public class ReleaseDocService {
     private static final Pattern ISSUE_KEY = Pattern.compile("\\b([A-Z][A-Z0-9]+-\\d+)\\b");
     private static final Pattern SQL_LINE = Pattern.compile(
             "(?i).*\\b(SELECT|INSERT|UPDATE|ALTER|CREATE|DROP|DELETE|TRUNCATE|REPLACE)\\b.*");
+    /**
+     * 任务列末尾「人名 + 提测/上线」后缀。只匹配字符串末尾，每条只跑一次，避免误删正文。
+     * 规则来自《Confluence发版Wiki任务列清理指南》，并覆盖「暂定提测」「提测，不跟版本」。
+     */
+    private static final List<Pattern> TASK_SUFFIX_PATTERNS = List.of(
+            Pattern.compile(
+                    "\\s*[-–]\\s*[\\u4e00-\\u9fff/]+"
+                            + "\\s*[-–]\\s*\\d+\\.\\d+提测[，,]\\d+\\.\\d+(?:上线|上)(?:[，,]\\d+\\.\\d+开放入口)?\\s*$"),
+            Pattern.compile(
+                    "\\s*[-–]\\s*[\\u4e00-\\u9fff/]+\\s*[-–]\\s*\\d+\\.\\d+提测[，,]不跟版本\\s*$"),
+            Pattern.compile(
+                    "\\s*[-–]?\\s*[\\u4e00-\\u9fff]{2,4}(?:/[\\u4e00-\\u9fff]{2,4})+"
+                            + "[，,]\\s*暂定?\\d+\\.\\d+提测[，,]\\d+\\.\\d+(?:上线|上)(?:[，,]\\d+\\.\\d+开放入口)?\\s*$"),
+            Pattern.compile("\\s*[-–]\\s*[\\u4e00-\\u9fff/]+\\s*[-–]\\s*\\d+\\.\\d+(?:上线|上)\\s*$"),
+            Pattern.compile("\\s*[-–]\\s*[\\u4e00-\\u9fff]{2,4}(?:[，,][\\u4e00-\\u9fff]+)?\\s*$")
+    );
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final ReleaseDocProperties props;
@@ -82,6 +99,7 @@ public class ReleaseDocService {
                     .version(HttpClient.Version.HTTP_1_1)
                     .sslContext(ssl)
                     .sslParameters(params)
+                    .proxy(HttpClient.Builder.NO_PROXY)
                     .connectTimeout(Duration.ofSeconds(30))
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
@@ -552,6 +570,7 @@ public class ReleaseDocService {
         // 生成时若带了人工改过的 rows，直接建页（备注格式因人而异，以人工校对为准）
         if (!out.isPreviewOnly() && req.getRows() != null && !req.getRows().isEmpty()) {
             List<IssueRow> sorted = sortRowsByQa(req.getRows());
+            applyTaskTextCleanup(sorted);
             out.setRows(sorted);
             logStep(out, "使用前端校对后的 " + sorted.size() + " 行生成 Wiki（已按 QA 排序）");
             logStep(out, "在父页 " + props.getParentPageId() + " 下创建子页面");
@@ -588,6 +607,7 @@ public class ReleaseDocService {
             throw new IllegalStateException("版本「" + out.getVersion() + "」下没有「"
                     + String.join(" / ", includeStatusList()) + "」状态的单子可统计");
         }
+        applyTaskTextCleanup(rows);
         rows = sortRowsByQa(rows);
         out.setRows(rows);
         logStep(out, "已按 QA 排序: " + summarizeQaOrder(rows));
@@ -1007,7 +1027,7 @@ public class ReleaseDocService {
             IssueRow row = new IssueRow();
             row.setIssueKey(ref.key);
             row.setIssueUrl(trimSlash(jiraBase) + "/browse/" + ref.key);
-            row.setSummary(fields.path("summary").asText(ref.key));
+            row.setSummary(cleanTaskText(fields.path("summary").asText(ref.key)));
 
             String qa = findFieldByDisplayName(fields, names, "QA Assignee", "QA", "Qa Assignee");
             if (qa == null || qa.isBlank()) {
@@ -2002,6 +2022,27 @@ public class ReleaseDocService {
                 .trim();
     }
 
+    /** 去掉任务标题末尾的「人名 / 提测 / 上线」后缀；JIRA 链接仍由调用方单独保留。 */
+    static String cleanTaskText(String text) {
+        if (text == null || text.isBlank()) {
+            return text == null ? "" : text;
+        }
+        String cleaned = text.replace('\u00a0', ' ').strip();
+        for (Pattern pat : TASK_SUFFIX_PATTERNS) {
+            cleaned = pat.matcher(cleaned).replaceFirst("").strip();
+        }
+        return cleaned;
+    }
+
+    private static void applyTaskTextCleanup(List<IssueRow> rows) {
+        if (rows == null) {
+            return;
+        }
+        for (IssueRow row : rows) {
+            row.setSummary(cleanTaskText(row.getSummary()));
+        }
+    }
+
     /**
      * {@code fch/20260721/fixhotfeigine appuser} / {@code feat/x app-user}
      * → 前面是分支，行尾项目名。
@@ -2299,9 +2340,9 @@ public class ReleaseDocService {
             sb.append("<td>");
             if (r.getIssueUrl() != null && !r.getIssueUrl().isBlank()) {
                 sb.append("<a href=\"").append(escAttr(r.getIssueUrl())).append("\">")
-                        .append(esc(r.getSummary())).append("</a>");
+                        .append(esc(cleanTaskText(r.getSummary()))).append("</a>");
             } else {
-                sb.append(esc(r.getSummary()));
+                sb.append(esc(cleanTaskText(r.getSummary())));
             }
             sb.append("</td>");
             sb.append("<td>").append(nlToBr(r.getBranches())).append("</td>");
@@ -2395,7 +2436,7 @@ public class ReleaseDocService {
     private HttpResponse<String> sendViaUrlConnection(HttpRequest req) throws Exception {
         URI uri = req.uri();
         java.net.URL url = uri.toURL();
-        javax.net.ssl.HttpsURLConnection conn = (javax.net.ssl.HttpsURLConnection) url.openConnection();
+        javax.net.ssl.HttpsURLConnection conn = (javax.net.ssl.HttpsURLConnection) url.openConnection(Proxy.NO_PROXY);
         try {
             SSLContext ssl = SSLContext.getInstance("TLSv1.2");
             TrustManager[] trustAll = new TrustManager[]{
@@ -2492,13 +2533,13 @@ public class ReleaseDocService {
                 Element taskTd = tds.get(0);
                 Element a = taskTd.selectFirst("a[href]");
                 if (a != null) {
-                    row.setSummary(a.text().trim());
+                    row.setSummary(cleanTaskText(a.text().trim()));
                     row.setIssueUrl(a.attr("abs:href"));
                     if (row.getIssueUrl().isBlank()) row.setIssueUrl(a.attr("href"));
                     Matcher km = ISSUE_KEY.matcher(row.getIssueUrl() + " " + row.getSummary());
                     if (km.find()) row.setIssueKey(km.group(1));
                 } else {
-                    row.setSummary(taskTd.text().trim());
+                    row.setSummary(cleanTaskText(taskTd.text().trim()));
                 }
                 row.setBranches(cellText(tds.get(1)));
                 row.setDbChanges(cellText(tds.get(2)));

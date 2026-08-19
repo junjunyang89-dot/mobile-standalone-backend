@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.PlatformUserMapper">
+
+    <resultMap id="userMap" type="com.mobile.standalone.auth.PlatformUser">
+        <id property="id" column="id"/>
+        <result property="username" column="username"/>
+        <result property="displayName" column="display_name"/>
+        <result property="passwordHash" column="password_hash"/>
+        <result property="role" column="role"/>
+        <result property="enabled" column="enabled"/>
+        <result property="lastLoginAt" column="last_login_at"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="cols">
+        id, username, display_name, password_hash, role, enabled, last_login_at, created_at, updated_at
+    </sql>
+
+    <select id="findAll" resultMap="userMap">
+        SELECT <include refid="cols"/> FROM platform_users
+        ORDER BY CASE role WHEN 'ADMIN' THEN 0 WHEN 'TESTER' THEN 1 ELSE 2 END, username
+    </select>
+
+    <select id="findById" resultMap="userMap">
+        SELECT <include refid="cols"/> FROM platform_users WHERE id = #{id}
+    </select>
+
+    <select id="findByUsername" resultMap="userMap">
+        SELECT <include refid="cols"/> FROM platform_users WHERE username = #{username}
+    </select>
+
+    <select id="countAll" resultType="int">
+        SELECT COUNT(1) FROM platform_users
+    </select>
+
+    <select id="countActiveAdmins" resultType="int">
+        SELECT COUNT(1) FROM platform_users WHERE role = 'ADMIN' AND enabled = 1
+    </select>
+
+    <insert id="insert" parameterType="com.mobile.standalone.auth.PlatformUser">
+        INSERT INTO platform_users
+            (id, username, display_name, password_hash, role, enabled, created_at, updated_at)
+        VALUES
+            (#{id}, #{username}, #{displayName}, #{passwordHash}, #{role}, #{enabled}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <!-- 有意不含 password_hash：改密码走 updatePassword。
+         放在一起的话，任何一次忘带 passwordHash 的更新都会把口令刷成 null，
+         而表现是「这个人突然登不上了」，查起来完全想不到是改显示名导致的 -->
+    <update id="update" parameterType="com.mobile.standalone.auth.PlatformUser">
+        UPDATE platform_users
+        <set>
+            <if test="displayName != null">display_name = #{displayName},</if>
+            <if test="role != null">role = #{role},</if>
+            <if test="enabled != null">enabled = #{enabled},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id}
+    </update>
+
+    <update id="updatePassword">
+        UPDATE platform_users SET password_hash = #{passwordHash}, updated_at = NOW() WHERE id = #{id}
+    </update>
+
+    <update id="touchLogin">
+        UPDATE platform_users SET last_login_at = NOW() WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM platform_users WHERE id = #{id}
+    </delete>
+
+</mapper>
