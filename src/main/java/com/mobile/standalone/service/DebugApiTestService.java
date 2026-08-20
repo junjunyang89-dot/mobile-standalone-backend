@@ -122,6 +122,27 @@ public class DebugApiTestService {
         return debugApiTestMapper.deleteById(id) > 0;
     }
 
+    /**
+     * 切换启用态。返回体带 {@code enabled} 布尔字段，供接口测试 extract {@code $.enabled}。
+     */
+    @Transactional
+    public DebugApiTest setEnabled(Long id, Boolean enabled) {
+        if (enabled == null) {
+            throw new IllegalArgumentException("enabled 不能为空");
+        }
+        DebugApiTest existing = debugApiTestMapper.findById(id);
+        if (existing == null) {
+            return null;
+        }
+        existing.setStatus(enabled ? "ACTIVE" : "DISABLED");
+        debugApiTestMapper.update(existing);
+        return debugApiTestMapper.findById(id);
+    }
+
+    public static boolean isEnabled(DebugApiTest row) {
+        return row != null && "ACTIVE".equalsIgnoreCase(row.getStatus());
+    }
+
     private static String normalizeStatus(String status) {
         if (status == null || status.isBlank()) {
             return "ACTIVE";
