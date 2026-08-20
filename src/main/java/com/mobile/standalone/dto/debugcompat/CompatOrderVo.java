@@ -3,11 +3,12 @@ package com.mobile.standalone.dto.debugcompat;
 import lombok.Data;
 
 /**
- * debug-compat 下单返回（基线）。破坏版会删除 status 字段。
+ * debug-compat 下单返回（破坏版）。
+ * <p>
+ * 相对基线：删除 status（REMOVED）。
  */
 @Data
 public class CompatOrderVo {
     private String orderId;
     private Double amount;
-    private String status;
 }

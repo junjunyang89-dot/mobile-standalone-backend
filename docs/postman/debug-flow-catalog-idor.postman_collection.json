@@ -1,0 +1,341 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-debug-flow-idor",
+    "name": "debug-flow 水平越权测试（catalog）",
+    "description": "按真实业务测 GET /debug-flow/catalog 水平越权（BOLA）。\n\n步骤：\n1. 登录拿 Bearer\n2. 开 session A / B，记下两套 accountId + sessionToken\n3. 基准：A 的 token + A 的 accountId\n4. 越权：A 的 sessionToken + B 的 accountId\n5. 看状态码与响应里 data.catalog.accountId\n\n导入后先改 Collection Variables：baseUrl、loginUsername、loginPassword。\n按文件夹顺序 Execute，或用 Collection Runner 顺序跑。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:3000/api" },
+    { "key": "loginUsername", "value": "admin" },
+    { "key": "loginPassword", "value": "改成你的密码" },
+    { "key": "token", "value": "" },
+    { "key": "flowSessionTokenA", "value": "" },
+    { "key": "flowAccountIdA", "value": "" },
+    { "key": "flowSessionTokenB", "value": "" },
+    { "key": "flowAccountIdB", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. 准备",
+      "item": [
+        {
+          "name": "0.1 登录拿 Bearer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('登录成功 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('返回 token', function () {",
+                  "    pm.expect(json.token).to.be.a('string').and.not.empty;",
+                  "});",
+                  "if (json.token) {",
+                  "    pm.collectionVariables.set('token', json.token);",
+                  "    console.log('token 已写入 collection variable');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{loginUsername}}\",\n  \"password\": \"{{loginPassword}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/login",
+            "description": "平台登录。成功后自动把 token 存到集合变量。"
+          }
+        },
+        {
+          "name": "0.2 清空 debug-flow 内存态（可选）",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('reset 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/debug-flow/reset",
+            "description": "可选。清空内存会话，避免旧 session 干扰。"
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. 准备两个业务账号（session A / B）",
+      "item": [
+        {
+          "name": "1.1 开 session A → accountId_A",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('session A 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "const token = json?.result?.auth?.session?.token;",
+                  "const accountId = json?.result?.auth?.account?.id;",
+                  "pm.test('抽出 sessionToken / accountId', function () {",
+                  "    pm.expect(token).to.be.a('string').and.not.empty;",
+                  "    pm.expect(accountId).to.be.a('string').and.not.empty;",
+                  "});",
+                  "pm.collectionVariables.set('flowSessionTokenA', token);",
+                  "pm.collectionVariables.set('flowAccountIdA', accountId);",
+                  "console.log('A:', accountId, token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"actor\": \"user-A\"\n}"
+            },
+            "url": "{{baseUrl}}/debug-flow/session",
+            "description": "业务身份 A。抽取：\n- $.result.auth.session.token → flowSessionTokenA\n- $.result.auth.account.id → flowAccountIdA"
+          }
+        },
+        {
+          "name": "1.2 开 session B → accountId_B",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('session B 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "const token = json?.result?.auth?.session?.token;",
+                  "const accountId = json?.result?.auth?.account?.id;",
+                  "pm.test('抽出 sessionToken / accountId', function () {",
+                  "    pm.expect(token).to.be.a('string').and.not.empty;",
+                  "    pm.expect(accountId).to.be.a('string').and.not.empty;",
+                  "});",
+                  "pm.test('A/B accountId 必须不同', function () {",
+                  "    pm.expect(accountId).to.not.eql(pm.collectionVariables.get('flowAccountIdA'));",
+                  "});",
+                  "pm.collectionVariables.set('flowSessionTokenB', token);",
+                  "pm.collectionVariables.set('flowAccountIdB', accountId);",
+                  "console.log('B:', accountId, token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"actor\": \"user-B\"\n}"
+            },
+            "url": "{{baseUrl}}/debug-flow/session",
+            "description": "业务身份 B。抽取 flowSessionTokenB / flowAccountIdB。\n注意：这里的 accountId 是 debug-flow 会话账号，不是平台登录名。"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. 越权验证 GET /debug-flow/catalog",
+      "item": [
+        {
+          "name": "2.1 基准：A 的 session + A 的 accountId（应成功）",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const accA = pm.collectionVariables.get('flowAccountIdA');",
+                  "pm.test('基准应 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('code=0', function () {",
+                  "    pm.expect(json.code).to.eql(0);",
+                  "});",
+                  "pm.test('响应 accountId 等于 A', function () {",
+                  "    pm.expect(json?.data?.catalog?.accountId).to.eql(accA);",
+                  "});",
+                  "pm.test('有商品列表（建立可读基准）', function () {",
+                  "    const products = json?.data?.catalog?.groups?.[0]?.products;",
+                  "    pm.expect(products).to.be.an('array').and.not.empty;",
+                  "});",
+                  "console.log('基准 OK，accountId=', json?.data?.catalog?.accountId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/debug-flow/catalog?accountId={{flowAccountIdA}}&sessionToken={{flowSessionTokenA}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["debug-flow", "catalog"],
+              "query": [
+                { "key": "accountId", "value": "{{flowAccountIdA}}" },
+                { "key": "sessionToken", "value": "{{flowSessionTokenA}}" }
+              ]
+            },
+            "description": "正向基准：当前用户查自己的 accountId，应 200。"
+          }
+        },
+        {
+          "name": "2.2 越权：A 的 session + B 的 accountId（真实业务应拒绝）",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const status = pm.response.code;",
+                  "const accA = pm.collectionVariables.get('flowAccountIdA');",
+                  "const accB = pm.collectionVariables.get('flowAccountIdB');",
+                  "const respAcc = json?.data?.catalog?.accountId;",
+                  "const products = json?.data?.catalog?.groups?.[0]?.products;",
+                  "",
+                  "console.log('越权请求: sessionToken=A, accountId=B(' + accB + ')');",
+                  "console.log('实际 status=', status, ' resp.accountId=', respAcc);",
+                  "",
+                  "// 按「真实业务」期望：应拒绝（403/401/400）或至少不能读到 B 的数据",
+                  "// 当前 debug-flow 实现会 200 且回显 B → 水平越权成立",
+                  "const rejected = status === 401 || status === 403 || status === 400;",
+                  "const leakedB = status === 200 && respAcc === accB && Array.isArray(products) && products.length > 0;",
+                  "",
+                  "if (rejected) {",
+                  "    pm.test('[安全通过] 已拒绝跨 accountId 访问', function () {",
+                  "        pm.expect(rejected).to.be.true;",
+                  "    });",
+                  "} else if (leakedB) {",
+                  "    // 故意用失败断言标出漏洞，方便在 Runner 里一眼看到红",
+                  "    pm.test('[漏洞成立] 水平越权：A 会话可读 B 的 accountId 数据', function () {",
+                  "        pm.expect.fail(",
+                  "            '水平越权成立：仍返回 200，且 data.catalog.accountId=' + respAcc +",
+                  "            '（B=' + accB + '）。真实业务应 403/401 或空数据，不能读到 B。'",
+                  "        );",
+                  "    });",
+                  "} else {",
+                  "    pm.test('结果需人工确认（非典型拒绝也非典型泄露）', function () {",
+                  "        pm.expect.fail('status=' + status + ' resp.accountId=' + respAcc + ' body=' + pm.response.text().slice(0, 300));",
+                  "    });",
+                  "}",
+                  "",
+                  "// 提缺陷时复制 Console / 下面信息",
+                  "pm.test('缺陷记录信息（始终打印）', function () {",
+                  "    const note = {",
+                  "        url: pm.request.url.toString(),",
+                  "        sessionTokenOwner: 'A',",
+                  "        accountIdA: accA,",
+                  "        accountIdB: accB,",
+                  "        status: status,",
+                  "        responseAccountId: respAcc,",
+                  "        conclusion: leakedB ? '水平越权成立' : (rejected ? '已拒绝' : '待确认')",
+                  "    };",
+                  "    console.log(JSON.stringify(note, null, 2));",
+                  "    pm.expect(true).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/debug-flow/catalog?accountId={{flowAccountIdB}}&sessionToken={{flowSessionTokenA}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["debug-flow", "catalog"],
+              "query": [
+                { "key": "accountId", "value": "{{flowAccountIdB}}" },
+                { "key": "sessionToken", "value": "{{flowSessionTokenA}}" }
+              ]
+            },
+            "description": "关键越权用例：\n- 保持 A 的 sessionToken\n- 只把 Query accountId 改成 B\n\n真实业务期望：403/401/400，或空列表。\n若仍 200 且 data.catalog.accountId=B → 水平越权成立。\n\n本请求的 Tests 会在漏洞成立时故意 fail，方便 Runner 标红。"
+          }
+        },
+        {
+          "name": "2.3 对照：B 的 session + B 的 accountId（应成功）",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const accB = pm.collectionVariables.get('flowAccountIdB');",
+                  "pm.test('B 查自己应 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('响应 accountId 等于 B', function () {",
+                  "    pm.expect(json?.data?.catalog?.accountId).to.eql(accB);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/debug-flow/catalog?accountId={{flowAccountIdB}}&sessionToken={{flowSessionTokenB}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["debug-flow", "catalog"],
+              "query": [
+                { "key": "accountId", "value": "{{flowAccountIdB}}" },
+                { "key": "sessionToken", "value": "{{flowSessionTokenB}}" }
+              ]
+            },
+            "description": "对照：B 查自己应成功，证明 B 的身份本身有效，问题出在「跨 accountId」。"
+          }
+        }
+      ]
+    }
+  ]
+}

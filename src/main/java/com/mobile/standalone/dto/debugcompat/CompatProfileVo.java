@@ -3,15 +3,15 @@ package com.mobile.standalone.dto.debugcompat;
 import lombok.Data;
 
 /**
- * debug-compat 返回体（基线）。后续故意删字段 / 改类型，供接口对比检出 BREAKING。
+ * debug-compat 返回体（破坏版）。
+ * <p>
+ * 相对基线：score String→Integer（TYPE_CHANGED）；删除 remark（REMOVED）。
  */
 @Data
 public class CompatProfileVo {
     private Long id;
     /** 展示名 */
     private String name;
-    /** 基线是 String；破坏版会改成 Integer → TYPE_CHANGED */
-    private String score;
-    /** 基线有此字段；破坏版会删除 → REMOVED */
-    private String remark;
+    /** 破坏：由 String 改为 Integer */
+    private Integer score;
 }

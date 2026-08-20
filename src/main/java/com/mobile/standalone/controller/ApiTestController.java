@@ -206,8 +206,9 @@ public class ApiTestController {
                 case ApiTestCaseService.PROJECT_DATA_CENTER -> "api-test/seed-data-center.json";
                 case ApiTestCaseService.PROJECT_DEBUG_TESTS -> "api-test/seed-debug-tests.json";
                 case ApiTestCaseService.PROJECT_DEBUG_FLOW -> "api-test/seed-debug-flow.json";
+                case ApiTestCaseService.PROJECT_DEBUG_COMPAT -> "api-test/seed-debug-compat.json";
                 default -> throw new IllegalArgumentException(
-                        "暂不支持重导项目: " + p + "（目前仅 data-center、debug-tests、debug-flow）");
+                        "暂不支持重导项目: " + p + "（目前仅 data-center、debug-tests、debug-flow、debug-compat）");
             };
             int n = caseService.reimportProjectSeed(p, json);
             return ResponseEntity.ok(Map.of("ok", true, "imported", n, "project", p));

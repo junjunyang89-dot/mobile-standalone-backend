@@ -6,61 +6,58 @@ import com.mobile.standalone.dto.debugcompat.CompatProfileVo;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 「可能不兼容 / BREAKING」调试接口（基线版本）。
+ * 「可能不兼容 / BREAKING」调试接口（破坏版）。
  * <p>
- * 用法：先提交本基线，再改成破坏版并再提交；接口对比分析选
- * <b>基线 commit → 破坏版 commit</b>（不要只对 main，新接口对 main 只会标 NEW）。
- * <p>
- * 前缀 /debug-compat，完整 URL /api/debug-compat/...
+ * 相对基线 commit 的故意破坏：
+ * <ul>
+ *   <li>{@code GET /profile}：新增必填 QUERY {@code tenantId}；返回体删 remark、score 改类型</li>
+ *   <li>{@code POST /order}：body 新增必填 {@code region}；返回体删 status</li>
+ *   <li>{@code GET /legacy-ping}：整段删除 → REMOVED</li>
+ * </ul>
+ * 接口对比分析请选：基准={@code 596fb8d}（或「debug-compat baseline」），待测=本提交 / HEAD。
  */
 @RestController
 @RequestMapping("/debug-compat")
 public class DebugCompatController {
 
     /**
-     * 查资料。基线：只要 userId。
-     * 破坏版会新增必填 tenantId，且返回体删 remark、score 改类型。
+     * 查资料（破坏版）：多了必填 tenantId。
      */
     @GetMapping("/profile")
-    public ResponseEntity<CompatProfileVo> profile(@RequestParam String userId) {
+    public ResponseEntity<?> profile(
+            @RequestParam String userId,
+            @RequestParam String tenantId
+    ) {
+        if (tenantId == null || tenantId.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "tenantId 不能为空"));
+        }
         CompatProfileVo vo = new CompatProfileVo();
         vo.setId(1001L);
-        vo.setName("compat-" + userId);
-        vo.setScore("80");
-        vo.setRemark("baseline-remark");
+        vo.setName("compat-" + userId + "@" + tenantId);
+        vo.setScore(85);
         return ResponseEntity.ok(vo);
     }
 
     /**
-     * 下单。基线 body：sku + qty。
-     * 破坏版会在 body 增加必填 region，并删除返回 status。
+     * 下单（破坏版）：body 必须带 region。
      */
     @PostMapping("/order")
     public ResponseEntity<?> order(@RequestBody CompatOrderRequest body) {
         if (body == null || body.getSku() == null || body.getSku().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("message", "sku 不能为空"));
         }
+        if (body.getRegion() == null || body.getRegion().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "region 不能为空"));
+        }
         int qty = body.getQty() == null || body.getQty() < 1 ? 1 : body.getQty();
         CompatOrderVo vo = new CompatOrderVo();
         vo.setOrderId("COMPAT-ORD-1");
         vo.setAmount(39.9 * qty);
-        vo.setStatus("CREATED");
         return ResponseEntity.ok(vo);
     }
 
-    /**
-     * 遗留探活。破坏版会整段删除本接口 → REMOVED / BREAKING。
-     */
-    @GetMapping("/legacy-ping")
-    public ResponseEntity<Map<String, Object>> legacyPing() {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("ok", true);
-        body.put("module", "debug-compat");
-        body.put("version", "baseline");
-        return ResponseEntity.ok(body);
-    }
+    // legacy-ping 已删除：相对基线为 REMOVED / BREAKING
 }
