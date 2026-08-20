@@ -38,6 +38,10 @@
         SELECT * FROM debug_api_tests WHERE id = #{id}
     </select>
 
+    <select id="findByName" resultMap="Map">
+        SELECT * FROM debug_api_tests WHERE name = #{name} LIMIT 1
+    </select>
+
     <select id="search" resultMap="Map">
         SELECT * FROM debug_api_tests
         <where>

@@ -17,6 +17,8 @@ public interface DebugApiTestMapper {
 
     DebugApiTest findById(@Param("id") Long id);
 
+    DebugApiTest findByName(@Param("name") String name);
+
     List<DebugApiTest> search(
             @Param("status") String status,
             @Param("keyword") String keyword,

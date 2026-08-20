@@ -35,6 +35,8 @@ public class ApiTestCaseService {
     public static final String PROJECT_DATA_CENTER = "data-center";
     /** 接口对比调试用的 CRUD 样例项目，和真实业务项目分开放 */
     public static final String PROJECT_DEBUG_TESTS = "debug-tests";
+    /** 多层依赖 + 嵌套 JSON 抽取专用调试项目 */
+    public static final String PROJECT_DEBUG_FLOW = "debug-flow";
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> METHODS = Set.of("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD");
@@ -147,6 +149,8 @@ public class ApiTestCaseService {
             // 而表现是「我明明改过的用例又变回去了」。走 IfAbsent，只在这个项目一条用例都没有时导一次
             projectService.ensureExists(PROJECT_DEBUG_TESTS, "debug-tests（接口对比调试）");
             importProjectSeedIfAbsent(PROJECT_DEBUG_TESTS, "api-test/seed-debug-tests.json");
+            projectService.ensureExists(PROJECT_DEBUG_FLOW, "debug-flow（多层依赖嵌套调试）");
+            importProjectSeedIfAbsent(PROJECT_DEBUG_FLOW, "api-test/seed-debug-flow.json");
             log.info("[api-test] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test] 建表/导入失败: {}", e.getMessage());
@@ -319,6 +323,7 @@ public class ApiTestCaseService {
                 c.setHeaders(str(m.get("headers")));
                 c.setBody(str(m.get("body")));
                 c.setAssertions(str(m.get("assertions")));
+                c.setExtractJson(str(m.get("extractJson")));
                 c.setFieldNotes(str(m.get("fieldNotes")));
                 Object en = m.get("enabled");
                 c.setEnabled(en == null || Boolean.TRUE.equals(en) || "true".equalsIgnoreCase(String.valueOf(en)));
