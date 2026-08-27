@@ -59,8 +59,37 @@ public class ApiTestScheduleService {
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
             log.info("[api-test-schedule] 表已就绪");
+            seedDebugSmokeScheduleIfAbsent();
         } catch (Exception e) {
             log.warn("[api-test-schedule] 建表失败: {}", e.getMessage());
+        }
+    }
+
+    /** debug-smoke 用例定时冒烟（默认关闭；跑 0825 分支后端时再启用） */
+    private void seedDebugSmokeScheduleIfAbsent() {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM api_test_schedules WHERE name = ?",
+                    Integer.class, "debug-smoke 每日冒烟");
+            if (n != null && n > 0) {
+                return;
+            }
+            ApiTestSchedule s = new ApiTestSchedule();
+            s.setId("atsch-debug-smoke");
+            s.setName("debug-smoke 每日冒烟");
+            s.setCron("0 0 9 * * ?");
+            s.setProject("debug-smoke");
+            s.setEnvironment("TEST");
+            s.setEnabled(false);
+            s.setCollectionId(null);
+            LocalDateTime now = LocalDateTime.now();
+            s.setNextRunAt(nextAfter(s.getCron(), now));
+            s.setCreatedAt(now);
+            s.setUpdatedAt(now);
+            mapper.insert(s);
+            log.info("[api-test-schedule] 已种子 debug-smoke 定时任务（默认关闭）");
+        } catch (Exception e) {
+            log.debug("[api-test-schedule] debug-smoke 定时种子跳过: {}", e.getMessage());
         }
     }
 

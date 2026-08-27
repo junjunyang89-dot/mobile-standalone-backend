@@ -1,0 +1,45 @@
+[
+  {
+    "id": "debug-smoke-01-ping",
+    "project": "debug-smoke",
+    "name": "冒烟 ping",
+    "description": "GET /debug-smoke/ping，抽 smokeTraceId",
+    "method": "GET",
+    "path": "/debug-smoke/ping",
+    "headers": "{\"Accept\":\"application/json\",\"Authorization\":\"Bearer {{token}}\"}",
+    "assertions": "[{\"type\":\"status\",\"equals\":200},{\"type\":\"jsonPath\",\"path\":\"$.ok\",\"equals\":true},{\"type\":\"jsonPath\",\"path\":\"$.traceId\",\"exists\":true}]",
+    "extractJson": "{\"smokeTraceId\":\"$.traceId\"}",
+    "enabled": true,
+    "sortOrder": 10,
+    "createdBy": "seed-debug-smoke",
+    "environment": "ANY"
+  },
+  {
+    "id": "debug-smoke-02-create-job",
+    "project": "debug-smoke",
+    "name": "创建冒烟任务",
+    "method": "POST",
+    "path": "/debug-smoke/jobs",
+    "headers": "{\"Accept\":\"application/json\",\"Content-Type\":\"application/json\",\"Authorization\":\"Bearer {{token}}\"}",
+    "body": "{\"name\":\"smoke-job-demo\",\"traceId\":\"{{smokeTraceId}}\"}",
+    "assertions": "[{\"type\":\"status\",\"equals\":200},{\"type\":\"jsonPath\",\"path\":\"$.code\",\"equals\":0},{\"type\":\"jsonPath\",\"path\":\"$.data.job.status\",\"equals\":\"QUEUED\"}]",
+    "extractJson": "{\"smokeJobId\":\"$.data.job.id\"}",
+    "enabled": true,
+    "sortOrder": 20,
+    "createdBy": "seed-debug-smoke",
+    "environment": "ANY"
+  },
+  {
+    "id": "debug-smoke-03-get-job",
+    "project": "debug-smoke",
+    "name": "查询冒烟任务",
+    "method": "GET",
+    "path": "/debug-smoke/jobs/{{smokeJobId}}",
+    "headers": "{\"Accept\":\"application/json\",\"Authorization\":\"Bearer {{token}}\"}",
+    "assertions": "[{\"type\":\"status\",\"equals\":200},{\"type\":\"jsonPath\",\"path\":\"$.data.job.status\",\"equals\":\"DONE\"}]",
+    "enabled": true,
+    "sortOrder": 30,
+    "createdBy": "seed-debug-smoke",
+    "environment": "ANY"
+  }
+]

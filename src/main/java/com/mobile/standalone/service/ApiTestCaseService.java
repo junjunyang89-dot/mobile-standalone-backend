@@ -39,6 +39,8 @@ public class ApiTestCaseService {
     public static final String PROJECT_DEBUG_FLOW = "debug-flow";
     /** 故意制造 BREAKING 变更，调试「可能不兼容」 */
     public static final String PROJECT_DEBUG_COMPAT = "debug-compat";
+    /** 0825 提测冒烟用例种子（接口在 backend-0825 分支） */
+    public static final String PROJECT_DEBUG_SMOKE = "debug-smoke";
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> METHODS = Set.of("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD");
@@ -155,6 +157,8 @@ public class ApiTestCaseService {
             importProjectSeedIfAbsent(PROJECT_DEBUG_FLOW, "api-test/seed-debug-flow.json");
             projectService.ensureExists(PROJECT_DEBUG_COMPAT, "debug-compat（不兼容变更调试）");
             importProjectSeedIfAbsent(PROJECT_DEBUG_COMPAT, "api-test/seed-debug-compat.json");
+            projectService.ensureExists(PROJECT_DEBUG_SMOKE, "debug-smoke（0825提测）");
+            importProjectSeedIfAbsent(PROJECT_DEBUG_SMOKE, "api-test/seed-debug-smoke.json");
             log.info("[api-test] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test] 建表/导入失败: {}", e.getMessage());
