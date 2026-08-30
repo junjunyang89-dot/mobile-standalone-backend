@@ -10,6 +10,9 @@ import java.util.List;
 public interface ApiProjectMapper {
     List<ApiProject> findAll(@Param("enabledOnly") Boolean enabledOnly);
 
+    /** 接口清单 / 代码对比用：后端项目，且已配仓库或已有接口记录 */
+    List<ApiProject> findForCatalog(@Param("enabledOnly") Boolean enabledOnly);
+
     ApiProject findByCode(@Param("code") String code);
 
     int insert(ApiProject row);

@@ -59,7 +59,8 @@ class ApiTestBizCodeTest {
     void setUp() {
         projects = new FakeProjectService();
         // 其余依赖这组用例走不到，传 null 即可
-        runner = new ApiTestRunnerService(null, null, null, null, null, projects, null);
+        runner = new ApiTestRunnerService(null, null, null, null, null, projects, null,
+                new com.mobile.standalone.service.apitest.DbAssertRunner(), null);
     }
 
     private static ApiTestCase c(String project) {

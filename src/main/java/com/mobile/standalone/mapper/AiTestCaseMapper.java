@@ -31,6 +31,9 @@ public interface AiTestCaseMapper {
             @Param("batchId") String batchId,
             @Param("automationAdvice") String automationAdvice,
             @Param("releaseStage") String releaseStage,
+            @Param("appVersion") String appVersion,
+            @Param("requirementNo") String requirementNo,
+            @Param("side") String side,
             @Param("keyword") String keyword,
             @Param("offset") int offset,
             @Param("limit") int limit
@@ -45,8 +48,18 @@ public interface AiTestCaseMapper {
             @Param("batchId") String batchId,
             @Param("automationAdvice") String automationAdvice,
             @Param("releaseStage") String releaseStage,
+            @Param("appVersion") String appVersion,
+            @Param("requirementNo") String requirementNo,
+            @Param("side") String side,
             @Param("keyword") String keyword
     );
+
+    /** 这个集合下出现过哪些版本，以及各自多少条。版本下拉用 */
+    List<java.util.Map<String, Object>> distinctVersions(@Param("category") String category);
+
+    /** 某一版下每个单号有多少条用例。「这个单子测完了没有」靠它回答 */
+    List<java.util.Map<String, Object>> countByRequirement(
+            @Param("category") String category, @Param("appVersion") String appVersion);
 
     int insert(AiTestCase row);
 

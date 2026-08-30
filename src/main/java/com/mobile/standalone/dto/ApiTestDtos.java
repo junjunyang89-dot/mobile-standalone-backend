@@ -60,6 +60,15 @@ public final class ApiTestDtos {
         private List<String> assertionResults = new ArrayList<>();
         /** 响应体截断预览 */
         private String bodyPreview;
+        /**
+         * 实际发出去的请求头/请求体，和实际收到的响应头。
+         * <p>
+         * 只给一个「断言失败」，人还得自己去猜发了什么、收到了什么——
+         * 于是拿 Postman 再手工重放一遍。那一步是这套东西本该省掉的。
+         */
+        private java.util.Map<String, String> reqHeaders;
+        private String reqBody;
+        private java.util.Map<String, String> respHeaders;
     }
 
     @Data

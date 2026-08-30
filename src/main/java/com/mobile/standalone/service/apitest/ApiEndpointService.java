@@ -13,6 +13,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -60,6 +63,10 @@ public class ApiEndpointService {
                     """);
             ensureColumn("api_test_cases", "endpoint_id",
                     "VARCHAR(64) NULL COMMENT '归属接口（api_endpoints.id）' AFTER project");
+            ensureColumn("api_endpoints", "capture_meta",
+                    "MEDIUMTEXT NULL COMMENT '抓包解析：字段样本、请求预览' AFTER fields_snapshot");
+            ensureColumn("api_endpoints", "doc_meta",
+                    "MEDIUMTEXT NULL COMMENT '接口文档：说明、依赖、关联接口' AFTER capture_meta");
             migrateExistingCases();
             log.info("[api-endpoints] 表已就绪");
         } catch (Exception e) {
@@ -128,7 +135,11 @@ public class ApiEndpointService {
     }
 
     public List<ApiEndpoint> search(String project, String keyword, String changeFlag, String status) {
-        List<ApiEndpoint> rows = endpointMapper.search(project, keyword, changeFlag, status);
+        List<String> projectCodes = null;
+        if (project != null && !project.isBlank()) {
+            projectCodes = ApiAppCatalog.matchProjectCodes(project);
+        }
+        List<ApiEndpoint> rows = endpointMapper.search(projectCodes, keyword, changeFlag, status);
         for (ApiEndpoint e : rows) {
             e.setCaseCount(e.getCaseCount() == null ? 0 : e.getCaseCount());
             e.setStrongCaseCount(e.getStrongCaseCount() == null ? 0 : e.getStrongCaseCount());
@@ -139,6 +150,12 @@ public class ApiEndpointService {
 
     public ApiEndpoint get(String id) {
         return id == null ? null : endpointMapper.findById(id);
+    }
+
+    /** 解析接口 handler，供用例集合等模块展示 Controller 名称 */
+    public String handlerOfEndpoint(String endpointId) {
+        ApiEndpoint ep = get(endpointId);
+        return ep != null ? ep.getHandler() : null;
     }
 
     /**
@@ -238,6 +255,82 @@ public class ApiEndpointService {
      * @return 接口 id；项目或路径为空时返回 null（这种用例本来也挂不上）
      */
     @Transactional
+    /**
+     * 按分支汇总：对比分析出来的接口挂在分支上，那是测试环境树的另一个根。
+     * <p>
+     * 分支和单号是两个入口，不是两级：一个分支上合了好几个单，
+     * 一个单也可能跨分支。硬做成父子，总有一边对不上。
+     */
+    public List<java.util.Map<String, Object>> summaryByBranch() {
+        try {
+            return jdbcTemplate.queryForList("""
+                    SELECT source_branch AS branch, project,
+                           COUNT(*) AS total,
+                           SUM(CASE WHEN change_flag IS NOT NULL AND change_flag <> '' THEN 1 ELSE 0 END) AS changed
+                      FROM api_endpoints
+                     WHERE source_branch IS NOT NULL AND source_branch <> ''
+                     GROUP BY source_branch, project
+                     ORDER BY total DESC
+                    """);
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 按分支汇总失败: {}", e.getMessage());
+            return java.util.List.of();
+        }
+    }
+
+    /**
+     * 同项目下、路径尾部相同、但<b>还没有文档</b>的接口。
+     * <p>
+     * 同一个契约常常有两条路径：GLD 直连的 {@code /gld/deadlock/friend/list}
+     * 和 DC 编排透传的 {@code /appdatacenter/deadlock/data/friend/list}
+     * （文档原话「data-center 编排并透传」）。文档只在其中一条下面放参数表，
+     * 而人抓到的往往恰恰是没写的那条——结果就是那条接口一条边界用例都生成不出来。
+     * <p>
+     * 用<b>最后两段</b>匹配，不是最后一段：只比一段的话 {@code /a/list} 和
+     * {@code /b/list} 会被认成同一个，那种串味比不匹配糟得多。
+     * <p>
+     * 只套给<b>还没有文档</b>的：已经有文档的说明文档里单独写了它，
+     * 拿别人的约束盖掉是在用推断覆盖事实。
+     */
+    public List<String> sameTailPaths(String project, String httpMethod, String path) {
+        String tail = tailOf(path);
+        if (tail == null) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        try {
+            for (ApiEndpoint e : endpointMapper.search(List.of(project), null, null, null)) {
+                if (e.getPath() == null || e.getPath().equals(path)) {
+                    continue;
+                }
+                if (!httpMethod.equalsIgnoreCase(e.getHttpMethod())) {
+                    continue;
+                }
+                if (e.getDocMeta() != null && !e.getDocMeta().isBlank()) {
+                    continue;
+                }
+                if (tail.equals(tailOf(e.getPath()))) {
+                    out.add(e.getPath());
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("[api-endpoints] 找同名路径失败 {}: {}", path, ex.getMessage());
+        }
+        return out;
+    }
+
+    /** 路径最后两段，如 {@code friend/list} */
+    static String tailOf(String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        String[] parts = path.trim().replaceAll("^/+|/+$", "").split("/");
+        if (parts.length < 2) {
+            return null;
+        }
+        return parts[parts.length - 2] + "/" + parts[parts.length - 1];
+    }
+
     public String ensureEndpointFor(String project, String httpMethod, String path,
                                     String handler, String summary) {
         if (project == null || project.isBlank() || path == null || path.isBlank()
@@ -299,6 +392,214 @@ public class ApiEndpointService {
         } catch (Exception ex) {
             return List.of();
         }
+    }
+
+    public Map<String, Object> captureMetaOf(ApiEndpoint e) {
+        return EndpointAssertionContext.readMeta(e == null ? null : e.getCaptureMeta());
+    }
+
+    public Map<String, Object> docMetaOf(ApiEndpoint e) {
+        return EndpointAssertionContext.readMeta(e == null ? null : e.getDocMeta());
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> captureSamplesOf(ApiEndpoint e) {
+        Map<String, Object> meta = captureMetaOf(e);
+        Object s = meta.get("samples");
+        if (!(s instanceof Map<?, ?> m)) {
+            return Map.of();
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        m.forEach((k, v) -> {
+            if (k != null) {
+                out.put(String.valueOf(k), v);
+            }
+        });
+        return out;
+    }
+
+    /**
+     * 把抓包时的真实 query 参数存下来。
+     * <p>
+     * 边界用例要「只改一个参数，其余保持真实」——没有真实值的话，
+     * 请求本身就是错的，跑出来的失败说明不了任何问题。
+     * 而真实值只有抓包拿得到：文档只给默认值，必填参数（steamId 这种）根本没有默认值。
+     */
+    @Transactional
+    public void applyCaptureQuery(String project, String httpMethod, String path, String query) {
+        applyCaptureRequest(project, httpMethod, path, query, null);
+    }
+
+    /**
+     * 存下抓包时的<b>完整请求</b>：query + 请求头。
+     * <p>
+     * 生成用例时只带一个 {@code Accept} 是跑不起来的——网关要 token、要 appId、
+     * 要 steamId，缺一个就直接回 {@code Service is busy}。而这些值只有抓包拿得到。
+     * <p>
+     * 鉴权头<b>不存</b>：token 会过期，写死进用例的话，过期那天所有用例集体变红，
+     * 而红的原因和接口本身毫无关系。token 归环境（{@code api_test_envs.default_token}），
+     * 一处改、全部生效。
+     */
+    @Transactional
+    public void applyCaptureRequest(String project, String httpMethod, String path,
+                                    String query, Map<String, String> reqHeaders) {
+        if (project == null || path == null) {
+            return;
+        }
+        Map<String, String> parsed = query == null || query.isBlank()
+                ? Map.of() : parseQuery(query);
+        Map<String, String> headers = usefulHeaders(reqHeaders);
+        if (parsed.isEmpty() && headers.isEmpty()) {
+            return;
+        }
+        try {
+            ApiEndpoint row = endpointMapper.findByKey(project, httpMethod, path);
+            if (row == null) {
+                return;
+            }
+            Map<String, Object> meta = new java.util.LinkedHashMap<>(captureMetaOf(row));
+            if (!parsed.isEmpty()) {
+                meta.put("queryParams", parsed);
+            }
+            if (!headers.isEmpty()) {
+                meta.put("reqHeaders", headers);
+            }
+            meta.putIfAbsent("capturedAt", java.time.LocalDateTime.now().toString());
+            row.setCaptureMeta(EndpointAssertionContext.metaJson(meta));
+            endpointMapper.update(row);
+        } catch (Exception e) {
+            // 存不下来只影响生成的请求完整度，不该让抓包收尾失败
+            log.debug("[api-endpoints] 存抓包请求失败 {} {}: {}", httpMethod, path, e.getMessage());
+        }
+    }
+
+    /** 传输层的头和鉴权头都不留：前者换个客户端就变，后者会过期 */
+    private static final Set<String> DROP_HEADERS = Set.of(
+            "host", "content-length", "accept-encoding", "connection", "transfer-encoding",
+            "token", "authorization", "cookie", "x-access-token", "x-auth-token");
+
+    static Map<String, String> usefulHeaders(Map<String, String> raw) {
+        Map<String, String> out = new java.util.LinkedHashMap<>();
+        if (raw == null) {
+            return out;
+        }
+        raw.forEach((k, v) -> {
+            if (k == null || v == null) {
+                return;
+            }
+            if (!DROP_HEADERS.contains(k.trim().toLowerCase(Locale.ROOT))) {
+                out.put(k.trim(), v);
+            }
+        });
+        return out;
+    }
+
+    static Map<String, String> parseQuery(String query) {
+        Map<String, String> out = new java.util.LinkedHashMap<>();
+        for (String pair : query.split("&")) {
+            if (pair.isBlank()) {
+                continue;
+            }
+            int i = pair.indexOf('=');
+            // 没有等号的（?flag 这种）当成空值参数，不是丢掉：
+            // 它照样是请求的一部分，边界用例重放时要带上
+            String k = i < 0 ? pair : pair.substring(0, i);
+            String v = i < 0 ? "" : pair.substring(i + 1);
+            if (!k.isBlank()) {
+                out.put(java.net.URLDecoder.decode(k, java.nio.charset.StandardCharsets.UTF_8),
+                        java.net.URLDecoder.decode(v, java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 抓包挂接口时：把响应体解析进 fields_snapshot + capture_meta。
+     */
+    @Transactional
+    public void applyCaptureDetail(String endpointId, String reqBody, String respBody) {
+        if (endpointId == null || endpointId.isBlank()) {
+            return;
+        }
+        ApiEndpoint row = endpointMapper.findById(endpointId);
+        if (row == null) {
+            return;
+        }
+        CaptureJsonParser.Sample sample = CaptureJsonParser.parseBodies(reqBody, respBody);
+        if (sample.fieldNames().isEmpty() && sample.topLevelSamples().isEmpty()) {
+            return;
+        }
+
+        List<String> merged = mergeFieldNames(responseFieldsOf(row), sample.fieldNames());
+        if (!merged.isEmpty()) {
+            row.setFieldsSnapshot(fieldsJson(merged));
+        }
+
+        Map<String, Object> capMeta = new java.util.LinkedHashMap<>();
+        capMeta.put("capturedAt", java.time.LocalDateTime.now().toString());
+        capMeta.put("fields", sample.fieldNames());
+        capMeta.put("samples", sample.topLevelSamples());
+        if (sample.reqPreview() != null) {
+            capMeta.put("reqPreview", sample.reqPreview());
+        }
+        row.setCaptureMeta(EndpointAssertionContext.metaJson(capMeta));
+        endpointMapper.update(row);
+        log.info("[api-endpoints] {} 已写入抓包样本 {} 个字段", endpointId, sample.fieldNames().size());
+    }
+
+    /**
+     * 接口文档导入：说明、依赖写入 doc_meta（<b>仅参考</b>，不合并进 fields_snapshot）。
+     * <p>
+     * 各开发文档格式不一，字段也常与线上一致性无保证——不能拿来生成断言。
+     */
+    @Transactional
+    public ApiEndpoint applyDocMeta(String project, String httpMethod, String path, Map<String, Object> docMeta) {
+        if (project == null || path == null || httpMethod == null || docMeta == null || docMeta.isEmpty()) {
+            return null;
+        }
+        String epId = ensureEndpointFor(project, httpMethod, path,
+                str(docMeta.get("operationId")), str(docMeta.get("summary")));
+        if (epId == null) {
+            return null;
+        }
+        ApiEndpoint row = endpointMapper.findById(epId);
+        if (row == null) {
+            return null;
+        }
+
+        String summary = str(docMeta.get("summary"));
+        if ((row.getSummary() == null || row.getSummary().isBlank()) && summary != null) {
+            row.setSummary(summary);
+        }
+
+        docMeta.putIfAbsent("importedAt", java.time.LocalDateTime.now().toString());
+        docMeta.putIfAbsent("referenceOnly", true);
+        row.setDocMeta(EndpointAssertionContext.metaJson(docMeta));
+        endpointMapper.update(row);
+        return endpointMapper.findById(epId);
+    }
+
+    private static List<String> mergeFieldNames(List<String> existing, List<String> extra) {
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+        if (existing != null) {
+            existing.forEach(f -> {
+                if (f != null && !f.isBlank()) {
+                    set.add(f.trim());
+                }
+            });
+        }
+        if (extra != null) {
+            extra.forEach(f -> {
+                if (f != null && !f.isBlank()) {
+                    set.add(f.trim());
+                }
+            });
+        }
+        return new ArrayList<>(set);
+    }
+
+    private static String str(Object o) {
+        return o == null ? null : String.valueOf(o).trim();
     }
 
     /** 清单上的状态是算出来的，不存库——存一列人手维护的状态，改了没人回来更新 */

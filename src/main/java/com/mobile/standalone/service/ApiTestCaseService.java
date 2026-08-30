@@ -142,8 +142,19 @@ public class ApiTestCaseService {
             ensureEnvironmentColumn();
             ensureColumn("api_test_cases", "collection_id",
                     "VARCHAR(64) NULL COMMENT '归属集合' AFTER project");
+            ensureCollectionScopeColumns();
             ensureColumn("api_test_cases", "extract_json",
                     "TEXT NULL COMMENT '执行后抽变量，如 {\"token\":\"$.result.token\"}' AFTER assertions");
+            // 数据库断言的连接跟着环境走，和 base_url 一个逻辑：
+            // 切到预发就该查预发的库，否则「接口打的是预发、断言查的是测试库」，
+            // 这种错查出来的结论全是反的
+            ensureColumn("api_test_envs", "db_host",
+                    "VARCHAR(255) NULL COMMENT '数据库断言用的只读库地址'");
+            ensureColumn("api_test_envs", "db_port", "INT NULL COMMENT '默认 3306'");
+            ensureColumn("api_test_envs", "db_name", "VARCHAR(128) NULL");
+            ensureColumn("api_test_envs", "db_user",
+                    "VARCHAR(128) NULL COMMENT '务必用只读账号'");
+            ensureColumn("api_test_envs", "db_password", "VARCHAR(255) NULL");
             seedEnvsIfEmpty();
             projectService.ensureExists(PROJECT_DATA_CENTER, "data-center（数据中心）");
             importProjectSeedIfAbsent(PROJECT_DATA_CENTER, "api-test/seed-data-center.json");
@@ -185,6 +196,21 @@ public class ApiTestCaseService {
         } catch (Exception e) {
             log.debug("[api-test] {}.{} 列检查跳过: {}", table, column, e.getMessage());
         }
+    }
+
+    private void ensureCollectionScopeColumns() {
+        ensureColumn("api_test_collections", "scope",
+                "VARCHAR(16) NULL DEFAULT 'LIVE' COMMENT 'TEST=迭代临时 LIVE=master回归'");
+        ensureColumn("api_test_collections", "lifecycle",
+                "VARCHAR(16) NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE/ARCHIVED'");
+        ensureColumn("api_test_collections", "requirement_no",
+                "VARCHAR(64) NULL COMMENT '关联需求单 APP-xxxx'");
+        ensureColumn("api_test_collections", "app_version",
+                "VARCHAR(128) NULL COMMENT '版本迭代标签如 9.3 国内客户端'");
+        // 分支对比来的集合关联分支而不是需求单：一个分支上可能合了好几个单，
+        // 硬塞一个单号进去，另外几个单就在链路上消失了
+        ensureColumn("api_test_collections", "source_branch",
+                "VARCHAR(255) NULL COMMENT '分支对比来的集合关联的分支' AFTER app_version");
     }
 
     private void ensureProjectColumn() {
@@ -359,8 +385,20 @@ public class ApiTestCaseService {
         return o == null ? null : String.valueOf(o);
     }
 
+    /**
+     * 列环境。数据库断言的密码<b>不回显</b>，只给一个遮罩。
+     * <p>
+     * 这是个前端能拿到的接口，明文吐出去就等于把测试库账号贴在了页面上。
+     * 和 {@code env_variables} 的敏感值一个处理方式。
+     */
     public List<ApiTestEnv> listEnvs() {
-        return envMapper.findAll();
+        List<ApiTestEnv> list = envMapper.findAll();
+        for (ApiTestEnv e : list) {
+            if (e.getDbPassword() != null && !e.getDbPassword().isBlank()) {
+                e.setDbPassword(EnvVariableService.MASK);
+            }
+        }
+        return list;
     }
 
     public ApiTestEnv getEnv(String environment) {
@@ -377,6 +415,12 @@ public class ApiTestCaseService {
             throw new IllegalArgumentException("baseUrl 必填");
         }
         body.setBaseUrl(trimSlash(body.getBaseUrl().trim()));
+        // 前端拿到的是遮罩，原样传回来时不能当成「用户把密码改成了这串点」
+        ApiTestEnv old = envMapper.findByEnvironment(body.getEnvironment());
+        if (old != null && (body.getDbPassword() == null
+                || EnvVariableService.MASK.equals(body.getDbPassword()))) {
+            body.setDbPassword(old.getDbPassword());
+        }
         if (body.getName() == null || body.getName().isBlank()) {
             body.setName(TestEnvironment.isTest(body.getEnvironment()) ? "测试环境" : "线上环境");
         }

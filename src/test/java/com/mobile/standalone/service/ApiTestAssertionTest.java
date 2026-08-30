@@ -22,15 +22,18 @@ class ApiTestAssertionTest {
 
     @BeforeEach
     void setUp() {
-        runner = new ApiTestRunnerService(null, null, null, null, null, null, null);
+        runner = new ApiTestRunnerService(null, null, null, null, null, null, null,
+                new com.mobile.standalone.service.apitest.DbAssertRunner(), null);
     }
 
     private boolean check(String assertions, int status, String body,
                           Map<String, List<String>> headers, long elapsedMs) throws Exception {
         var m = ApiTestRunnerService.class.getDeclaredMethod(
-                "evaluateAssertions", String.class, int.class, String.class, Map.class, long.class, List.class);
+                "evaluateAssertions", String.class, int.class, String.class, Map.class, long.class,
+                ApiTestRunnerService.DbContext.class, List.class);
         m.setAccessible(true);
-        return (boolean) m.invoke(runner, assertions, status, body, headers, elapsedMs, new ArrayList<String>());
+        return (boolean) m.invoke(runner, assertions, status, body, headers, elapsedMs,
+                ApiTestRunnerService.DbContext.empty(), new ArrayList<String>());
     }
 
     private boolean check(String assertions, String body) throws Exception {

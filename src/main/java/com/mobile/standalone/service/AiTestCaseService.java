@@ -55,6 +55,30 @@ public class AiTestCaseService {
                         COMMENT '发布轨：TESTING|ONLINE'
                         AFTER automation_advice
                 """, "idx_release_stage");
+        ensureColumn("app_version", """
+                ALTER TABLE ai_test_cases
+                    ADD COLUMN app_version VARCHAR(32) NULL
+                        COMMENT '所属 APP 版本，如 9.3。与功能模块正交，便于版本测完后把用例并进回归集'
+                        AFTER release_stage
+                """, "idx_app_version");
+        ensureColumn("server_service", """
+                ALTER TABLE ai_test_cases
+                    ADD COLUMN server_service VARCHAR(128) NULL
+                        COMMENT '涉及端含后端时，具体哪个服务'
+                        AFTER sides
+                """, null);
+        ensureColumn("sides", """
+                ALTER TABLE ai_test_cases
+                    ADD COLUMN sides VARCHAR(64) NULL
+                        COMMENT '涉及端，逗号分隔：CLIENT,H5,SERVER,ADMIN'
+                        AFTER platform
+                """, "idx_sides");
+        ensureColumn("requirement_no", """
+                ALTER TABLE ai_test_cases
+                    ADD COLUMN requirement_no VARCHAR(64) NULL
+                        COMMENT '所属需求单号，如 APP-8873'
+                        AFTER app_version
+                """, "idx_requirement_no");
         ensureColumn("linked_at", """
                 ALTER TABLE ai_test_cases
                     ADD COLUMN linked_at DATETIME NULL
@@ -411,6 +435,20 @@ public class AiTestCaseService {
         if (patch.getTestItem() != null) existing.setTestItem(patch.getTestItem());
         if (patch.getTestPoint() != null) existing.setTestPoint(patch.getTestPoint());
         if (patch.getPageName() != null) existing.setPageName(patch.getPageName());
+        // 空串＝清空涉及端，null＝不改。批量改时「不改这一项」靠的就是这个区分
+        if (patch.getSides() != null) {
+            existing.setSides(patch.getSides().isBlank()
+                    ? null
+                    : RequirementSide.join(List.of(patch.getSides().split(","))));
+        }
+        if (patch.getServerService() != null) {
+            existing.setServerService(patch.getServerService().isBlank()
+                    ? null : patch.getServerService().trim());
+        }
+        // 端里没有「后端」时，服务名留着只会误导——它指向一个这条用例根本不涉及的团队
+        if (!RequirementSide.hasServer(existing.getSides())) {
+            existing.setServerService(null);
+        }
         if (patch.getPriority() != null) existing.setPriority(patch.getPriority());
         if (patch.getType() != null) existing.setType(patch.getType());
         if (patch.getPrecondition() != null) existing.setPrecondition(patch.getPrecondition());
@@ -511,7 +549,8 @@ public class AiTestCaseService {
 
     /** 同分类下顺次编号，如 TC-007；人工编号和生成器编号不该互相踩 */
     private String nextCaseId(String category) {
-        int n = aiTestCaseMapper.countByFilters(category, null, null, null, null, null, null, null, null);
+        int n = aiTestCaseMapper.countByFilters(
+                category, null, null, null, null, null, null, null, null, null, null, null);
         return String.format("TC-%03d", n + 1);
     }
 
@@ -782,8 +821,45 @@ public class AiTestCaseService {
         return t.isEmpty() ? null : t;
     }
 
+    /** 这个集合下出现过的版本 + 各自条数 */
+    public List<Map<String, Object>> listVersions(String category) {
+        try {
+            return aiTestCaseMapper.distinctVersions(
+                    category == null || category.isBlank() ? null : category.trim());
+        } catch (Exception e) {
+            // 列还没建好时返回空，别让整个页面打不开
+            log.debug("[ai-cases] 版本列表查询跳过: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 某一版下每个单号的用例数 */
+    public List<Map<String, Object>> countByRequirement(String category, String appVersion) {
+        try {
+            return aiTestCaseMapper.countByRequirement(
+                    category == null || category.isBlank() ? null : category.trim(),
+                    appVersion == null || appVersion.isBlank() ? null : appVersion.trim());
+        } catch (Exception e) {
+            log.debug("[ai-cases] 单号统计跳过: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 端可以是数组也可以是逗号串，两种都收——调用方各写各的会漏掉一种 */
+    @SuppressWarnings("unchecked")
+    private String sidesFrom(Object raw) {
+        if (raw instanceof List<?> list) {
+            return RequirementSide.join(list.stream().map(String::valueOf).toList());
+        }
+        if (raw instanceof String str && !str.isBlank()) {
+            return RequirementSide.join(List.of(str.split(",")));
+        }
+        return null;
+    }
+
     public Map<String, Object> list(String category, String pageName, String priority, String status, String platform,
                                     String batchId, String automationAdvice, String releaseStage,
+                                    String appVersion, String requirementNo, String side,
                                     String keyword, int page, int size) {
         int p = Math.max(1, page);
         int s = Math.min(200, Math.max(1, size));
@@ -797,17 +873,22 @@ public class AiTestCaseService {
             stage = normalizeStage(releaseStage);
         }
         String kw = keyword == null || keyword.isBlank() ? null : keyword.trim();
+        String ver = appVersion == null || appVersion.isBlank() ? null : appVersion.trim();
+        String req = requirementNo == null || requirementNo.isBlank() ? null : requirementNo.trim();
+        String sd = side == null || side.isBlank() ? null : side.trim().toUpperCase();
         List<AiTestCase> content = aiTestCaseMapper.findByFilters(
-                category, pageName, priority, status, platform, batchId, advice, stage, kw, offset, s);
+                category, pageName, priority, status, platform, batchId, advice, stage, ver, req, sd, kw, offset, s);
         int total = aiTestCaseMapper.countByFilters(
-                category, pageName, priority, status, platform, batchId, advice, stage, kw);
+                category, pageName, priority, status, platform, batchId, advice, stage, ver, req, sd, kw);
         // 两个版本页签上的计数不跟着搜索走：搜「验证码」时页签显示的应该是
         // 「线上版本一共 24 条」，而不是「符合搜索的有 3 条」——
         // 页签是导航，跟着筛选变会让人以为用例被删了
+        // 版本页签的计数跟着「当前选的版本」走，但不跟着搜索走——
+        // 页签是导航，跟着搜索变会让人以为用例被删了
         int onlineCount = aiTestCaseMapper.countByFilters(
-                category, null, null, null, null, null, null, "ONLINE", null);
+                category, null, null, null, null, null, null, "ONLINE", ver, req, sd, null);
         int testingCount = aiTestCaseMapper.countByFilters(
-                category, null, null, null, null, null, null, "TESTING", null);
+                category, null, null, null, null, null, null, "TESTING", ver, req, sd, null);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("content", content);
         out.put("totalElements", total);
@@ -856,6 +937,15 @@ public class AiTestCaseService {
         String batchModule = firstNonBlank(str(body.get("module")), str(body.get("moduleName")));
         String batchSubModule = firstNonBlank(str(body.get("sub_module")), str(body.get("subModule")));
         String batchTestItem = firstNonBlank(str(body.get("test_item")), str(body.get("testItem")));
+        // 整批同一个版本：一次生成对应的是某一版的某个需求，不会跨版本
+        String batchAppVersion = firstNonBlank(str(body.get("app_version")), str(body.get("appVersion")));
+        // 整批同一个单号：一次生成对应的就是某一个需求单
+        String batchRequirementNo = firstNonBlank(
+                str(body.get("requirement_no")), str(body.get("requirementNo")));
+        // 整批同一组端：一次生成对应的是一个需求单，它涉及哪几端是固定的
+        String batchSides = sidesFrom(body.get("sides"));
+        String batchServerService = firstNonBlank(
+                str(body.get("server_service")), str(body.get("serverService")));
         String batchId = firstNonBlank(str(body.get("batch_id")), str(body.get("batchId")), UUID.randomUUID().toString().replace("-", ""));
 
         List<AiTestCase> saved = new ArrayList<>();
@@ -914,6 +1004,15 @@ public class AiTestCaseService {
             row.setStatus(status);
             row.setReleaseStage(firstNonBlank(
                     str(m.get("release_stage")), str(m.get("releaseStage")), batchReleaseStage));
+            row.setAppVersion(firstNonBlank(
+                    str(m.get("app_version")), str(m.get("appVersion")), batchAppVersion));
+            row.setRequirementNo(firstNonBlank(
+                    str(m.get("requirement_no")), str(m.get("requirementNo")), batchRequirementNo));
+            row.setSides(firstNonBlank(sidesFrom(m.get("sides")), batchSides));
+            if (RequirementSide.hasServer(row.getSides())) {
+                row.setServerService(firstNonBlank(
+                        str(m.get("server_service")), str(m.get("serverService")), batchServerService));
+            }
             row.setBatchId(batchId);
             row.setCreatedBy(createdBy);
 
@@ -989,6 +1088,10 @@ public class AiTestCaseService {
         m.put("flowId", row.getFlowId());
         m.put("automationAdvice", row.getAutomationAdvice());
         m.put("releaseStage", row.getReleaseStage());
+        m.put("appVersion", row.getAppVersion());
+        m.put("requirementNo", row.getRequirementNo());
+        m.put("sides", RequirementSide.split(row.getSides()));
+        m.put("serverService", row.getServerService());
         // 「是否已实现自动化」是算出来的，不是存的：关联的流程被停用或删掉，这里自动变回未覆盖
         UiFlow flow = row.getFlowId() == null ? null : uiFlowService.get(row.getFlowId());
         // 仅回归 / 仅性能的流程不算覆盖：它永远不会在自动化轨上执行，

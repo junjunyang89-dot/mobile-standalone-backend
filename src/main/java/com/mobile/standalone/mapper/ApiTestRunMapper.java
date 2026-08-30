@@ -6,9 +6,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
 import java.time.LocalDateTime;
-import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
 import java.util.Map;
 
 @Mapper
@@ -23,6 +21,20 @@ public interface ApiTestRunMapper {
     /** 报告页的执行历史列表 */
     List<Map<String, Object>> findRuns(@Param("collectionId") String collectionId,
                                        @Param("limit") int limit);
+
+    /** 报告浏览：带上集合来源与项目 */
+    List<Map<String, Object>> findRunsEnriched(@Param("limit") int limit);
+
+    /** 每条执行涉及哪些接口（去重） */
+    List<Map<String, Object>> findRunInterfaces();
+
+    int deleteRunCases(@Param("runId") String runId);
+
+    int deleteRun(@Param("runId") String runId);
+
+    int deleteRuns(@Param("ids") List<String> ids);
+
+    int deleteRunCasesByRunIds(@Param("ids") List<String> ids);
 
     ApiTestRun findRunById(@Param("id") String id);
 

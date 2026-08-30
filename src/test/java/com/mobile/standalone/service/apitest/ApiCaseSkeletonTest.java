@@ -3,6 +3,7 @@ package com.mobile.standalone.service.apitest;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -26,7 +27,7 @@ class ApiCaseSkeletonTest {
         assertThat(d.name()).contains("待补断言");
         assertThat(d.assertions()).contains("status").doesNotContain("jsonPath");
         // 说明里要给出路：光说「不行」不解决问题
-        assertThat(d.note()).contains("业务码");
+        assertThat(d.note()).contains("抓包");
     }
 
     /** 配了业务码就有真断言了，可以直接启用 */
@@ -119,5 +120,34 @@ class ApiCaseSkeletonTest {
                 in(null, null, java.util.Arrays.asList("", "  ", null, "ok")));
 
         assertThat(d.assertions()).contains("$.ok").doesNotContain("\"$.\"");
+    }
+
+    @Test
+    void 抓包样本生成equals断言() {
+        ApiCaseSkeleton.Draft d = ApiCaseSkeleton.build(new ApiCaseSkeleton.Input(
+                "GET", "/demo", null, null, null, List.of("code", "msg"),
+                Map.of("code", 0, "msg", "ok")));
+
+        assertThat(d.enabled()).isTrue();
+        assertThat(d.assertions()).contains("\"path\":\"$.code\"").contains("\"equals\":0");
+        assertThat(d.assertions()).contains("\"path\":\"$.msg\"").contains("\"equals\":\"ok\"");
+    }
+
+    @Test
+    void 抓包host不作为用例名() {
+        ApiCaseSkeleton.Draft d = ApiCaseSkeleton.build(new ApiCaseSkeleton.Input(
+                "GET", "/gld/deadlock/friend/list", "gateway-qa.arca42.com",
+                null, null, List.of()));
+
+        assertThat(d.name()).isEqualTo("GET friend/list（待补断言）");
+        assertThat(d.name()).doesNotContain("gateway");
+    }
+
+    @Test
+    void 中文接口说明仍可用作用例名() {
+        ApiCaseSkeleton.Draft d = ApiCaseSkeleton.build(new ApiCaseSkeleton.Input(
+                "GET", "/orders/list", "订单列表", null, null, List.of("orderId")));
+
+        assertThat(d.name()).isEqualTo("订单列表");
     }
 }

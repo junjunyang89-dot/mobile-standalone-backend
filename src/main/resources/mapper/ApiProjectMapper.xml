@@ -7,6 +7,7 @@
         <id property="code" column="code"/>
         <result property="name" column="name"/>
         <result property="description" column="description"/>
+        <result property="kind" column="kind"/>
         <result property="repoPath" column="repo_path"/>
         <result property="baseBranch" column="base_branch"/>
         <result property="successCodePath" column="success_code_path"/>
@@ -25,6 +26,19 @@
         ORDER BY sort_order ASC, code ASC
     </select>
 
+    <select id="findForCatalog" resultMap="ApiProjectMap">
+        SELECT p.* FROM api_projects p
+        <where>
+            <if test="enabledOnly != null and enabledOnly">AND p.enabled = 1</if>
+            AND (p.kind IS NULL OR p.kind = '' OR p.kind = 'BACKEND')
+            AND (
+                (p.repo_path IS NOT NULL AND TRIM(p.repo_path) != '')
+                OR EXISTS (SELECT 1 FROM api_endpoints e WHERE e.project = p.code)
+            )
+        </where>
+        ORDER BY p.sort_order ASC, p.code ASC
+    </select>
+
     <select id="findByCode" resultMap="ApiProjectMap">
         SELECT * FROM api_projects WHERE code = #{code}
     </select>
@@ -35,15 +49,16 @@
 
     <insert id="insert">
         INSERT INTO api_projects
-        (code, name, description, repo_path, base_branch, success_code_path, success_code_value, enabled, sort_order, created_at, updated_at)
+        (code, name, description, kind, repo_path, base_branch, success_code_path, success_code_value, enabled, sort_order, created_at, updated_at)
         VALUES
-        (#{code}, #{name}, #{description}, #{repoPath}, #{baseBranch}, #{successCodePath}, #{successCodeValue}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+        (#{code}, #{name}, #{description}, #{kind}, #{repoPath}, #{baseBranch}, #{successCodePath}, #{successCodeValue}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
         UPDATE api_projects
         SET name = #{name},
             description = #{description},
+            kind = #{kind},
             repo_path = #{repoPath},
             base_branch = #{baseBranch},
             success_code_path = #{successCodePath},

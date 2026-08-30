@@ -42,4 +42,7 @@ public interface ApiTestCaseMapper {
 
     /** 归组用：拿一个项目下的全部用例（不分页） */
     List<ApiTestCase> findByProject(@Param("project") String project);
+
+    /** 挂在这个接口上的用例——「这条接口还差什么」要逐条看用例内容才能算 */
+    List<ApiTestCase> findByEndpointId(@Param("endpointId") String endpointId);
 }

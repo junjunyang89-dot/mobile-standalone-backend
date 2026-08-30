@@ -21,9 +21,21 @@ public class ApiProjectController {
 
     @GetMapping
     public ResponseEntity<List<ApiProject>> list(
+            @RequestParam(required = false) Boolean enabledOnly,
+            @RequestParam(required = false) Boolean catalogOnly
+    ) {
+        if (Boolean.TRUE.equals(catalogOnly)) {
+            return ResponseEntity.ok(projectService.listForCatalog(enabledOnly));
+        }
+        return ResponseEntity.ok(projectService.list(enabledOnly));
+    }
+
+    /** 项目管理页树：APP / PVP / WEB / 其他 */
+    @GetMapping("/tree")
+    public ResponseEntity<Map<String, Object>> tree(
             @RequestParam(required = false) Boolean enabledOnly
     ) {
-        return ResponseEntity.ok(projectService.list(enabledOnly));
+        return ResponseEntity.ok(projectService.buildTree(enabledOnly));
     }
 
     @GetMapping("/{code}")

@@ -9,11 +9,17 @@ import java.time.LocalDateTime;
  */
 @Data
 public class ApiProject {
+    /** BACKEND=后端仓库；CLIENT=客户端（不进接口清单） */
+    public static final String KIND_BACKEND = "BACKEND";
+    public static final String KIND_CLIENT = "CLIENT";
+
     /** 编码，如 data-center */
     private String code;
     /** 展示名 */
     private String name;
     private String description;
+    /** BACKEND / CLIENT；留空按 BACKEND */
+    private String kind;
     /** 本地 git 仓库绝对路径；填了才能做接口变更分析 */
     private String repoPath;
     /** 对比基线分支，留空按 master */

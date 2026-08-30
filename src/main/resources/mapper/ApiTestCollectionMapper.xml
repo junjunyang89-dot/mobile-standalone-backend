@@ -10,6 +10,11 @@
         <result property="description" column="description"/>
         <result property="enabled" column="enabled"/>
         <result property="sortOrder" column="sort_order"/>
+        <result property="scope" column="scope"/>
+        <result property="lifecycle" column="lifecycle"/>
+        <result property="requirementNo" column="requirement_no"/>
+        <result property="appVersion" column="app_version"/>
+        <result property="sourceBranch" column="source_branch"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="caseCount" column="case_count"/>
@@ -18,11 +23,21 @@
         <result property="lastRunId" column="last_run_id"/>
     </resultMap>
 
-    <!--
-      列表一次把用例数和最近一次通过率带出来。
-      通过率取「最近一次跑这个集合的执行记录」，而不是把历史全部平均：
-      平均值会把上周修好的问题一直摊在里面，看板越平滑越没人信。
-    -->
+    <sql id="ColListWhere">
+        <where>
+            <if test="project != null and project != ''">AND c.project = #{project}</if>
+            <if test="scope != null and scope != ''">AND (c.scope = #{scope} OR (#{scope} = 'LIVE' AND (c.scope IS NULL OR c.scope = '')))</if>
+            <if test="lifecycle != null and lifecycle != ''">AND c.lifecycle = #{lifecycle}</if>
+            <if test="includeArchived == null or includeArchived == false">
+                AND (c.lifecycle IS NULL OR c.lifecycle = '' OR c.lifecycle = 'ACTIVE')
+            </if>
+            <if test="appVersion != null and appVersion != ''">
+                AND (c.app_version = #{appVersion} OR c.app_version IS NULL OR c.app_version = '')
+            </if>
+            <if test="requirementNo != null and requirementNo != ''">AND c.requirement_no = #{requirementNo}</if>
+        </where>
+    </sql>
+
     <select id="findAll" resultMap="colMap">
         SELECT c.*,
                (SELECT COUNT(1) FROM api_test_cases tc WHERE tc.collection_id = c.id) AS case_count,
@@ -34,9 +49,7 @@
                ON r.id = (SELECT r2.id FROM api_test_runs r2
                            WHERE r2.collection_id = c.id
                            ORDER BY r2.created_at DESC LIMIT 1)
-        <where>
-            <if test="project != null and project != ''">c.project = #{project}</if>
-        </where>
+        <include refid="ColListWhere"/>
         ORDER BY c.sort_order, c.name
     </select>
 
@@ -50,9 +63,11 @@
 
     <insert id="insert">
         INSERT INTO api_test_collections
-            (id, project, name, description, enabled, sort_order, created_at, updated_at)
+            (id, project, name, description, enabled, sort_order, scope, lifecycle, requirement_no, app_version,
+             source_branch, created_at, updated_at)
         VALUES
-            (#{id}, #{project}, #{name}, #{description}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+            (#{id}, #{project}, #{name}, #{description}, #{enabled}, #{sortOrder}, #{scope}, #{lifecycle},
+             #{requirementNo}, #{appVersion}, #{sourceBranch}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -61,8 +76,23 @@
             description = #{description},
             enabled = #{enabled},
             sort_order = #{sortOrder},
+            scope = #{scope},
+            lifecycle = #{lifecycle},
+            requirement_no = #{requirementNo},
+            app_version = #{appVersion},
+            source_branch = #{sourceBranch},
             updated_at = #{updatedAt}
         WHERE id = #{id}
+    </update>
+
+    <update id="archiveById">
+        UPDATE api_test_collections SET lifecycle = 'ARCHIVED', updated_at = NOW() WHERE id = #{id}
+    </update>
+
+    <update id="archiveByRequirement">
+        UPDATE api_test_collections
+        SET lifecycle = 'ARCHIVED', updated_at = NOW()
+        WHERE requirement_no = #{requirementNo} AND scope = 'TEST'
     </update>
 
     <delete id="deleteById">
@@ -76,7 +106,6 @@
         <foreach collection="caseIds" item="cid" open="(" separator="," close=")">#{cid}</foreach>
     </update>
 
-    <!-- 顺序就是执行顺序：登录用例排在前面，后面的才引用得到它抽出来的 token -->
     <select id="caseIdsOf" resultType="java.lang.String">
         SELECT id FROM api_test_cases
         WHERE collection_id = #{collectionId}

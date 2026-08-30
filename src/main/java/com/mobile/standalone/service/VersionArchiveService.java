@@ -189,6 +189,105 @@ public class VersionArchiveService {
     }
 
     @Transactional
+    /**
+     * 手动建一个版本。
+     * <p>
+     * 归档原本只能从 Wiki 汇总页同步，但汇总页往往是<b>提测之后</b>才建的，
+     * 而测试用例要在提测<b>之前</b>就开始写。只能等同步的话，这套东西每次都晚一步。
+     */
+    public ArchiveDetail createManual(SyncRequest req) {
+        String label = req.getReleaseLabel() == null ? "" : req.getReleaseLabel().trim();
+        if (label.isEmpty()) {
+            throw new IllegalArgumentException("版本名称不能为空，如「9.3 国内客户端」");
+        }
+        String appVersion = req.getAppVersion() == null || req.getAppVersion().isBlank()
+                ? label : req.getAppVersion().trim();
+        List<String> existing = jdbc.queryForList(
+                "SELECT id FROM release_version_archives WHERE app_version = ? AND release_label = ?",
+                String.class, appVersion, label);
+        if (!existing.isEmpty()) {
+            // 同名版本已存在就直接返回它，不报错——重复点一次「新建」不该变成一个错误弹窗
+            return get(existing.get(0));
+        }
+        String id = "rva-" + UUID.randomUUID();
+        jdbc.update("INSERT INTO release_version_archives "
+                        + "(id, app_version, release_label, product_line, release_date, issue_count, closed_count) "
+                        + "VALUES (?,?,?,?,?,0,0)",
+                id, appVersion, label,
+                blank(req.getProductLine()) ? inferProductLine(label) : req.getProductLine().trim(),
+                req.getReleaseDate() != null ? java.sql.Date.valueOf(req.getReleaseDate()) : parseLabelDate(label));
+        log.info("[version-archive] 手动创建版本 {} / {}", appVersion, label);
+        return get(id);
+    }
+
+    /**
+     * 往版本里手动加一个需求单。
+     * <p>
+     * 同一个单号重复加时更新标题，不插第二条——同一版里一个单号只该有一行。
+     */
+    public void addIssue(String archiveId, String issueKey, String summary,
+                         String statusName, String assignee, String qaAssignee) {
+        String key = issueKey == null ? "" : issueKey.trim().toUpperCase(Locale.ROOT);
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("单号不能为空，如 APP-8873");
+        }
+        if (jdbc.queryForList("SELECT id FROM release_version_archives WHERE id = ?", String.class, archiveId)
+                .isEmpty()) {
+            throw new IllegalArgumentException("版本不存在");
+        }
+        jdbc.update("INSERT INTO release_version_issues "
+                        + "(archive_id, issue_key, summary, status_name, assignee, qa_assignee) "
+                        + "VALUES (?,?,?,?,?,?) "
+                        + "ON DUPLICATE KEY UPDATE summary = VALUES(summary), "
+                        + "status_name = VALUES(status_name), assignee = VALUES(assignee), "
+                        + "qa_assignee = VALUES(qa_assignee)",
+                archiveId, key, blank(summary) ? null : summary.trim(),
+                blank(statusName) ? null : statusName.trim(),
+                blank(assignee) ? null : assignee.trim(),
+                blank(qaAssignee) ? null : qaAssignee.trim());
+        refreshCounts(archiveId);
+    }
+
+    public boolean removeIssue(String archiveId, String issueKey) {
+        int n = jdbc.update("DELETE FROM release_version_issues WHERE archive_id = ? AND issue_key = ?",
+                archiveId, issueKey);
+        if (n > 0) {
+            refreshCounts(archiveId);
+        }
+        return n > 0;
+    }
+
+    private void refreshCounts(String archiveId) {
+        try {
+            jdbc.update("UPDATE release_version_archives a SET "
+                            + "issue_count = (SELECT COUNT(1) FROM release_version_issues i WHERE i.archive_id = a.id), "
+                            + "closed_count = (SELECT COUNT(1) FROM release_version_issues i "
+                            + "WHERE i.archive_id = a.id AND i.closed_at IS NOT NULL) WHERE a.id = ?",
+                    archiveId);
+        } catch (Exception e) {
+            log.debug("[version-archive] 计数刷新跳过: {}", e.getMessage());
+        }
+    }
+
+    private boolean blank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    /** 从「9.3 国内客户端」这种名字里解析上线日；解析不出来就留空，不猜 */
+    private java.sql.Date parseLabelDate(String label) {
+        Matcher m = MD.matcher(label == null ? "" : label);
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            return java.sql.Date.valueOf(java.time.LocalDate.of(
+                    java.time.LocalDate.now().getYear(),
+                    Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2))));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public CloseResult closeReleased(String archiveId, CloseRequest req) {
         ArchiveDetail detail = get(archiveId);
         if (detail == null) {

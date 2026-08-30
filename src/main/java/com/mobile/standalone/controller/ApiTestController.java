@@ -30,6 +30,7 @@ import java.util.Map;
 public class ApiTestController {
 
     private final ApiTestCaseService caseService;
+    private final com.mobile.standalone.service.apitest.DbAssertRunner dbAssert;
     private final ApiTestRunnerService runnerService;
     private final ApiTestStatsService statsService;
     private final EnvVariableService variableService;
@@ -55,6 +56,28 @@ public class ApiTestController {
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
+    }
+
+    /**
+     * 试一下数据库断言的连接通不通。
+     * <p>
+     * 没有这个按钮就是盲配：配完只能靠跑一条用例来试，
+     * 而那时报出来的是「用例失败」，人第一反应是去查断言写错了，
+     * 不会想到是库连不上。
+     */
+    @PostMapping("/envs/{environment}/db-check")
+    public ResponseEntity<?> checkDb(@PathVariable String environment) {
+        var env = caseService.getEnv(environment);
+        if (env == null) {
+            return ResponseEntity.badRequest().body(Map.of("ok", false, "message", "环境不存在"));
+        }
+        if (!dbAssert.configured(env)) {
+            return ResponseEntity.ok(Map.of("ok", false, "message", "还没填库地址和库名"));
+        }
+        var r = dbAssert.query(env, "SELECT 1");
+        return ResponseEntity.ok(r.ok()
+                ? Map.of("ok", true, "message", "连上了：" + env.getDbHost() + "/" + env.getDbName())
+                : Map.of("ok", false, "message", r.error()));
     }
 
     // ---------- 定时执行 ----------
@@ -106,6 +129,29 @@ public class ApiTestController {
         return ResponseEntity.ok(runService.listRuns(collectionId, limit));
     }
 
+    /** 报告浏览：环境 / 来源 / 项目 / 接口 树 + 右侧列表 */
+    @GetMapping("/runs/browse")
+    public ResponseEntity<?> browseRuns(@RequestParam(defaultValue = "200") int limit) {
+        return ResponseEntity.ok(runService.browseRuns(limit));
+    }
+
+    @DeleteMapping("/runs/{runId}")
+    public ResponseEntity<?> deleteRun(@PathVariable String runId) {
+        return runService.deleteRun(runId)
+                ? ResponseEntity.ok(Map.of("ok", true))
+                : ResponseEntity.notFound().build();
+    }
+
+    @DeleteMapping("/runs")
+    public ResponseEntity<?> deleteRuns(@RequestBody Map<String, Object> body) {
+        @SuppressWarnings("unchecked")
+        List<String> ids = body != null && body.get("ids") instanceof List<?> list
+                ? list.stream().map(String::valueOf).toList()
+                : List.of();
+        int n = runService.deleteRuns(ids);
+        return ResponseEntity.ok(Map.of("ok", true, "deleted", n));
+    }
+
     /** 按天聚合的趋势。一天里手动重跑十几次很正常，逐次画只会看成剧烈波动 */
     @GetMapping("/runs/trend")
     public ResponseEntity<?> trend(@RequestParam(defaultValue = "7") int days) {
@@ -123,8 +169,66 @@ public class ApiTestController {
     /** 列表带上用例数与最近一次通过率，前端不用再逐个查 */
     @GetMapping("/collections")
     public ResponseEntity<List<ApiTestCollection>> listCollections(
-            @RequestParam(required = false) String project) {
-        return ResponseEntity.ok(collectionService.list(project));
+            @RequestParam(required = false) String project,
+            @RequestParam(required = false) String scope,
+            @RequestParam(required = false) Boolean includeArchived,
+            @RequestParam(required = false) String appVersion) {
+        return ResponseEntity.ok(collectionService.list(project, scope, includeArchived, appVersion));
+    }
+
+    /** 树形：测试 APP→项目→集合；生产 APP/PVP/WEB→项目→接口 */
+    @GetMapping("/collections/tree")
+    public ResponseEntity<?> collectionTree(
+            @RequestParam(defaultValue = "TEST") String scope,
+            @RequestParam(required = false) String appVersion,
+            @RequestParam(required = false, defaultValue = "false") boolean includeArchived) {
+        return ResponseEntity.ok(collectionService.tree(scope, appVersion, includeArchived));
+    }
+
+    /** 生产：某项目下全部 master 用例（项目即集合，接口挂在项目下） */
+    @GetMapping("/projects/{project}/live-cases")
+    public ResponseEntity<?> projectLiveCases(
+            @PathVariable String project,
+            @RequestParam(required = false, defaultValue = "false") boolean includeArchived) {
+        return ResponseEntity.ok(collectionService.liveCasesOfProject(project, includeArchived));
+    }
+
+    /** 生成用例：项目 → 测试集合 级联（对应用例集合 · 测试环境） */
+    @GetMapping("/collections/pickable-tree")
+    public ResponseEntity<?> pickableTree(
+            @RequestParam(required = false) String requirementNo,
+            @RequestParam(required = false) String appVersion) {
+        return ResponseEntity.ok(collectionService.pickableTree(requirementNo, appVersion));
+    }
+
+    @GetMapping("/collections/{id}/cases")
+    public ResponseEntity<?> collectionCases(@PathVariable String id) {
+        if (collectionService.get(id) == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(collectionService.casesOf(id));
+    }
+
+    @PostMapping("/collections/{id}/archive")
+    public ResponseEntity<?> archiveCollection(@PathVariable String id) {
+        return collectionService.archiveCollection(id)
+                ? ResponseEntity.ok(Map.of("ok", true))
+                : ResponseEntity.notFound().build();
+    }
+
+    /** 本单已上线：归档测试集合与涉及接口（不删记录，默认不再展示） */
+    @PostMapping("/requirements/{requirementNo}/release")
+    public ResponseEntity<?> releaseRequirement(@PathVariable String requirementNo) {
+        try {
+            return ResponseEntity.ok(collectionService.releaseRequirement(requirementNo));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/app-groups")
+    public ResponseEntity<?> appGroups() {
+        return ResponseEntity.ok(com.mobile.standalone.service.apitest.ApiAppCatalog.groupsVo());
     }
 
     @PostMapping("/collections")

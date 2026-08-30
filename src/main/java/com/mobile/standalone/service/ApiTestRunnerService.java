@@ -51,6 +51,8 @@ public class ApiTestRunnerService {
     private final EnvVariableService variableService;
     private final ApiProjectService projectService;
     private final ApiTestCollectionService collectionService;
+    private final com.mobile.standalone.service.apitest.DbAssertRunner dbAssert;
+    private final com.mobile.standalone.service.apitest.EndpointVerifyService verifyService;
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -108,6 +110,9 @@ public class ApiTestRunnerService {
         }
         int passed = 0;
         int failed = 0;
+        // 跑完要回写「这个接口验过没有」，得留住每条用例和它的结果
+        List<com.mobile.standalone.service.apitest.EndpointVerifyService.CaseOutcome> outcomes =
+                new ArrayList<>();
         for (String id : req.getCaseIds()) {
             ApiTestCase c = caseMapper.findById(id);
             CaseResult cr;
@@ -120,8 +125,11 @@ public class ApiTestRunnerService {
                 failed++;
             } else {
                 cr = executeOne(c, env, req.getTokenOverride(), req.getUrlIdOverride(), envVars, runtime);
-                if ("PASSED".equals(cr.getStatus())) passed++;
+                boolean ok = "PASSED".equals(cr.getStatus());
+                if (ok) passed++;
                 else failed++;
+                outcomes.add(new com.mobile.standalone.service.apitest.EndpointVerifyService
+                        .CaseOutcome(c, ok));
             }
             out.getCases().add(cr);
         }
@@ -137,6 +145,13 @@ public class ApiTestRunnerService {
             runService.save(out, null);
         } catch (Exception e) {
             log.warn("[api-test] 执行历史落库失败: {}", e.getMessage());
+        }
+        try {
+            // 回写失败绝不能影响执行结果本身：跑完了就是跑完了，
+            // 台账没更新是另一件事，不该把一次成功的执行报成失败
+            verifyService.applyRunOutcome(outcomes);
+        } catch (Exception e) {
+            log.warn("[api-test] 回写接口验证状态失败: {}", e.getMessage());
         }
         return out;
     }
@@ -173,14 +188,33 @@ public class ApiTestRunnerService {
                 }
                 b.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
             }
+            // dbDelta 要的是「调接口前后差了多少」，所以请求<b>之前</b>先查一遍基线。
+            // 放在发请求前面这一步没得商量：请求发出去数据就变了，那时再查已经晚了
+            String resolvedAssertions =
+                    withBizCodeAssertion(c, VariableResolver.resolve(c.getAssertions(), runtime, envVars));
+            Map<String, Object> dbBefore = queryDbBaseline(resolvedAssertions, env);
+
             HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             cr.setHttpStatus(resp.statusCode());
             cr.setBodyPreview(truncate(resp.body(), BODY_PREVIEW_MAX));
+            // 把实际发出去的和实际收到的都带回去。
+            // 只给一句「断言失败」，人还得自己猜发了什么、收到了什么，
+            // 于是拿 Postman 再手工重放一遍——那一步正是这套东西本该省掉的
+            cr.setReqHeaders(new LinkedHashMap<>(headers));
+            cr.setReqBody(truncate(body, BODY_PREVIEW_MAX));
+            Map<String, String> respHeaders = new LinkedHashMap<>();
+            resp.headers().map().forEach((k, v) ->
+                    respHeaders.put(k, v == null || v.isEmpty() ? "" : String.join(", ", v)));
+            cr.setRespHeaders(respHeaders);
             List<String> assertMsgs = new ArrayList<>();
-            String assertions = withBizCodeAssertion(c, VariableResolver.resolve(c.getAssertions(), runtime, envVars));
+            String assertions = resolvedAssertions;
             long elapsed = System.currentTimeMillis() - t0;
+            DbContext dbCtx = queryDbAfter(assertions, env, dbBefore, assertMsgs);
             boolean ok = evaluateAssertions(assertions, resp.statusCode(), resp.body(),
-                    resp.headers().map(), elapsed, assertMsgs);
+                    resp.headers().map(), elapsed, dbCtx, assertMsgs);
+            if (!dbCtx.errors().isEmpty()) {
+                ok = false;
+            }
             // extract 放在断言之后、且只在通过时执行：失败的响应里抽出来的多半是错误结构，
             // 让它污染后面所有用例，会把一个失败放大成一片失败，真正的第一现场反而被埋掉
             if (ok) {
@@ -235,7 +269,7 @@ public class ApiTestRunnerService {
             if (!p.startsWith("/")) p = "/" + p;
             url = base + p;
         }
-        Map<String, String> q = readStringMap(queryJson);
+        Map<String, String> q = readQuery(queryJson);
         if (q.isEmpty()) return url;
         StringBuilder sb = new StringBuilder(url);
         sb.append(url.contains("?") ? "&" : "?");
@@ -262,6 +296,36 @@ public class ApiTestRunnerService {
             // Deadlock / 网关常见：headers.token；同时兼容 Bearer
             out.putIfAbsent("token", token);
             out.putIfAbsent("Authorization", "Bearer " + token);
+        }
+        return out;
+    }
+
+    /**
+     * query 两种写法都认：JSON 对象，或 {@code a=1&b=2} 这种查询串。
+     * <p>
+     * 只认 JSON 的话，人从浏览器地址栏粘一串过来就会炸——而炸出来的是
+     * 「Unrecognized token 'steamId'」这种 Jackson 的话，
+     * 看的人根本不知道是自己 query 写错了格式，只会以为接口坏了。
+     */
+    static Map<String, String> readQuery(String raw) throws Exception {
+        String v = raw == null ? "" : raw.trim();
+        if (v.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        if (v.startsWith("{")) {
+            return readStringMap(v);
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        for (String pair : v.replaceFirst("^\\?", "").split("&")) {
+            if (pair.isBlank()) {
+                continue;
+            }
+            int i = pair.indexOf('=');
+            String k = i < 0 ? pair : pair.substring(0, i);
+            String val = i < 0 ? "" : pair.substring(i + 1);
+            if (!k.isBlank()) {
+                out.put(k.trim(), val);
+            }
         }
         return out;
     }
@@ -361,13 +425,188 @@ public class ApiTestRunnerService {
         }
     }
 
+    /**
+     * 数据库断言这一轮查到的东西。
+     *
+     * @param values 每条 {@code db} 断言的 SQL → 查出来的标量
+     * @param deltas 每条 {@code dbDelta} 断言的 SQL → 调接口前后的差值
+     * @param errors 查库本身失败的原因。<b>这些要让用例失败</b>——
+     *               查不到就等于没验，当成通过是最坏的结果
+     */
+    record DbContext(Map<String, Object> values, Map<String, Object> deltas, List<String> errors) {
+        static DbContext empty() {
+            return new DbContext(Map.of(), Map.of(), List.of());
+        }
+    }
+
+    /** 请求前的基线。只有 {@code dbDelta} 需要——普通 db 断言查一次就够 */
+    private Map<String, Object> queryDbBaseline(String assertionsJson, ApiTestEnv env) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        for (String sql : dbSqlOf(assertionsJson, "dbDelta")) {
+            var r = dbAssert.query(env, sql);
+            if (r.ok()) {
+                out.put(sql, r.value());
+            }
+        }
+        return out;
+    }
+
+    /** 请求后再查一遍，普通 db 取值、dbDelta 算差 */
+    private DbContext queryDbAfter(String assertionsJson, ApiTestEnv env,
+                                   Map<String, Object> before, List<String> msgs) {
+        List<String> plain = dbSqlOf(assertionsJson, "db");
+        List<String> delta = dbSqlOf(assertionsJson, "dbDelta");
+        if (plain.isEmpty() && delta.isEmpty()) {
+            return DbContext.empty();
+        }
+        List<String> errors = new ArrayList<>();
+        if (!dbAssert.configured(env)) {
+            // 用了数据库断言却没配库，必须报出来。静默跳过＝这条断言等于不存在，
+            // 而用例还是绿的——那比没有这个功能更危险
+            errors.add("用了数据库断言，但环境 " + (env == null ? "?" : env.getEnvironment())
+                    + " 还没配测试库连接");
+            msgs.add("FAIL " + errors.get(0));
+            return new DbContext(Map.of(), Map.of(), errors);
+        }
+        Map<String, Object> values = new java.util.LinkedHashMap<>();
+        Map<String, Object> deltas = new java.util.LinkedHashMap<>();
+        for (String sql : plain) {
+            var r = dbAssert.query(env, sql);
+            if (r.ok()) {
+                values.put(sql, r.value());
+            } else {
+                errors.add("库查询失败：" + r.error());
+                msgs.add("FAIL 库查询失败：" + r.error());
+            }
+        }
+        for (String sql : delta) {
+            var r = dbAssert.query(env, sql);
+            if (!r.ok()) {
+                errors.add("库查询失败：" + r.error());
+                msgs.add("FAIL 库查询失败：" + r.error());
+                continue;
+            }
+            Object b = before.get(sql);
+            // 基线没查到就不给差值：给个 0 会被断言当成「没变化」，那是编出来的结论
+            deltas.put(sql, b == null ? null : num(r.value()) - num(b));
+        }
+        return new DbContext(values, deltas, errors);
+    }
+
+    private List<String> dbSqlOf(String assertionsJson, String type) {
+        List<String> out = new ArrayList<>();
+        try {
+            JsonNode arr = assertionsJson == null || assertionsJson.isBlank()
+                    ? JSON.createArrayNode() : JSON.readTree(assertionsJson);
+            if (!arr.isArray()) {
+                return out;
+            }
+            for (JsonNode a : arr) {
+                if (type.equals(text(a, "type"))) {
+                    String sql = text(a, "sql");
+                    if (sql != null && !sql.isBlank() && !out.contains(sql)) {
+                        out.add(sql);
+                    }
+                }
+            }
+        } catch (Exception ignore) {
+            // 断言 JSON 坏掉由 evaluateAssertions 统一报，这里不重复报
+        }
+        return out;
+    }
+
+    private static double num(Object o) {
+        try {
+            return o == null ? 0 : Double.parseDouble(String.valueOf(o));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * 通用算子比较。db / dbDelta 用它，比 jsonPath 那套按 key 分支的写法更好扩展。
+     * <p>
+     * 算子取自 {@code op} 字段，期望值取自 {@code value}：
+     * {@code eq ne gt gte lt lte contains notContains exists notEmpty matches}。
+     */
+    private boolean compare(JsonNode a, Object actual) {
+        String op = text(a, "op");
+        String expect = text(a, "value");
+        if (op == null || op.isBlank()) {
+            op = "eq";
+        }
+        return switch (op) {
+            case "eq" -> nullish(expect) ? actual == null
+                    : actual != null && String.valueOf(actual).equals(expect);
+            // 字段没取到不能算「不等于」——那是没查到，不是有值且不同。两种问题得分开
+            case "ne" -> actual != null
+                    && (nullish(expect) || !String.valueOf(actual).equals(expect));
+            case "contains" -> actual != null && expect != null
+                    && String.valueOf(actual).contains(expect);
+            case "notContains" -> actual != null && expect != null
+                    && !String.valueOf(actual).contains(expect);
+            case "exists" -> actual != null;
+            case "notEmpty" -> actual != null && !String.valueOf(actual).isEmpty();
+            case "gt" -> comparable(actual, expect) && num(actual) > Double.parseDouble(expect);
+            case "gte" -> comparable(actual, expect) && num(actual) >= Double.parseDouble(expect);
+            case "lt" -> comparable(actual, expect) && num(actual) < Double.parseDouble(expect);
+            case "lte" -> comparable(actual, expect) && num(actual) <= Double.parseDouble(expect);
+            case "matches" -> {
+                if (actual == null || expect == null) {
+                    yield false;
+                }
+                try {
+                    yield java.util.regex.Pattern.compile(expect)
+                            .matcher(String.valueOf(actual)).find();
+                } catch (Exception e) {
+                    // 正则写错了就是这条断言失败，别把整次执行搞崩
+                    yield false;
+                }
+            }
+            default -> false;
+        };
+    }
+
+    private String opDesc(JsonNode a) {
+        String op = text(a, "op");
+        return (op == null || op.isBlank() ? "eq" : op) + " " + text(a, "value");
+    }
+
+    private static boolean nullish(String expect) {
+        if (expect == null) {
+            return true;
+        }
+        String v = expect.trim().toLowerCase(java.util.Locale.ROOT);
+        return v.isEmpty() || "null".equals(v) || "undefined".equals(v) || "nil".equals(v);
+    }
+
+    /**
+     * 数值比较前先确认两边都是数字。
+     * <p>
+     * 不加这层的话，字段缺失或查出来是 "abc" 都会变成 NaN 比较、结果恒为 false——
+     * 看起来像断言失败，实际是取值就没取到。两种问题得分开。
+     */
+    private static boolean comparable(Object actual, String expect) {
+        if (actual == null || String.valueOf(actual).isBlank() || expect == null) {
+            return false;
+        }
+        try {
+            Double.parseDouble(String.valueOf(actual));
+            Double.parseDouble(expect);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     /** 老签名保留给测试与只关心状态码/响应体的调用方 */
     private boolean evaluateAssertions(String assertionsJson, int status, String body, List<String> msgs) {
-        return evaluateAssertions(assertionsJson, status, body, Map.of(), 0L, msgs);
+        return evaluateAssertions(assertionsJson, status, body, Map.of(), 0L, DbContext.empty(), msgs);
     }
 
     private boolean evaluateAssertions(String assertionsJson, int status, String body,
-                                       Map<String, List<String>> headers, long elapsedMs, List<String> msgs) {
+                                       Map<String, List<String>> headers, long elapsedMs,
+                                       DbContext db, List<String> msgs) {
         try {
             JsonNode arr = assertionsJson == null || assertionsJson.isBlank()
                     ? JSON.createArrayNode()
@@ -420,7 +659,17 @@ public class ApiTestRunnerService {
                     case "jsonPath" -> {
                         String path = text(a, "path");
                         JsonNode node = readJsonPath(body, path);
-                        if (a.has("exists")) {
+                        if (a.has("op")) {
+                            // 新写法：{path, op, value}，算子和 db 断言同一套
+                            // （多了 gte/lte/matches/notContains/notEmpty）。
+                            // 老写法 {path, equals} 那些继续走下面的分支，不动存量用例
+                            Object actual = node == null || node.isMissingNode() || node.isNull()
+                                    ? null
+                                    : (node.isValueNode() ? node.asText() : node.toString());
+                            pass = compare(a, actual);
+                            detail = "jsonPath " + path + " " + opDesc(a) + " 实际=" + truncate(
+                                    actual == null ? "（没取到）" : String.valueOf(actual), 60);
+                        } else if (a.has("exists")) {
                             boolean want = a.path("exists").asBoolean(true);
                             pass = want ? (node != null && !node.isMissingNode() && !node.isNull())
                                     : (node == null || node.isMissingNode() || node.isNull());
@@ -454,6 +703,20 @@ public class ApiTestRunnerService {
                             pass = node != null && !node.isMissingNode() && !node.isNull();
                             detail = "jsonPath " + path + " 存在";
                         }
+                    }
+                    case "db" -> {
+                        String sql = text(a, "sql");
+                        Object actual = db.values().get(sql);
+                        pass = compare(a, actual);
+                        detail = "db[" + truncate(sql, 60) + "] " + opDesc(a) + " 实际=" + actual;
+                    }
+                    case "dbDelta" -> {
+                        String sql = text(a, "sql");
+                        Object actual = db.deltas().get(sql);
+                        // 基线没查到时 delta 是 null，不能当 0——那会把「没查到」说成「没变化」
+                        pass = actual != null && compare(a, actual);
+                        detail = "dbDelta[" + truncate(sql, 60) + "] " + opDesc(a)
+                                + " 实际=" + (actual == null ? "基线没查到" : actual);
                     }
                     default -> {
                         pass = false;

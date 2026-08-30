@@ -32,6 +32,40 @@ public class VersionArchiveController {
     }
 
     /** 从 Wiki 汇总页同步某版本的 JIRA 单到本地归档 */
+    /** 手动新建版本。汇总页往往是提测后才建的，而用例要在提测前就开始写 */
+    @PostMapping
+    public ResponseEntity<?> create(@RequestBody SyncRequest req) {
+        try {
+            return ResponseEntity.ok(versionArchiveService.createManual(req));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        }
+    }
+
+    /** 往版本里手动加一个需求单 */
+    @PostMapping("/{id}/issues")
+    public ResponseEntity<?> addIssue(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        try {
+            versionArchiveService.addIssue(id,
+                    str(body.get("issueKey")), str(body.get("summary")),
+                    str(body.get("statusName")), str(body.get("assignee")), str(body.get("qaAssignee")));
+            return ResponseEntity.ok(versionArchiveService.get(id));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        }
+    }
+
+    @DeleteMapping("/{id}/issues/{issueKey}")
+    public ResponseEntity<?> removeIssue(@PathVariable String id, @PathVariable String issueKey) {
+        return versionArchiveService.removeIssue(id, issueKey)
+                ? ResponseEntity.ok(Map.of("success", true))
+                : ResponseEntity.notFound().build();
+    }
+
+    private static String str(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
+
     @PostMapping("/sync")
     public ResponseEntity<?> sync(@RequestBody SyncRequest req) {
         try {

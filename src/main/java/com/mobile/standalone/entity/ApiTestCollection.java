@@ -12,6 +12,11 @@ import java.time.LocalDateTime;
  */
 @Data
 public class ApiTestCollection {
+    public static final String SCOPE_TEST = "TEST";
+    public static final String SCOPE_LIVE = "LIVE";
+    public static final String LIFECYCLE_ACTIVE = "ACTIVE";
+    public static final String LIFECYCLE_ARCHIVED = "ARCHIVED";
+
     private String id;
     /** 归属项目，与 api_projects.code 对应 */
     private String project;
@@ -21,6 +26,22 @@ public class ApiTestCollection {
     private Integer sortOrder;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    /** TEST＝迭代/单号临时集合；LIVE＝master 回归（生产视图） */
+    private String scope;
+    /** ACTIVE / ARCHIVED；ARCHIVED 在测试视图默认隐藏 */
+    private String lifecycle;
+    /** 关联需求单，如 APP-8999 */
+    private String requirementNo;
+    /** 版本迭代标签，如 9.3 国内客户端 */
+    private String appVersion;
+    /**
+     * 分支对比来的集合关联的分支，如 backend-0816。
+     * <p>
+     * 和 {@link #requirementNo} 是二选一：单号是「这一个需求」，分支是「这一批改动」。
+     * 一个分支上可能合了好几个单，硬塞一个单号进去，另外几个单就在链路上消失了。
+     */
+    private String sourceBranch;
 
     // ---- 以下为查询时拼上的统计，不落库 ----
     /** 集合里有多少条用例 */

@@ -79,6 +79,11 @@
         SELECT COUNT(1) FROM api_test_cases WHERE project = #{project}
     </select>
 
+    <select id="findByEndpointId" resultMap="ApiTestCaseMap">
+        SELECT * FROM api_test_cases WHERE endpoint_id = #{endpointId}
+        ORDER BY sort_order, created_at
+    </select>
+
     <select id="findByProject" resultMap="ApiTestCaseMap">
         SELECT * FROM api_test_cases WHERE project = #{project}
         ORDER BY sort_order ASC, name ASC

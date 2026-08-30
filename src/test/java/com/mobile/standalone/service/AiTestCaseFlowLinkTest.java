@@ -57,16 +57,29 @@ class AiTestCaseFlowLinkTest {
         }
 
         @Override
+        public List<java.util.Map<String, Object>> countByRequirement(String category, String appVersion) {
+            return List.of();
+        }
+
+        @Override
+        public List<java.util.Map<String, Object>> distinctVersions(String category) {
+            return List.of();
+        }
+
+        @Override
         public List<AiTestCase> findByFilters(String category, String pageName, String priority, String status,
                                               String platform, String batchId, String automationAdvice,
-                                              String releaseStage, String keyword, int offset, int limit) {
+                                              String releaseStage, String appVersion,
+                                              String requirementNo, String side, String keyword,
+                                              int offset, int limit) {
             return List.copyOf(rows.values());
         }
 
         @Override
         public int countByFilters(String category, String pageName, String priority, String status,
                                   String platform, String batchId, String automationAdvice,
-                                  String releaseStage, String keyword) {
+                                  String releaseStage, String appVersion,
+                                  String requirementNo, String side, String keyword) {
             return rows.size();
         }
 

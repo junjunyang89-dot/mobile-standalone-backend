@@ -61,6 +61,38 @@ public class AiTestCase {
      * 发布轨（与复核 status 正交）：
      * TESTING＝测试待测；ONLINE＝线上稳定。
      */
+    /**
+     * 这条用例属于哪个 APP 版本，如 {@code 9.3}。
+     * <p>
+     * 单独一列而不是塞进「功能模块」：版本和模块是<b>正交</b>的两件事。
+     * 塞进模块的话，9.3 测完想把其中几条并进日常回归集，就得先把模块名改回真正的模块——
+     * 而那时候已经没人记得这条原本属于哪个模块了。
+     * <p>
+     * 只有「APP版本迭代」这个集合会用到；老用例留空，不影响任何现有查询。
+     */
+    private String appVersion;
+    /**
+     * 这条用例属于哪个需求单，如 {@code APP-8873}。
+     * <p>
+     * 一个版本涉及几十个单子（新需求、优化单、bug 修复），用例必须挂到单号上，
+     * 否则一版几百条用例平铺在一起，「这个单子测完了没有」根本答不出来——
+     * 而那正是提测时唯一要回答的问题。
+     */
+    private String requirementNo;
+    /**
+     * 这条用例测的是哪一端，逗号分隔：{@code CLIENT,H5,SERVER,ADMIN}。
+     * <p>
+     * 和下面的 {@code platform}（ANDROID / IOS）不是一回事——那个是设备平台，
+     * 用来做流程平台校验的。见 {@link com.mobile.standalone.service.RequirementSide}
+     */
+    private String sides;
+    /**
+     * 选了「后端」时，具体是哪个服务（{@code app-community} / {@code comment-service}…）。
+     * <p>
+     * 「后端的问题」推不到人，「comment-service 的问题」才推得到。
+     * 服务名从项目管理里已登记的取，也允许直接输没登记的。
+     */
+    private String serverService;
     private String releaseStage;
     private String remark;
     private String screenshotUrl;

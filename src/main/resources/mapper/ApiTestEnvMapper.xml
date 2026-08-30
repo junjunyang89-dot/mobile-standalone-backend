@@ -9,6 +9,11 @@
         <result property="baseUrl" column="base_url"/>
         <result property="defaultHeaders" column="default_headers"/>
         <result property="defaultToken" column="default_token"/>
+        <result property="dbHost" column="db_host"/>
+        <result property="dbPort" column="db_port"/>
+        <result property="dbName" column="db_name"/>
+        <result property="dbUser" column="db_user"/>
+        <result property="dbPassword" column="db_password"/>
         <result property="enabled" column="enabled"/>
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
@@ -27,14 +32,21 @@
 
     <insert id="upsert">
         INSERT INTO api_test_envs
-        (environment, name, base_url, default_headers, default_token, enabled, updated_at)
+        (environment, name, base_url, default_headers, default_token,
+         db_host, db_port, db_name, db_user, db_password, enabled, updated_at)
         VALUES
-        (#{environment}, #{name}, #{baseUrl}, #{defaultHeaders}, #{defaultToken}, #{enabled}, #{updatedAt})
+        (#{environment}, #{name}, #{baseUrl}, #{defaultHeaders}, #{defaultToken},
+         #{dbHost}, #{dbPort}, #{dbName}, #{dbUser}, #{dbPassword}, #{enabled}, #{updatedAt})
         ON DUPLICATE KEY UPDATE
             name = VALUES(name),
             base_url = VALUES(base_url),
             default_headers = VALUES(default_headers),
             default_token = VALUES(default_token),
+            db_host = VALUES(db_host),
+            db_port = VALUES(db_port),
+            db_name = VALUES(db_name),
+            db_user = VALUES(db_user),
+            db_password = VALUES(db_password),
             enabled = VALUES(enabled),
             updated_at = VALUES(updated_at)
     </insert>

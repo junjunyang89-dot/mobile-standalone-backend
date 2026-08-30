@@ -13,10 +13,12 @@
 
     <insert id="insertRunCase">
         INSERT INTO api_test_run_cases
-        (id, run_id, case_id, name, method, path, url, status, http_status, duration_ms, error, created_at)
+        (id, run_id, case_id, name, method, path, url, status, http_status, duration_ms, error,
+         assertion_results, body_preview, req_headers, req_body, resp_headers, created_at)
         VALUES
         (#{id}, #{runId}, #{caseId}, #{name}, #{method}, #{path}, #{url}, #{status},
-         #{httpStatus}, #{durationMs}, #{error}, #{createdAt})
+         #{httpStatus}, #{durationMs}, #{error},
+         #{assertionResults}, #{bodyPreview}, #{reqHeaders}, #{reqBody}, #{respHeaders}, #{createdAt})
     </insert>
 
     <select id="findRecentCases" resultType="com.mobile.standalone.entity.ApiTestRunCase">
@@ -75,6 +77,53 @@
         LIMIT #{limit}
     </select>
 
+    <select id="findRunsEnriched" resultType="java.util.Map">
+        SELECT r.id, r.environment, r.collection_id AS collectionId, c.name AS collectionName,
+               c.project AS collectionProject, c.requirement_no AS requirementNo,
+               c.source_branch AS sourceBranch, c.scope AS collectionScope,
+               r.total, r.passed, r.failed, r.duration_ms AS durationMs,
+               r.ok, r.message, r.created_by AS createdBy, r.created_at AS createdAt
+        FROM api_test_runs r
+        LEFT JOIN api_test_collections c ON c.id = r.collection_id
+        ORDER BY r.created_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findRunInterfaces" resultType="java.util.Map">
+        SELECT rc.run_id AS runId,
+               NULLIF(TRIM(tc.project), '') AS caseProject,
+               NULLIF(TRIM(col.project), '') AS collectionProject,
+               rc.method AS method,
+               rc.path AS path
+        FROM api_test_run_cases rc
+        LEFT JOIN api_test_cases tc ON tc.id = rc.case_id
+        LEFT JOIN api_test_runs r ON r.id = rc.run_id
+        LEFT JOIN api_test_collections col ON col.id = r.collection_id
+        WHERE rc.path IS NOT NULL
+          AND TRIM(rc.path) != ''
+          AND TRIM(rc.path) NOT IN ('(未识别接口)', '—')
+        GROUP BY rc.run_id, rc.method, rc.path,
+                 NULLIF(TRIM(tc.project), ''), NULLIF(TRIM(col.project), '')
+    </select>
+
+    <delete id="deleteRunCases">
+        DELETE FROM api_test_run_cases WHERE run_id = #{runId}
+    </delete>
+
+    <delete id="deleteRun">
+        DELETE FROM api_test_runs WHERE id = #{runId}
+    </delete>
+
+    <delete id="deleteRunCasesByRunIds">
+        DELETE FROM api_test_run_cases WHERE run_id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </delete>
+
+    <delete id="deleteRuns">
+        DELETE FROM api_test_runs WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </delete>
+
     <select id="findRunById" resultType="com.mobile.standalone.entity.ApiTestRun">
         SELECT id, environment, collection_id AS collectionId, total, passed, failed,
                duration_ms AS durationMs, ok, message, created_by AS createdBy, created_at AS createdAt
@@ -84,7 +133,10 @@
     <!-- 失败的排前面：打开一份报告，人要看的永远是挂了哪几条 -->
     <select id="findCasesByRun" resultType="com.mobile.standalone.entity.ApiTestRunCase">
         SELECT id, run_id AS runId, case_id AS caseId, name, method, path, url,
-               status, http_status AS httpStatus, duration_ms AS durationMs, error, created_at AS createdAt
+               status, http_status AS httpStatus, duration_ms AS durationMs, error,
+               assertion_results AS assertionResults, body_preview AS bodyPreview,
+               req_headers AS reqHeaders, req_body AS reqBody, resp_headers AS respHeaders,
+               created_at AS createdAt
         FROM api_test_run_cases
         WHERE run_id = #{runId}
         ORDER BY (status = 'PASSED') ASC, created_at ASC

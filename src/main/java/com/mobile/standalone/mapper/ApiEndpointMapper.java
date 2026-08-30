@@ -10,7 +10,7 @@ import java.util.List;
 public interface ApiEndpointMapper {
 
     /** 带 caseCount 的清单，页面直接用 */
-    List<ApiEndpoint> search(@Param("project") String project,
+    List<ApiEndpoint> search(@Param("projectCodes") List<String> projectCodes,
                              @Param("keyword") String keyword,
                              @Param("changeFlag") String changeFlag,
                              @Param("status") String status);

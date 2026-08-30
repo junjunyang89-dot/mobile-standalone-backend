@@ -69,6 +69,11 @@ public class ApiChangeAnalyzer {
          * 不显示的话，同步做没做过全靠猜，而猜错的方向是「以为同步了其实没有」。
          */
         private Map<String, Object> catalogSync;
+        /**
+         * 这份报告关联到了哪些需求单、挂了几个接口。
+         * 分支名里带单号时自动产生，{@code {requirements:[APP-8928], linked:7}}
+         */
+        private Map<String, Object> requirementLink;
     }
 
     @Data
@@ -591,7 +596,11 @@ public class ApiChangeAnalyzer {
                     impls.add(svc + "Impl");
                 }
             }
-            boolean touched = dto != null || bodyDto != null || !pc.isEmpty()
+            // was == null 必须排在最前：新增的接口没有「之前」，
+            // 而 sameSignature 会去读 was.returnType()。放在后面时，只有当前面几项
+            // 恰好都为 false 才会走到它——也就是「新增了一个接口、而它的返回类型没变化」，
+            // 那正是最常见的情形（新接口复用已有 DTO），一走到就 NPE，整份报告直接失败
+            boolean touched = was == null || dto != null || bodyDto != null || !pc.isEmpty()
                     || !impls.isEmpty() || !sameSignature(was, now);
             if (was == null) {
                 EndpointChange c = toChange("ADDED", now, file, dto);
@@ -617,7 +626,11 @@ public class ApiChangeAnalyzer {
         return out;
     }
 
+    /** 任一侧为空视为「不同」——新增或删除本来就是变化，而不是崩溃的理由 */
     private static boolean sameSignature(ApiEndpoint a, ApiEndpoint b) {
+        if (a == null || b == null) {
+            return false;
+        }
         return java.util.Objects.equals(a.returnType(), b.returnType());
     }
 

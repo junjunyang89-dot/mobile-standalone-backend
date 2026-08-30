@@ -6,6 +6,8 @@ import com.mobile.standalone.mapper.ApiProjectMapper;
 import com.mobile.standalone.service.ApiChangeReportService;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer;
 import lombok.Data;
+import com.mobile.standalone.service.apitest.BranchIssueKey;
+import com.mobile.standalone.service.apitest.RequirementEndpointService;
 import com.mobile.standalone.service.apitest.EndpointChangeFlag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +36,7 @@ public class ApiChangeController {
     private final com.mobile.standalone.mapper.ApiTableSchemaMapper apiTableSchemaMapper;
     private final ApiChangeReportService apiChangeReportService;
     private final com.mobile.standalone.service.apitest.ApiEndpointService apiEndpointService;
+    private final com.mobile.standalone.service.apitest.RequirementEndpointService requirementEndpointService;
 
     /**
      * 把这份报告同步进接口清单。
@@ -44,8 +47,16 @@ public class ApiChangeController {
      * 同步失败不影响报告本身——分析结果是主产物，清单是派生的。
      */
     private Map<String, Object> syncToEndpointCatalog(ApiChangeAnalyzer.Report report, String projectCode) {
-        if (report == null || projectCode == null || projectCode.isBlank()) {
+        if (report == null) {
             return null;
+        }
+        if (projectCode == null || projectCode.isBlank()) {
+            // 早先这里直接 return null，于是「一条都没进清单」和「同步成功但没变化」
+            // 在页面上长得一模一样。目录对比不选项目时就会走到这儿——
+            // 结果是接口清单永远是空的，而人以为分析跑完就自动录进去了
+            return Map.of("skipped", true,
+                    "reason", "这次没选项目，接口没有进接口清单。"
+                            + "接口清单是按项目分的，选一个项目再分析一次就会自动录入");
         }
         try {
             List<com.mobile.standalone.service.apitest.ApiEndpointService.EndpointChange> changes =
@@ -68,7 +79,9 @@ public class ApiChangeController {
             return Map.of("created", r.created(), "updated", r.updated(), "deprecated", r.deprecated());
         } catch (Exception ex) {
             log.warn("[api-changes] 同步接口清单失败（不影响本次报告）: {}", ex.getMessage());
-            return null;
+            // 失败也要说出来。吞掉的结果是清单看着干净、其实是上一版的
+            return Map.of("skipped", true,
+                    "reason", "同步接口清单失败：" + (ex.getMessage() == null ? "未知原因" : ex.getMessage()));
         }
     }
 
@@ -137,6 +150,47 @@ public class ApiChangeController {
                 }
             }
             e.setTestCases(n);
+        }
+    }
+
+    /**
+     * 把这份报告里变更的接口，挂到分支名里那个需求单上。
+     * <p>
+     * 分支名里已经带着单号（{@code fch/20260804/APP-8928}），所以这一步是<b>零人工</b>的：
+     * 你跑一次对比分析，「这个需求改了哪些接口」就有了。
+     * <p>
+     * 认不出单号（master、目录对比）时安静跳过——那种情况下本来就没有「哪个需求」这回事。
+     */
+    private Map<String, Object> linkToRequirement(ApiChangeAnalyzer.Report report, String projectCode) {
+        if (report == null || report.getEndpoints().isEmpty()) {
+            return null;
+        }
+        List<String> keys = BranchIssueKey.allIn(report.getHeadRef());
+        if (keys.isEmpty()) {
+            return null;
+        }
+        try {
+            List<RequirementEndpointService.Link> links = new java.util.ArrayList<>();
+            for (ApiChangeAnalyzer.EndpointChange e : report.getEndpoints()) {
+                EndpointChangeFlag.Input in = new EndpointChangeFlag.Input(
+                        e.getChangeType(), e.getRisk(),
+                        e.getParams() == null ? 0 : e.getParams().size(),
+                        e.getFields() == null ? 0 : e.getFields().size(),
+                        e.getBodyFields() == null ? 0 : e.getBodyFields().size(),
+                        e.getChangedImpls() == null ? 0 : e.getChangedImpls().size());
+                links.add(new RequirementEndpointService.Link(
+                        null, e.getHttpMethod(), e.getPath(), e.getSummary(),
+                        EndpointChangeFlag.of(in), EndpointChangeFlag.note(in, e.getRisk())));
+            }
+            int total = 0;
+            for (String key : keys) {
+                total += requirementEndpointService.link(key, projectCode, report.getHeadRef(), links);
+            }
+            return Map.of("requirements", keys, "linked", total);
+        } catch (Exception ex) {
+            // 关联不上不影响报告本身——分析结果是主产物
+            log.warn("[api-changes] 关联需求单失败（不影响本次报告）: {}", ex.getMessage());
+            return null;
         }
     }
 
@@ -240,6 +294,10 @@ public class ApiChangeController {
             if (sync != null) {
                 report.setCatalogSync(sync);
             }
+            Map<String, Object> reqLink = linkToRequirement(report, p.getCode());
+            if (reqLink != null) {
+                report.setRequirementLink(reqLink);
+            }
             return ResponseEntity.ok(report);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
@@ -263,12 +321,21 @@ public class ApiChangeController {
                     ? "本地目录对比" : body.getProject();
             ApiChangeAnalyzer.Report report =
                     analyzer.analyzeDirs(name, body.getBaseDir(), body.getHeadDir());
+            // 目录对比没有分支名。用目录标识当来源，比留空强——
+            // 留空的话这批接口在测试树上挂不到任何一个节点下面，等于看不见
+            if (report.getHeadRef() == null || report.getHeadRef().isBlank()) {
+                report.setHeadRef("目录:" + name);
+            }
             markCoverage(report, body.getProject());
             attachTableSchemas(report, body.getProject());
             apiChangeReportService.saveSnapshot(body.getProject(), report);
             Map<String, Object> sync = syncToEndpointCatalog(report, body.getProject());
             if (sync != null) {
                 report.setCatalogSync(sync);
+            }
+            Map<String, Object> reqLink = linkToRequirement(report, body.getProject());
+            if (reqLink != null) {
+                report.setRequirementLink(reqLink);
             }
             return ResponseEntity.ok(report);
         } catch (IllegalArgumentException e) {

@@ -17,6 +17,16 @@ public class ApiTestEnv {
     private String defaultHeaders;
     /** 默认 token；请求头 token / Authorization 可引用 */
     private String defaultToken;
+    /**
+     * 数据库断言用的只读连接。跟着环境走，和 {@code baseUrl} 一个逻辑——
+     * 接口打预发、断言却查测试库的话，结论是反的。
+     */
+    private String dbHost;
+    private Integer dbPort;
+    private String dbName;
+    private String dbUser;
+    private String dbPassword;
+
     private Boolean enabled;
     private LocalDateTime updatedAt;
 }

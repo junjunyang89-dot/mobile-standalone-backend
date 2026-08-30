@@ -53,6 +53,12 @@ public class ApiEndpoint {
     /** 返回体字段快照（JSON），用来判断已有用例的断言是不是过期了 */
     private String fieldsSnapshot;
 
+    /** 抓包解析出的样本：顶层字段、样本值、请求预览 */
+    private String captureMeta;
+
+    /** 接口文档导入的说明、依赖等——仅参考，不参与断言 */
+    private String docMeta;
+
     private LocalDateTime lastSyncedAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

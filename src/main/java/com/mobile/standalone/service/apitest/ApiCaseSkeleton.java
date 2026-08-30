@@ -2,6 +2,8 @@ package com.mobile.standalone.service.apitest;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 从接口清单生成用例骨架。
@@ -26,7 +28,22 @@ public final class ApiCaseSkeleton {
      */
     public record Input(String httpMethod, String path, String summary,
                         String successCodePath, String successCodeValue,
-                        List<String> responseFields) {
+                        List<String> responseFields,
+                        Map<String, Object> captureSamples,
+                        Set<String> nullableFields) {
+        public Input(String httpMethod, String path, String summary,
+                     String successCodePath, String successCodeValue,
+                     List<String> responseFields) {
+            this(httpMethod, path, summary, successCodePath, successCodeValue,
+                    responseFields, Map.of(), Set.of());
+        }
+
+        public Input(String httpMethod, String path, String summary,
+                     String successCodePath, String successCodeValue,
+                     List<String> responseFields, Map<String, Object> captureSamples) {
+            this(httpMethod, path, summary, successCodePath, successCodeValue,
+                    responseFields, captureSamples, Set.of());
+        }
     }
 
     /**
@@ -58,11 +75,47 @@ public final class ApiCaseSkeleton {
 
         List<String> fields = in.responseFields() == null ? List.of() : in.responseFields();
         int used = 0;
+        Map<String, Object> samples = in.captureSamples() == null ? Map.of() : in.captureSamples();
+        Set<String> sampled = new java.util.LinkedHashSet<>();
+        // 文档写明「查不到可空」的字段，一律不生成断言。
+        // 抓包这次看到它有值，不代表它总有值——照抓包断言 equals/exists，
+        // 换个数据就红，而红的原因是断言写错了，不是接口坏了。
+        // 这种假失败最伤：修几次之后，人就不再相信这套用例了
+        Set<String> nullable = in.nullableFields() == null ? Set.of() : in.nullableFields();
+
+        // 抓包样本：顶层字段写 equals（比 exists 更有验据）
+        for (Map.Entry<String, Object> e : samples.entrySet()) {
+            if (used >= MAX_FIELD_ASSERTIONS) {
+                break;
+            }
+            String field = e.getKey();
+            Object val = e.getValue();
+            if (field == null || field.isBlank() || !CaptureJsonParser.isAssertableValue(val)) {
+                continue;
+            }
+            if (nullable.contains(field.trim())) {
+                continue;
+            }
+            String path = field.startsWith("$") ? field : "$." + field.trim();
+            if (path.equals(codePath)) {
+                continue;
+            }
+            asserts.add("{\"type\":\"jsonPath\",\"path\":\"" + esc(path) + "\",\"equals\":"
+                    + jsonLiteral(val) + "}");
+            sampled.add(field.trim());
+            used++;
+            meaningful = true;
+        }
+
         for (String f : fields) {
             if (f == null || f.isBlank() || used >= MAX_FIELD_ASSERTIONS) {
                 continue;
             }
-            String path = f.startsWith("$") ? f : "$." + f.trim();
+            String trimmed = f.trim();
+            if (sampled.contains(trimmed) || nullable.contains(trimmed)) {
+                continue;
+            }
+            String path = trimmed.startsWith("$") ? trimmed : "$." + trimmed;
             if (path.equals(codePath)) {
                 continue;
             }
@@ -74,21 +127,89 @@ public final class ApiCaseSkeleton {
         }
 
         String json = "[" + String.join(",", asserts) + "]";
-        String base = nz(in.summary()).isEmpty()
-                ? in.httpMethod() + " " + in.path()
-                : in.summary();
+        String base = displayName(in.httpMethod(), in.path(), in.summary());
 
         if (meaningful) {
             return new Draft(json, true, base,
                     used > 0
-                            ? "已生成 " + used + " 条字段存在性断言，值需要跑一次之后按实际补"
-                            : "已带上业务码断言。要验具体字段的话，跑一次拿到返回体再补");
+                            ? "断言来自抓包实测或代码对比；开发文档仅参考，不参与"
+                            : "已带上业务码断言。具体字段请抓包后补");
         }
         return new Draft(json, false,
                 base + "（待补断言）",
-                "这个项目没配业务码，接口返回体字段也未知，只能生成 status=200——"
-                        + "那等于没验。所以先生成为「停用」：跑一次拿到返回体，补上字段断言再启用。"
-                        + "更省力的做法是在项目管理里配上业务码，配完这个项目所有用例自动带上 code 断言");
+                "没有抓包样本或代码对比字段，只有 status=200——那等于没验。"
+                        + "先抓包挂接口（拿真实返回），或跑接口对比分析（拿代码里的字段），再生成/补断言。"
+                        + "开发文档只能参考，不会自动写进断言。");
+    }
+
+    /**
+     * 用例展示名：优先 @ApiOperation 等中文说明；抓包来的 host 不算说明。
+     */
+    public static String displayName(String httpMethod, String path, String summary) {
+        if (isMeaningfulSummary(summary)) {
+            return summary.trim();
+        }
+        return formatMethodPath(httpMethod, path);
+    }
+
+    static boolean isMeaningfulSummary(String summary) {
+        if (summary == null || summary.isBlank()) {
+            return false;
+        }
+        String s = summary.trim();
+        if (s.startsWith("http://") || s.startsWith("https://")) {
+            return false;
+        }
+        // 抓包挂接口时 summary 常是 host，如 gateway-qa.arca42.com
+        if (s.matches("^[a-zA-Z0-9][a-zA-Z0-9.-]*\\.[a-zA-Z]{2,}$")) {
+            return false;
+        }
+        // 已是 METHOD /path 形式
+        if (s.matches("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+.+")) {
+            return true;
+        }
+        // 含中文或空格，多半是接口说明
+        if (s.chars().anyMatch(ch -> ch >= 0x4E00 && ch <= 0x9FFF) || s.contains(" ")) {
+            return true;
+        }
+        return false;
+    }
+
+    static String formatMethodPath(String httpMethod, String path) {
+        String m = nz(httpMethod).isEmpty() ? "GET" : httpMethod.trim().toUpperCase();
+        String p = nz(path);
+        if (p.isBlank()) {
+            return m;
+        }
+        String[] parts = p.split("/");
+        String leaf = "";
+        String parent = "";
+        for (int i = parts.length - 1; i >= 0; i--) {
+            if (parts[i] != null && !parts[i].isBlank()) {
+                leaf = parts[i];
+                if (i > 0) {
+                    for (int j = i - 1; j >= 0; j--) {
+                        if (parts[j] != null && !parts[j].isBlank()) {
+                            parent = parts[j];
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        if (leaf.isEmpty()) {
+            return m + " " + p;
+        }
+        if (!parent.isEmpty() && isGenericSegment(leaf)) {
+            return m + " " + parent + "/" + leaf;
+        }
+        return m + " " + leaf;
+    }
+
+    private static boolean isGenericSegment(String seg) {
+        return Set.of("list", "detail", "cnt", "search", "info", "status", "index")
+                .contains(seg.toLowerCase());
     }
 
     private static boolean isNumeric(String s) {
@@ -106,5 +227,12 @@ public final class ApiCaseSkeleton {
 
     private static String nz(String s) {
         return s == null ? "" : s.trim();
+    }
+
+    private static String jsonLiteral(Object val) {
+        if (val instanceof Number || val instanceof Boolean) {
+            return String.valueOf(val);
+        }
+        return "\"" + esc(String.valueOf(val)) + "\"";
     }
 }

@@ -23,6 +23,10 @@
         <result property="contentUpdatedAt" column="content_updated_at"/>
         <result property="automationAdvice" column="automation_advice"/>
         <result property="releaseStage" column="release_stage"/>
+        <result property="appVersion" column="app_version"/>
+        <result property="requirementNo" column="requirement_no"/>
+        <result property="sides" column="sides"/>
+        <result property="serverService" column="server_service"/>
         <result property="remark" column="remark"/>
         <result property="screenshotUrl" column="screenshot_url"/>
         <result property="platform" column="platform"/>
@@ -61,6 +65,16 @@
             <if test="releaseStage != null and releaseStage != ''">
                 AND release_stage = #{releaseStage}
             </if>
+            <if test="appVersion != null and appVersion != ''">
+                AND app_version = #{appVersion}
+            </if>
+            <if test="requirementNo != null and requirementNo != ''">
+                AND requirement_no = #{requirementNo}
+            </if>
+            <!-- 逗号分隔存的，用 FIND_IN_SET 精确匹配一项，LIKE 会让 H5 命中 H5X -->
+            <if test="side != null and side != ''">
+                AND FIND_IN_SET(#{side}, sides)
+            </if>
             <!--
               标题模糊搜。顺带把编号和测试点也搜进去：
               人搜「验证码」时既可能记得标题里有这个词，也可能只记得测试点里写过，
@@ -92,12 +106,44 @@
         <include refid="filterWhere"/>
     </select>
 
+    <!--
+        版本下拉。
+        <p>
+        不按版本号字符串排：「9.10」在字符串里小于「9.3」，而实际上 9.10 更新。
+        也不去解析版本号——格式一变（9.3.1、2026.1）解析就崩了。
+        <p>
+        改按「各版本最新一条用例」排，录入顺序天然就是版本顺序。
+        created_at 只到秒，同一秒入库两个版本时会并列，所以再用自增 id 兜底——
+        少了它，下拉顺序会时好时坏，而这种飘忽的问题最难查。
+    -->
+    <select id="distinctVersions" resultType="java.util.Map">
+        SELECT app_version AS version, COUNT(1) AS count,
+               MAX(created_at) AS latestAt, MAX(id) AS latestId
+        FROM ai_test_cases
+        WHERE app_version IS NOT NULL AND app_version &lt;&gt; ''
+        <if test="category != null and category != ''">AND category = #{category}</if>
+        GROUP BY app_version
+        ORDER BY latestAt DESC, latestId DESC
+    </select>
+
+    <!-- 某一版下每个单号的用例数。提测时唯一要回答的问题：这个单子测完了没有 -->
+    <select id="countByRequirement" resultType="java.util.Map">
+        SELECT requirement_no AS requirementNo, COUNT(1) AS total,
+               SUM(CASE WHEN status = 'REVIEWED' THEN 1 ELSE 0 END) AS reviewed
+        FROM ai_test_cases
+        WHERE requirement_no IS NOT NULL AND requirement_no &lt;&gt; ''
+        <if test="category != null and category != ''">AND category = #{category}</if>
+        <if test="appVersion != null and appVersion != ''">AND app_version = #{appVersion}</if>
+        GROUP BY requirement_no
+        ORDER BY requirement_no
+    </select>
+
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_test_cases (
             case_id, page_name, category, module, sub_module, test_item, test_point,
             title, priority, type, precondition, steps_json, expected_result, flow_id,
             linked_at, content_updated_at,
-            automation_advice, release_stage, remark,
+            automation_advice, release_stage, app_version, requirement_no, sides, server_service, remark,
             screenshot_url, platform, app_id, source, status, batch_id, created_by,
             created_at, updated_at
         ) VALUES (
@@ -105,7 +151,7 @@
             #{title}, #{priority}, #{type}, #{precondition},
             CAST(#{stepsJson} AS JSON), #{expectedResult}, #{flowId},
             #{linkedAt}, #{contentUpdatedAt}, #{automationAdvice},
-            #{releaseStage}, #{remark},
+            #{releaseStage}, #{appVersion}, #{requirementNo}, #{sides}, #{serverService}, #{remark},
             #{screenshotUrl}, #{platform}, #{appId}, #{source}, #{status}, #{batchId}, #{createdBy},
             NOW(), NOW()
         )
@@ -131,6 +177,10 @@
             content_updated_at = #{contentUpdatedAt},
             automation_advice = #{automationAdvice},
             release_stage = #{releaseStage},
+            app_version = #{appVersion},
+            requirement_no = #{requirementNo},
+            sides = #{sides},
+            server_service = #{serverService},
             remark = #{remark},
             screenshot_url = #{screenshotUrl},
             platform = #{platform},

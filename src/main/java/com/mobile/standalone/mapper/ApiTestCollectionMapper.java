@@ -9,7 +9,16 @@ import java.util.List;
 @Mapper
 public interface ApiTestCollectionMapper {
 
-    List<ApiTestCollection> findAll(@Param("project") String project);
+    List<ApiTestCollection> findAll(@Param("project") String project,
+                                    @Param("scope") String scope,
+                                    @Param("lifecycle") String lifecycle,
+                                    @Param("includeArchived") Boolean includeArchived,
+                                    @Param("appVersion") String appVersion,
+                                    @Param("requirementNo") String requirementNo);
+
+    int archiveByRequirement(@Param("requirementNo") String requirementNo);
+
+    int archiveById(@Param("id") String id);
 
     ApiTestCollection findById(@Param("id") String id);
 

@@ -32,7 +32,7 @@ public final class PermissionRules {
             // 加不上任何请求头，拦下来的结果是所有报告的图全变成裂图。
             // 这些路径本身是不可猜的（任务 id + 时间戳），而真正要守的是接口那一层
             "/tmp/screenshots", "tmp/screenshots", "/ui-element-previews",
-            "/handbook-images", "/agent-uploads");
+            "/handbook-images", "/agent-uploads", "/bug-images");
 
     /**
      * 长得像写、其实是查的 POST。
@@ -72,7 +72,9 @@ public final class PermissionRules {
             "/ui-elements", PlatformRole.TESTER,
             "/ui-inspector-import", PlatformRole.TESTER,
             "/api-environments", PlatformRole.TESTER,
-            "/api-schedules", PlatformRole.TESTER);
+            "/api-schedules", PlatformRole.TESTER,
+            // 抓包会改手机的代理设置，只读账号不该能碰真机
+            "/packet-capture", PlatformRole.TESTER);
 
     public static boolean isPublic(String path) {
         String p = normalize(path);
