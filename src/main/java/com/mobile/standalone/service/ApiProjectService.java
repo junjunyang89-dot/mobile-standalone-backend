@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -62,6 +63,10 @@ public class ApiProjectService {
             ensureColumn("success_code_path", "VARCHAR(128) NULL COMMENT '业务成功码路径，如 $.code'");
             ensureColumn("success_code_value", "VARCHAR(64) NULL COMMENT '业务成功码的值，如 0'");
             ensureColumn("kind", "VARCHAR(16) NULL DEFAULT 'BACKEND' COMMENT 'BACKEND=后端仓库 CLIENT=客户端'");
+            ensureColumn("category", "VARCHAR(64) NULL COMMENT '分类 key，留空按编码自动归类'");
+            ensureCategoryTableAndSeed();
+            syncCategoriesFromProjects();
+            widenProjectCategoryColumn();
             seedIfEmpty();
             markLegacyClientProjects();
             log.info("[api-projects] 表已就绪");
@@ -128,48 +133,288 @@ public class ApiProjectService {
         return projectMapper.findForCatalog(enabledOnly);
     }
 
-    /** 项目管理页：按 APP / PVP / WEB / 其他 分组，APP 内补 catalog 占位项 */
+    /** 项目管理页：按注册分类分组，含空分类与 APP catalog 占位 */
     public Map<String, Object> buildTree(Boolean enabledOnly) {
         List<Map<String, Object>> rows = list(enabledOnly).stream().map(this::toTreeRow).toList();
         Map<String, List<Map<String, Object>>> buckets = ApiProjectCatalog.bucketProjects(new ArrayList<>(rows));
 
         List<Map<String, Object>> categories = new ArrayList<>();
-        for (ApiProjectCatalog.Category cat : ApiProjectCatalog.categoriesInOrder()) {
-            List<Map<String, Object>> projects = new ArrayList<>(buckets.get(cat.key()));
-            if (ApiProjectCatalog.APP.key().equals(cat.key())) {
-                Map<String, Map<String, Object>> byCode = new LinkedHashMap<>();
-                for (Map<String, Object> row : projects) {
-                    byCode.put(String.valueOf(row.get("code")), row);
-                }
-                List<Map<String, Object>> ordered = new ArrayList<>();
-                for (String slot : ApiProjectCatalog.appProjectSlots()) {
-                    Map<String, Object> hit = byCode.remove(slot);
-                    if (hit != null) {
-                        ordered.add(hit);
-                    } else {
-                        Map<String, Object> placeholder = new LinkedHashMap<>();
-                        placeholder.put("code", slot);
-                        placeholder.put("name", slot);
-                        placeholder.put("missing", true);
-                        placeholder.put("enabled", false);
-                        placeholder.put("category", cat.key());
-                        ordered.add(placeholder);
-                    }
-                }
-                ordered.addAll(byCode.values());
-                projects = ordered;
+        Set<String> handled = new HashSet<>();
+        for (Map<String, Object> def : listCategoryRegistry()) {
+            String key = String.valueOf(def.get("key"));
+            List<Map<String, Object>> projects = new ArrayList<>(buckets.getOrDefault(key, List.of()));
+            if (ApiProjectCatalog.APP.key().equals(key)) {
+                projects = orderAppCategoryProjects(projects, key);
             }
-            long configured = projects.stream()
-                    .filter(p -> !Boolean.TRUE.equals(p.get("missing")))
-                    .count();
-            Map<String, Object> catVo = new LinkedHashMap<>();
-            catVo.put("key", cat.key());
-            catVo.put("label", cat.label());
-            catVo.put("projects", projects);
-            catVo.put("count", configured);
-            categories.add(catVo);
+            categories.add(buildCategoryVo(
+                    key,
+                    String.valueOf(def.get("label")),
+                    projects,
+                    def.get("builtin"),
+                    def.get("sortOrder")));
+            handled.add(key);
+        }
+        for (Map.Entry<String, List<Map<String, Object>>> e : buckets.entrySet()) {
+            if (handled.contains(e.getKey()) || e.getValue().isEmpty()) {
+                continue;
+            }
+            ensureCategoryRegistered(e.getKey());
+            categories.add(buildCategoryVo(
+                    e.getKey(),
+                    categoryLabel(e.getKey()),
+                    new ArrayList<>(e.getValue()),
+                    false,
+                    null));
+            handled.add(e.getKey());
         }
         return Map.of("categories", categories);
+    }
+
+    public List<Map<String, Object>> listCategoryRegistry() {
+        return jdbcTemplate.query(
+                "SELECT cat_key, label, sort_order, builtin FROM api_project_categories "
+                        + "ORDER BY sort_order ASC, cat_key ASC",
+                (rs, rowNum) -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("key", rs.getString("cat_key"));
+                    m.put("label", rs.getString("label"));
+                    m.put("sortOrder", rs.getInt("sort_order"));
+                    m.put("builtin", rs.getBoolean("builtin"));
+                    return m;
+                });
+    }
+
+    @Transactional
+    public Map<String, Object> createCategory(String label, Integer sortOrder) {
+        String key = normalizeCategoryKey(label);
+        if (key.isBlank()) {
+            throw new IllegalArgumentException("分类名称不能为空");
+        }
+        String display = label == null || label.isBlank() ? ApiProjectCatalog.categoryDisplayLabel(key) : label.trim();
+        if (display.length() > 128) {
+            throw new IllegalArgumentException("分类名称不超过 128 字符");
+        }
+        Integer existing = jdbcTemplate.queryForObject(
+                "SELECT COUNT(1) FROM api_project_categories WHERE cat_key = ?", Integer.class, key);
+        if (existing != null && existing > 0) {
+            throw new IllegalArgumentException("分类已存在: " + display);
+        }
+        int order = sortOrder != null ? sortOrder : nextCategorySortOrder();
+        boolean builtin = ApiProjectCatalog.isBuiltinCategory(key);
+        jdbcTemplate.update(
+                "INSERT INTO api_project_categories (cat_key, label, sort_order, builtin) VALUES (?, ?, ?, ?)",
+                key, display, order, builtin ? 1 : 0);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("key", key);
+        out.put("label", display);
+        out.put("sortOrder", order);
+        out.put("builtin", builtin);
+        return out;
+    }
+
+    /** 分类展示名：以 api_project_categories 为准，未注册时回退 catalog 默认 */
+    public String categoryLabel(String categoryKey) {
+        if (categoryKey == null || categoryKey.isBlank()) {
+            return ApiProjectCatalog.OTHER.label();
+        }
+        String key = normalizeCategoryKey(categoryKey);
+        for (Map<String, Object> row : listCategoryRegistry()) {
+            if (key.equals(String.valueOf(row.get("key")))) {
+                return String.valueOf(row.get("label"));
+            }
+        }
+        return ApiProjectCatalog.categoryDisplayLabel(key);
+    }
+
+    public Map<String, String> categoryLabelsByKey() {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map<String, Object> row : listCategoryRegistry()) {
+            out.put(String.valueOf(row.get("key")), String.valueOf(row.get("label")));
+        }
+        return out;
+    }
+
+    @Transactional
+    public Map<String, Object> updateCategory(String key, String label, Integer sortOrder) {
+        String k = normalizeCategoryKey(key);
+        if (k.isBlank()) {
+            throw new IllegalArgumentException("分类无效");
+        }
+        if (label == null || label.isBlank()) {
+            throw new IllegalArgumentException("分类名称不能为空");
+        }
+        String display = label.trim();
+        if (display.length() > 128) {
+            throw new IllegalArgumentException("分类名称不超过 128 字符");
+        }
+        ensureCategoryRegistered(k);
+        int updated;
+        if (sortOrder != null) {
+            updated = jdbcTemplate.update(
+                    "UPDATE api_project_categories SET label = ?, sort_order = ? WHERE cat_key = ?",
+                    display, sortOrder, k);
+        } else {
+            updated = jdbcTemplate.update(
+                    "UPDATE api_project_categories SET label = ? WHERE cat_key = ?", display, k);
+        }
+        if (updated == 0) {
+            throw new IllegalArgumentException("分类不存在: " + k);
+        }
+        boolean builtin = ApiProjectCatalog.isBuiltinCategory(k);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("key", k);
+        out.put("label", display);
+        out.put("builtin", builtin);
+        if (sortOrder != null) {
+            out.put("sortOrder", sortOrder);
+        }
+        return out;
+    }
+
+    @Transactional
+    public boolean deleteCategory(String key) {
+        if (key == null || key.isBlank()) {
+            return false;
+        }
+        String k = normalizeCategoryKey(key);
+        if (ApiProjectCatalog.isBuiltinCategory(k)) {
+            throw new IllegalArgumentException("内置分类不可删除");
+        }
+        Integer projectCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(1) FROM api_projects WHERE category = ?", Integer.class, k);
+        if (projectCount != null && projectCount > 0) {
+            throw new IllegalArgumentException("该分类下还有项目，请先移走或删除项目");
+        }
+        return jdbcTemplate.update(
+                "DELETE FROM api_project_categories WHERE cat_key = ? AND builtin = 0", k) > 0;
+    }
+
+    private void ensureCategoryTableAndSeed() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS api_project_categories (
+                    cat_key VARCHAR(64) PRIMARY KEY,
+                    label VARCHAR(128) NOT NULL,
+                    sort_order INT DEFAULT 100,
+                    builtin TINYINT(1) DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """);
+        Integer n = jdbcTemplate.queryForObject("SELECT COUNT(1) FROM api_project_categories", Integer.class);
+        if (n != null && n > 0) {
+            return;
+        }
+        for (ApiProjectCatalog.Category cat : ApiProjectCatalog.categoriesInOrder()) {
+            jdbcTemplate.update(
+                    "INSERT INTO api_project_categories (cat_key, label, sort_order, builtin) VALUES (?, ?, ?, 1)",
+                    cat.key(), cat.label(), categorySeedOrder(cat.key()), 1);
+        }
+        log.info("[api-projects] 已种子内置分类");
+    }
+
+    private static int categorySeedOrder(String key) {
+        return switch (key) {
+            case "APP" -> 10;
+            case "PVP" -> 20;
+            case "WEB" -> 30;
+            case "OTHER" -> 40;
+            default -> 100;
+        };
+    }
+
+    private void syncCategoriesFromProjects() {
+        List<String> cats = jdbcTemplate.queryForList(
+                "SELECT DISTINCT category FROM api_projects WHERE category IS NOT NULL AND TRIM(category) <> ''",
+                String.class);
+        for (String cat : cats) {
+            ensureCategoryRegistered(cat);
+        }
+    }
+
+    private void widenProjectCategoryColumn() {
+        try {
+            jdbcTemplate.execute(
+                    "ALTER TABLE api_projects MODIFY COLUMN category VARCHAR(64) NULL "
+                            + "COMMENT '分类 key，留空按编码自动归类'");
+        } catch (Exception e) {
+            log.debug("[api-projects] 扩 category 列跳过: {}", e.getMessage());
+        }
+    }
+
+    void ensureCategoryRegistered(String categoryKey) {
+        if (categoryKey == null || categoryKey.isBlank()) {
+            return;
+        }
+        String key = normalizeCategoryKey(categoryKey);
+        String label = ApiProjectCatalog.categoryDisplayLabel(key);
+        boolean builtin = ApiProjectCatalog.isBuiltinCategory(key);
+        jdbcTemplate.update(
+                "INSERT IGNORE INTO api_project_categories (cat_key, label, sort_order, builtin) VALUES (?, ?, ?, ?)",
+                key, label, builtin ? categorySeedOrder(key) : nextCategorySortOrder(), builtin ? 1 : 0);
+    }
+
+    private int nextCategorySortOrder() {
+        Integer max = jdbcTemplate.queryForObject(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM api_project_categories", Integer.class);
+        return (max == null ? 0 : max) + 10;
+    }
+
+    private static String normalizeCategoryKey(String label) {
+        if (label == null || label.isBlank()) {
+            return "";
+        }
+        String t = label.trim();
+        if (ApiProjectCatalog.isBuiltinCategory(t)) {
+            return t.toUpperCase(Locale.ROOT);
+        }
+        return t;
+    }
+
+    private List<Map<String, Object>> orderAppCategoryProjects(
+            List<Map<String, Object>> projects, String categoryKey) {
+        Map<String, Map<String, Object>> byCode = new LinkedHashMap<>();
+        for (Map<String, Object> row : projects) {
+            byCode.put(String.valueOf(row.get("code")), row);
+        }
+        List<Map<String, Object>> ordered = new ArrayList<>();
+        for (String slot : ApiProjectCatalog.appProjectSlots()) {
+            Map<String, Object> hit = byCode.remove(slot);
+            if (hit != null) {
+                ordered.add(hit);
+            } else {
+                Map<String, Object> placeholder = new LinkedHashMap<>();
+                placeholder.put("code", slot);
+                placeholder.put("name", slot);
+                placeholder.put("missing", true);
+                placeholder.put("enabled", false);
+                placeholder.put("category", categoryKey);
+                ordered.add(placeholder);
+            }
+        }
+        ordered.addAll(byCode.values());
+        return ordered;
+    }
+
+    private Map<String, Object> buildCategoryVo(
+            String key,
+            String label,
+            List<Map<String, Object>> projects,
+            Object builtinFlag,
+            Object sortOrder) {
+        long configured = projects.stream()
+                .filter(p -> !Boolean.TRUE.equals(p.get("missing")))
+                .count();
+        Map<String, Object> catVo = new LinkedHashMap<>();
+        catVo.put("key", key);
+        catVo.put("label", label);
+        catVo.put("projects", projects);
+        catVo.put("count", configured);
+        catVo.put("builtin", Boolean.TRUE.equals(builtinFlag) || "true".equals(String.valueOf(builtinFlag)));
+        catVo.put("custom", !ApiProjectCatalog.isBuiltinCategory(key));
+        if (sortOrder instanceof Number n) {
+            catVo.put("sortOrder", n.intValue());
+        }
+        return catVo;
     }
 
     /**
@@ -190,49 +435,15 @@ public class ApiProjectService {
 
         List<Map<String, Object>> categories = new ArrayList<>();
         Set<String> assigned = new HashSet<>();
+        Map<String, String> labels = categoryLabelsByKey();
 
-        for (ApiProjectCatalog.Category cat : ApiProjectCatalog.categoriesInOrder()) {
-            List<Map<String, Object>> children = new ArrayList<>();
-
-            if (ApiProjectCatalog.APP.key().equals(cat.key())) {
-                for (String slot : ApiProjectCatalog.appProjectSlots()) {
-                    children.add(endpointProjectNode(slot, stats, projectsByCode));
-                    assigned.add(slot);
-                    assigned.add(inventoryProjectKey(slot));
-                }
-                for (String code : stats.keySet()) {
-                    if (assigned.contains(code)) {
-                        continue;
-                    }
-                    if (!ApiProjectCatalog.APP.key().equals(ApiProjectCatalog.categoryKeyOf(code))) {
-                        continue;
-                    }
-                    children.add(endpointProjectNode(code, stats, projectsByCode));
-                    assigned.add(code);
-                }
-                categories.add(endpointCategoryNode(cat, children));
-                continue;
-            }
-
-            for (String slot : ApiProjectCatalog.slotsOfCategory(cat.key())) {
-                if (!stats.containsKey(slot) && !projectsByCode.containsKey(slot)) {
-                    continue;
-                }
-                children.add(endpointProjectNode(slot, stats, projectsByCode));
-                assigned.add(slot);
-            }
-            for (String code : stats.keySet()) {
-                if (assigned.contains(code)) {
-                    continue;
-                }
-                if (!cat.key().equals(ApiProjectCatalog.categoryKeyOf(code))) {
-                    continue;
-                }
-                children.add(endpointProjectNode(code, stats, projectsByCode));
-                assigned.add(code);
-            }
-            if (!children.isEmpty()) {
-                categories.add(endpointCategoryNode(cat, children));
+        for (Map<String, Object> def : listCategoryRegistry()) {
+            String catKey = String.valueOf(def.get("key"));
+            String label = labels.getOrDefault(catKey, String.valueOf(def.get("label")));
+            List<Map<String, Object>> children = buildEndpointCategoryChildren(
+                    catKey, stats, projectsByCode, assigned);
+            if (ApiProjectCatalog.APP.key().equals(catKey) || !children.isEmpty()) {
+                categories.add(endpointCategoryNode(catKey, label, children));
             }
         }
         return Map.of("categories", categories);
@@ -283,8 +494,72 @@ public class ApiProjectService {
         return node;
     }
 
+    private List<Map<String, Object>> buildEndpointCategoryChildren(
+            String catKey,
+            Map<String, int[]> stats,
+            Map<String, ApiProject> projectsByCode,
+            Set<String> assigned) {
+        List<Map<String, Object>> children = new ArrayList<>();
+
+        if (ApiProjectCatalog.APP.key().equals(catKey)) {
+            for (String slot : ApiProjectCatalog.appProjectSlots()) {
+                children.add(endpointProjectNode(slot, stats, projectsByCode));
+                assigned.add(slot);
+                assigned.add(inventoryProjectKey(slot));
+            }
+            for (String code : stats.keySet()) {
+                if (assigned.contains(code)) {
+                    continue;
+                }
+                if (!ApiProjectCatalog.APP.key().equals(ApiProjectCatalog.categoryKeyOf(code))) {
+                    continue;
+                }
+                children.add(endpointProjectNode(code, stats, projectsByCode));
+                assigned.add(code);
+            }
+            return children;
+        }
+
+        for (String slot : ApiProjectCatalog.slotsOfCategory(catKey)) {
+            if (!stats.containsKey(slot) && !projectsByCode.containsKey(slot)) {
+                continue;
+            }
+            children.add(endpointProjectNode(slot, stats, projectsByCode));
+            assigned.add(slot);
+        }
+        for (String code : stats.keySet()) {
+            if (assigned.contains(code)) {
+                continue;
+            }
+            if (!catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
+                continue;
+            }
+            children.add(endpointProjectNode(code, stats, projectsByCode));
+            assigned.add(code);
+        }
+        for (ApiProject p : projectsByCode.values()) {
+            String code = p.getCode();
+            if (assigned.contains(code)) {
+                continue;
+            }
+            if (catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
+                children.add(endpointProjectNode(code, stats, projectsByCode));
+                assigned.add(code);
+            }
+        }
+        return children;
+    }
+
+    private static String resolveEndpointProjectCategory(String code, Map<String, ApiProject> projectsByCode) {
+        ApiProject p = projectsByCode.get(code);
+        if (p != null) {
+            return ApiProjectCatalog.resolveCategoryKey(code, p.getCategory());
+        }
+        return ApiProjectCatalog.categoryKeyOf(code);
+    }
+
     private static Map<String, Object> endpointCategoryNode(
-            ApiProjectCatalog.Category cat, List<Map<String, Object>> children) {
+            String key, String label, List<Map<String, Object>> children) {
         int total = 0;
         int pending = 0;
         for (Map<String, Object> child : children) {
@@ -300,8 +575,8 @@ public class ApiProjectService {
             return Integer.compare((int) b.get("total"), (int) a.get("total"));
         });
         Map<String, Object> node = new LinkedHashMap<>();
-        node.put("key", cat.key());
-        node.put("label", cat.label());
+        node.put("key", key);
+        node.put("label", label);
         node.put("total", total);
         node.put("pending", pending);
         node.put("children", children);
@@ -320,7 +595,8 @@ public class ApiProjectService {
         m.put("successCodeValue", p.getSuccessCodeValue());
         m.put("repoPath", p.getRepoPath());
         m.put("baseBranch", p.getBaseBranch());
-        m.put("category", ApiProjectCatalog.categoryKeyOf(p.getCode()));
+        m.put("category", ApiProjectCatalog.resolveCategoryKey(p.getCode(), p.getCategory()));
+        m.put("categoryStored", p.getCategory());
         m.put("missing", false);
         return m;
     }
@@ -336,6 +612,7 @@ public class ApiProjectService {
             throw new IllegalArgumentException("项目编码已存在: " + body.getCode());
         }
         defaults(body);
+        ensureCategoryRegistered(body.getCategory());
         LocalDateTime now = LocalDateTime.now();
         body.setCreatedAt(now);
         body.setUpdatedAt(now);
@@ -350,6 +627,7 @@ public class ApiProjectService {
         body.setCode(code);
         validate(body, false);
         defaults(body);
+        ensureCategoryRegistered(body.getCategory());
         // 请求里没给的字段保留原值。update 是全列覆盖，前端那个编辑表单又只有编码/名称/说明/启用/排序——
         // 不兜这一下，改一次项目名就把 repoPath 清成 null，接口对比分析直接报「未配仓库」，
         // 而且现场看不出是刚才那次编辑干的
@@ -358,6 +636,7 @@ public class ApiProjectService {
         keepIfNull(body::getBaseBranch, body::setBaseBranch, existing.getBaseBranch());
         keepIfNull(body::getSuccessCodePath, body::setSuccessCodePath, existing.getSuccessCodePath());
         keepIfNull(body::getSuccessCodeValue, body::setSuccessCodeValue, existing.getSuccessCodeValue());
+        keepIfNull(body::getCategory, body::setCategory, existing.getCategory());
         body.setCreatedAt(existing.getCreatedAt());
         body.setUpdatedAt(LocalDateTime.now());
         projectMapper.update(body);
@@ -421,6 +700,17 @@ public class ApiProjectService {
         }
         if (body.getName() == null || body.getName().isBlank()) {
             throw new IllegalArgumentException("项目名称必填");
+        }
+        if (body.getCategory() != null && !body.getCategory().isBlank()) {
+            String k = body.getCategory().trim();
+            if (k.length() > 64) {
+                throw new IllegalArgumentException("分类名称不超过 64 字符");
+            }
+            if (ApiProjectCatalog.isBuiltinCategory(k)) {
+                body.setCategory(k.toUpperCase(Locale.ROOT));
+            } else {
+                body.setCategory(k);
+            }
         }
     }
 

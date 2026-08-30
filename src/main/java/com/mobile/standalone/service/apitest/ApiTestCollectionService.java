@@ -1,9 +1,12 @@
 package com.mobile.standalone.service.apitest;
 
+import com.mobile.standalone.entity.ApiProject;
 import com.mobile.standalone.entity.ApiTestCase;
 import com.mobile.standalone.entity.ApiTestCollection;
+import com.mobile.standalone.mapper.ApiProjectMapper;
 import com.mobile.standalone.mapper.ApiTestCaseMapper;
 import com.mobile.standalone.mapper.ApiTestCollectionMapper;
+import com.mobile.standalone.service.ApiProjectService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -26,8 +29,10 @@ public class ApiTestCollectionService {
 
     private final ApiTestCollectionMapper mapper;
     private final ApiTestCaseMapper caseMapper;
+    private final ApiProjectMapper projectMapper;
     private final ApiEndpointService endpointService;
     private final RequirementEndpointService requirementEndpointService;
+    private final ApiProjectService projectService;
 
     public List<ApiTestCollection> list(String project, String scope, Boolean includeArchived, String appVersion) {
         return mapper.findAll(project, scope, null, includeArchived, appVersion, null);
@@ -140,6 +145,7 @@ public class ApiTestCollectionService {
         projectCodes.addAll(reqsByProject.keySet());
 
         Map<String, List<Map<String, Object>>> projectsByCategory = new LinkedHashMap<>();
+        Map<String, String> categoryOverrides = projectCategoryOverrides();
         for (String code : projectCodes) {
             List<Map<String, Object>> branchItems = mergeBranchItems(
                     branchesByProject.getOrDefault(code, List.of()),
@@ -166,7 +172,7 @@ public class ApiTestCollectionService {
             proj.put("label", code);
             proj.put("collectionCount", branchItems.size() + reqItems.size());
             proj.put("groups", groups);
-            projectsByCategory.computeIfAbsent(ApiProjectCatalog.categoryKeyOf(code), k -> new ArrayList<>())
+            projectsByCategory.computeIfAbsent(categoryOfProject(code, categoryOverrides), k -> new ArrayList<>())
                     .add(proj);
         }
 
@@ -431,6 +437,7 @@ public class ApiTestCollectionService {
 
     private Map<String, Object> buildLiveTree(boolean includeArchived) {
         Map<String, List<Map<String, Object>>> projectsByCategory = new LinkedHashMap<>();
+        Map<String, String> categoryOverrides = projectCategoryOverrides();
 
         Set<String> projectCodes = new LinkedHashSet<>();
         for (ApiTestCollection c : mapper.findAll(null, ApiTestCollection.SCOPE_LIVE, null, includeArchived,
@@ -482,7 +489,7 @@ public class ApiTestCollectionService {
                     groupCollectionsByProject(mapper.findAll(code, ApiTestCollection.SCOPE_LIVE, null,
                             includeArchived, null, null)).get(code)));
             proj.put("controllers", controllers);
-            projectsByCategory.computeIfAbsent(ApiProjectCatalog.categoryKeyOf(code), k -> new ArrayList<>())
+            projectsByCategory.computeIfAbsent(categoryOfProject(code, categoryOverrides), k -> new ArrayList<>())
                     .add(proj);
         }
 
@@ -494,34 +501,44 @@ public class ApiTestCollectionService {
                 "categories", categories);
     }
 
-    private static List<Map<String, Object>> buildCategoryNodes(
+    private List<Map<String, Object>> buildCategoryNodes(
             Map<String, List<Map<String, Object>>> projectsByCategory) {
         List<Map<String, Object>> categories = new ArrayList<>();
-        for (ApiProjectCatalog.Category cat : ApiProjectCatalog.categoriesInOrder()) {
-            if (ApiProjectCatalog.OTHER.key().equals(cat.key())) {
+        Set<String> handled = new LinkedHashSet<>();
+        for (Map<String, Object> def : projectService.listCategoryRegistry()) {
+            String key = String.valueOf(def.get("key"));
+            categories.add(categoryNode(key, String.valueOf(def.get("label")), projectsByCategory.get(key)));
+            handled.add(key);
+        }
+        for (String key : projectsByCategory.keySet()) {
+            if (handled.contains(key)) {
                 continue;
             }
-            List<Map<String, Object>> projects = projectsByCategory.get(cat.key());
-            if (projects == null || projects.isEmpty()) {
-                projects = List.of();
-            } else {
-                projects = new ArrayList<>(projects);
-                projects.sort((a, b) -> Integer.compare(
-                        num(b.get("collectionCount") != null ? b.get("collectionCount") : b.get("caseCount")),
-                        num(a.get("collectionCount") != null ? a.get("collectionCount") : a.get("caseCount"))));
-            }
-            int catTotal = projects.stream()
-                    .mapToInt(p -> num(p.get("collectionCount") != null ? p.get("collectionCount")
-                            : p.get("caseCount")))
-                    .sum();
-            Map<String, Object> catNode = new LinkedHashMap<>();
-            catNode.put("key", cat.key());
-            catNode.put("label", cat.label());
-            catNode.put("total", catTotal);
-            catNode.put("projects", projects);
-            categories.add(catNode);
+            categories.add(categoryNode(key, projectService.categoryLabel(key), projectsByCategory.get(key)));
         }
         return categories;
+    }
+
+    private static Map<String, Object> categoryNode(
+            String key, String label, List<Map<String, Object>> projects) {
+        if (projects == null || projects.isEmpty()) {
+            projects = List.of();
+        } else {
+            projects = new ArrayList<>(projects);
+            projects.sort((a, b) -> Integer.compare(
+                    num(b.get("collectionCount") != null ? b.get("collectionCount") : b.get("caseCount")),
+                    num(a.get("collectionCount") != null ? a.get("collectionCount") : a.get("caseCount"))));
+        }
+        int catTotal = projects.stream()
+                .mapToInt(p -> num(p.get("collectionCount") != null ? p.get("collectionCount")
+                        : p.get("caseCount")))
+                .sum();
+        Map<String, Object> catNode = new LinkedHashMap<>();
+        catNode.put("key", key);
+        catNode.put("label", label);
+        catNode.put("total", catTotal);
+        catNode.put("projects", projects);
+        return catNode;
     }
 
     private static Map<String, Object> treeGroup(String kind, String project, String label,
@@ -569,6 +586,20 @@ public class ApiTestCollectionService {
         String h = handler.trim();
         int dot = h.indexOf('.');
         return dot > 0 ? h.substring(0, dot) : h;
+    }
+
+    private Map<String, String> projectCategoryOverrides() {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (ApiProject p : projectMapper.findAll(null)) {
+            if (p.getCategory() != null && !p.getCategory().isBlank()) {
+                out.put(p.getCode(), p.getCategory().trim().toUpperCase(Locale.ROOT));
+            }
+        }
+        return out;
+    }
+
+    private static String categoryOfProject(String code, Map<String, String> overrides) {
+        return ApiProjectCatalog.resolveCategoryKey(code, overrides.get(code));
     }
 
     private static int num(Object o) {

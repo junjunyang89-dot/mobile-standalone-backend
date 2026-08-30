@@ -38,6 +38,42 @@ public class ApiProjectController {
         return ResponseEntity.ok(projectService.buildTree(enabledOnly));
     }
 
+    @GetMapping("/categories")
+    public ResponseEntity<List<Map<String, Object>>> categories() {
+        return ResponseEntity.ok(projectService.listCategoryRegistry());
+    }
+
+    @PostMapping("/categories")
+    public ResponseEntity<?> createCategory(@RequestBody Map<String, Object> body) {
+        try {
+            String label = body.get("label") != null ? String.valueOf(body.get("label")) : "";
+            Integer sortOrder = body.get("sortOrder") instanceof Number n ? n.intValue() : null;
+            return ResponseEntity.ok(projectService.createCategory(label, sortOrder));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PutMapping("/categories/{key}")
+    public ResponseEntity<?> updateCategory(@PathVariable String key, @RequestBody Map<String, Object> body) {
+        try {
+            String label = body.get("label") != null ? String.valueOf(body.get("label")) : "";
+            Integer sortOrder = body.get("sortOrder") instanceof Number n ? n.intValue() : null;
+            return ResponseEntity.ok(projectService.updateCategory(key, label, sortOrder));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/categories/{key}")
+    public ResponseEntity<?> deleteCategory(@PathVariable String key) {
+        try {
+            return ResponseEntity.ok(Map.of("ok", projectService.deleteCategory(key)));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
     @GetMapping("/{code}")
     public ResponseEntity<?> get(@PathVariable String code) {
         ApiProject p = projectService.get(code);

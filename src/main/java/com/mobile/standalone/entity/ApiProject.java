@@ -20,6 +20,8 @@ public class ApiProject {
     private String description;
     /** BACKEND / CLIENT；留空按 BACKEND */
     private String kind;
+    /** 所属分类：APP / PVP / WEB / OTHER；留空则按编码自动归类 */
+    private String category;
     /** 本地 git 仓库绝对路径；填了才能做接口变更分析 */
     private String repoPath;
     /** 对比基线分支，留空按 master */

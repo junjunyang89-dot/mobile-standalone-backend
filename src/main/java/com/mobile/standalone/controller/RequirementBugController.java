@@ -47,6 +47,16 @@ public class RequirementBugController {
 
     private static final Set<String> ALLOWED_EXT = Set.of(".png", ".jpg", ".jpeg", ".gif", ".webp");
 
+    @GetMapping("/manage")
+    public ResponseEntity<?> manage(
+            @RequestParam(required = false) String environment,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String priority,
+            @RequestParam(required = false) String assignee,
+            @RequestParam(required = false) String q) {
+        return ResponseEntity.ok(bugService.listForManage(environment, status, priority, assignee, q));
+    }
+
     @GetMapping
     public ResponseEntity<?> list(@RequestParam String requirementNo) {
         return ResponseEntity.ok(bugService.listByRequirement(requirementNo));
@@ -93,6 +103,12 @@ public class RequirementBugController {
                 "html", bugService.toWikiHtml(requirementNo),
                 "note", "粘到 wiki 后表格结构会保留。截图不会跟着过去（图在本机，wiki 访问不到），"
                         + "需要手动拖一次"));
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<?> get(@PathVariable String id) {
+        Map<String, Object> row = bugService.getById(id);
+        return row == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(row);
     }
 
     /** 截图。一个 bug 常常要好几张（问题现场 + 原型对照），所以支持多传 */

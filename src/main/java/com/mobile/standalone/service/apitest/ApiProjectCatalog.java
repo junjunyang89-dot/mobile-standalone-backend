@@ -83,8 +83,49 @@ public final class ApiProjectCatalog {
     }
 
     public static Category categoryOf(String projectCode) {
-        String key = categoryKeyOf(projectCode);
+        return categoryOf(projectCode, null);
+    }
+
+    public static Category categoryOf(String projectCode, String storedCategory) {
+        String key = resolveCategoryKey(projectCode, storedCategory);
         return ORDER.stream().filter(c -> c.key().equals(key)).findFirst().orElse(OTHER);
+    }
+
+    /** 手动分类优先；未配置时按编码规则推断 */
+    public static String resolveCategoryKey(String projectCode, String storedCategory) {
+        if (storedCategory != null && !storedCategory.isBlank()) {
+            String k = storedCategory.trim();
+            String upper = k.toUpperCase(Locale.ROOT);
+            for (Category c : ORDER) {
+                if (c.key().equals(upper)) {
+                    return c.key();
+                }
+            }
+            return k;
+        }
+        return categoryKeyOf(projectCode);
+    }
+
+    public static boolean isBuiltinCategory(String categoryKey) {
+        if (categoryKey == null || categoryKey.isBlank()) {
+            return false;
+        }
+        String upper = categoryKey.trim().toUpperCase(Locale.ROOT);
+        return ORDER.stream().anyMatch(c -> c.key().equals(upper));
+    }
+
+    /** 树节点展示名：内置分类用中文标签，自定义分类原样展示 */
+    public static String categoryDisplayLabel(String categoryKey) {
+        if (categoryKey == null || categoryKey.isBlank()) {
+            return OTHER.label();
+        }
+        String upper = categoryKey.trim().toUpperCase(Locale.ROOT);
+        for (Category c : ORDER) {
+            if (c.key().equals(upper)) {
+                return c.label();
+            }
+        }
+        return categoryKey.trim();
     }
 
     public static List<Category> categoriesInOrder() {
@@ -174,7 +215,8 @@ public final class ApiProjectCatalog {
         for (Map<String, Object> row : projectRows) {
             String code = String.valueOf(row.get("code"));
             byCode.put(code, row);
-            buckets.get(categoryKeyOf(code)).add(row);
+            String catKey = resolveCategoryKey(code, row.get("category") != null ? String.valueOf(row.get("category")) : null);
+            buckets.computeIfAbsent(catKey, k -> new ArrayList<>()).add(row);
         }
         // APP：先按 catalog 槽位，再补未在槽位里的
         List<Map<String, Object>> appSorted = new ArrayList<>();

@@ -8,6 +8,7 @@
         <result property="name" column="name"/>
         <result property="description" column="description"/>
         <result property="kind" column="kind"/>
+        <result property="category" column="category"/>
         <result property="repoPath" column="repo_path"/>
         <result property="baseBranch" column="base_branch"/>
         <result property="successCodePath" column="success_code_path"/>
@@ -49,9 +50,9 @@
 
     <insert id="insert">
         INSERT INTO api_projects
-        (code, name, description, kind, repo_path, base_branch, success_code_path, success_code_value, enabled, sort_order, created_at, updated_at)
+        (code, name, description, kind, category, repo_path, base_branch, success_code_path, success_code_value, enabled, sort_order, created_at, updated_at)
         VALUES
-        (#{code}, #{name}, #{description}, #{kind}, #{repoPath}, #{baseBranch}, #{successCodePath}, #{successCodeValue}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
+        (#{code}, #{name}, #{description}, #{kind}, #{category}, #{repoPath}, #{baseBranch}, #{successCodePath}, #{successCodeValue}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})
     </insert>
 
     <update id="update">
@@ -59,6 +60,7 @@
         SET name = #{name},
             description = #{description},
             kind = #{kind},
+            category = #{category},
             repo_path = #{repoPath},
             base_branch = #{baseBranch},
             success_code_path = #{successCodePath},

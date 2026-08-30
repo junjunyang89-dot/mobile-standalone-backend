@@ -44,6 +44,15 @@ class ApiProjectCatalogTest {
     }
 
     @Test
+    void resolveCategoryKey_manualOverride() {
+        assertEquals("APP", ApiProjectCatalog.resolveCategoryKey("ios-domestic-esports", "APP"));
+        assertEquals("OTHER", ApiProjectCatalog.resolveCategoryKey("app-seckill", "OTHER"));
+        assertEquals("PVP", ApiProjectCatalog.resolveCategoryKey("ios-domestic-esports", null));
+        assertEquals("中间件", ApiProjectCatalog.resolveCategoryKey("app-seckill", "中间件"));
+        assertEquals("中间件", ApiProjectCatalog.categoryDisplayLabel("中间件"));
+    }
+
+    @Test
     void projectDisplayLabel_appBackend() {
         assertEquals("APP-ACTIVITY", ApiProjectCatalog.projectDisplayLabel("app-activity"));
         assertEquals("APP-DATA-CENTER", ApiProjectCatalog.projectDisplayLabel("app-data-center"));
