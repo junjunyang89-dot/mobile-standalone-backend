@@ -43,11 +43,35 @@ public class ApiProjectController {
         return ResponseEntity.ok(projectService.listCategoryRegistry());
     }
 
+    /** 重命名分类（独立路径，避免与 POST /categories 新建或 /categories/{key} 路由混淆） */
+    @PostMapping("/category-rename")
+    public ResponseEntity<?> renameCategory(@RequestBody Map<String, Object> body) {
+        try {
+            String key = body.get("key") != null ? String.valueOf(body.get("key")).trim() : "";
+            if (key.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("message", "分类标识 key 必填"));
+            }
+            String label = body.get("label") != null ? String.valueOf(body.get("label")) : "";
+            Integer sortOrder = body.get("sortOrder") instanceof Number n ? n.intValue() : null;
+            return ResponseEntity.ok(projectService.updateCategory(key, label, sortOrder));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /**
+     * 新建或重命名分类：body 带 key 则更新已有分类，不带 key 则新建。
+     * 重命名走 POST 而非 PUT，避免部分环境对 PUT /categories/{key} 返回 405。
+     */
     @PostMapping("/categories")
-    public ResponseEntity<?> createCategory(@RequestBody Map<String, Object> body) {
+    public ResponseEntity<?> saveCategory(@RequestBody Map<String, Object> body) {
         try {
             String label = body.get("label") != null ? String.valueOf(body.get("label")) : "";
             Integer sortOrder = body.get("sortOrder") instanceof Number n ? n.intValue() : null;
+            String key = body.get("key") != null ? String.valueOf(body.get("key")).trim() : "";
+            if (!key.isBlank()) {
+                return ResponseEntity.ok(projectService.updateCategory(key, label, sortOrder));
+            }
             return ResponseEntity.ok(projectService.createCategory(label, sortOrder));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));

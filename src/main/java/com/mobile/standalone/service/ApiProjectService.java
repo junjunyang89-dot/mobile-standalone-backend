@@ -66,6 +66,7 @@ public class ApiProjectService {
             ensureColumn("category", "VARCHAR(64) NULL COMMENT '分类 key，留空按编码自动归类'");
             ensureCategoryTableAndSeed();
             syncCategoriesFromProjects();
+            dedupeEmptySimilarCategories();
             widenProjectCategoryColumn();
             seedIfEmpty();
             markLegacyClientProjects();
@@ -194,6 +195,8 @@ public class ApiProjectService {
         if (display.length() > 128) {
             throw new IllegalArgumentException("分类名称不超过 128 字符");
         }
+        assertCreateLabelNotSimilar(display, null);
+        assertNotDuplicateRenameAsCreate(display, key);
         Integer existing = jdbcTemplate.queryForObject(
                 "SELECT COUNT(1) FROM api_project_categories WHERE cat_key = ?", Integer.class, key);
         if (existing != null && existing > 0) {
@@ -260,6 +263,7 @@ public class ApiProjectService {
         if (updated == 0) {
             throw new IllegalArgumentException("分类不存在: " + k);
         }
+        assertCreateLabelNotSimilar(display, k);
         boolean builtin = ApiProjectCatalog.isBuiltinCategory(k);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("key", k);
@@ -268,6 +272,7 @@ public class ApiProjectService {
         if (sortOrder != null) {
             out.put("sortOrder", sortOrder);
         }
+        purgeEmptySimilarCategories(k, display);
         return out;
     }
 
@@ -329,6 +334,126 @@ public class ApiProjectService {
         for (String cat : cats) {
             ensureCategoryRegistered(cat);
         }
+    }
+
+    /** 去掉因旧接口误把重命名当新建而产生的空重复分类（如 APP 与 APP后端） */
+    private void dedupeEmptySimilarCategories() {
+        List<Map<String, Object>> registry = new ArrayList<>(listCategoryRegistry());
+        Map<String, String> fpToPreferredKey = new LinkedHashMap<>();
+        for (Map<String, Object> row : registry) {
+            String key = String.valueOf(row.get("key"));
+            String fp = labelFingerprint(String.valueOf(row.get("label")));
+            if (fp.isEmpty()) {
+                continue;
+            }
+            long projectCount = countProjectsInCategoryKey(key);
+            if (projectCount > 0 || ApiProjectCatalog.isBuiltinCategory(key)) {
+                fpToPreferredKey.put(fp, key);
+            }
+        }
+        for (ApiProjectCatalog.Category cat : ApiProjectCatalog.categoriesInOrder()) {
+            fpToPreferredKey.putIfAbsent(labelFingerprint(cat.label()), cat.key());
+        }
+        for (Map<String, Object> row : registry) {
+            String key = String.valueOf(row.get("key"));
+            if (ApiProjectCatalog.isBuiltinCategory(key)) {
+                continue;
+            }
+            if (countProjectsInCategoryKey(key) > 0) {
+                continue;
+            }
+            String fp = labelFingerprint(String.valueOf(row.get("label")));
+            String preferred = fpToPreferredKey.get(fp);
+            if (preferred != null && !preferred.equals(key)) {
+                jdbcTemplate.update(
+                        "DELETE FROM api_project_categories WHERE cat_key = ? AND builtin = 0", key);
+                log.info("[api-projects] 移除误建空分类 {}（与 {} 重复）", key, preferred);
+            }
+        }
+    }
+
+    private long countProjectsInCategoryKey(String categoryKey) {
+        Integer explicit = jdbcTemplate.queryForObject(
+                "SELECT COUNT(1) FROM api_projects WHERE category = ?", Integer.class, categoryKey);
+        if (explicit != null && explicit > 0) {
+            return explicit;
+        }
+        long inferred = 0;
+        for (ApiProject p : projectMapper.findAll(null)) {
+            String resolved = ApiProjectCatalog.resolveCategoryKey(p.getCode(), p.getCategory());
+            if (categoryKey.equals(resolved)) {
+                inferred++;
+            }
+        }
+        return inferred;
+    }
+
+    private void assertNotDuplicateRenameAsCreate(String display, String newKey) {
+        String fp = labelFingerprint(display);
+        if (fp.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> row : listCategoryRegistry()) {
+            String existingKey = String.valueOf(row.get("key"));
+            if (existingKey.equals(newKey)) {
+                continue;
+            }
+            if (!labelFingerprint(String.valueOf(row.get("label"))).equals(fp)) {
+                continue;
+            }
+            if (countProjectsInCategoryKey(existingKey) > 0 || ApiProjectCatalog.isBuiltinCategory(existingKey)) {
+                throw new IllegalArgumentException(
+                        "名称与已有分类「" + row.get("label") + "」相同，请点 ✎ 重命名，不要新建");
+            }
+        }
+    }
+
+    private void purgeEmptySimilarCategories(String keepKey, String display) {
+        String fp = labelFingerprint(display);
+        if (fp.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> row : listCategoryRegistry()) {
+            String key = String.valueOf(row.get("key"));
+            if (keepKey.equals(key) || ApiProjectCatalog.isBuiltinCategory(key)) {
+                continue;
+            }
+            if (countProjectsInCategoryKey(key) > 0) {
+                continue;
+            }
+            if (labelFingerprint(String.valueOf(row.get("label"))).equals(fp)) {
+                jdbcTemplate.update(
+                        "DELETE FROM api_project_categories WHERE cat_key = ? AND builtin = 0", key);
+                log.info("[api-projects] 重命名后清理误建空分类 {}", key);
+            }
+        }
+    }
+
+    private void assertCreateLabelNotSimilar(String display, String excludeKey) {
+        String fp = labelFingerprint(display);
+        if (fp.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> row : listCategoryRegistry()) {
+            String key = String.valueOf(row.get("key"));
+            if (excludeKey != null && excludeKey.equals(key)) {
+                continue;
+            }
+            if (labelFingerprint(String.valueOf(row.get("label"))).equals(fp)) {
+                if (!ApiProjectCatalog.isBuiltinCategory(key) && countProjectsInCategoryKey(key) == 0) {
+                    continue;
+                }
+                throw new IllegalArgumentException(
+                        "已有分类「" + row.get("label") + "」，请点左侧 ✎ 重命名，不要新建");
+            }
+        }
+    }
+
+    private static String labelFingerprint(String label) {
+        if (label == null || label.isBlank()) {
+            return "";
+        }
+        return label.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
     }
 
     private void widenProjectCategoryColumn() {

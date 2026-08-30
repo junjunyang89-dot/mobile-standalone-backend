@@ -47,6 +47,22 @@ public class RequirementBugController {
 
     private static final Set<String> ALLOWED_EXT = Set.of(".png", ".jpg", ".jpeg", ".gif", ".webp");
 
+    /** Bug 管理页列表；与按需求单查询共用 GET /requirement-bugs，避免 /manage 被 PUT /{id} 误匹配 */
+    @GetMapping
+    public ResponseEntity<?> list(
+            @RequestParam(required = false) String requirementNo,
+            @RequestParam(required = false) String environment,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String priority,
+            @RequestParam(required = false) String assignee,
+            @RequestParam(required = false) String q) {
+        if (requirementNo != null && !requirementNo.isBlank()) {
+            return ResponseEntity.ok(bugService.listByRequirement(requirementNo));
+        }
+        return ResponseEntity.ok(bugService.listForManage(environment, status, priority, assignee, q));
+    }
+
+    /** 兼容旧前端路径 */
     @GetMapping("/manage")
     public ResponseEntity<?> manage(
             @RequestParam(required = false) String environment,
@@ -57,9 +73,16 @@ public class RequirementBugController {
         return ResponseEntity.ok(bugService.listForManage(environment, status, priority, assignee, q));
     }
 
-    @GetMapping
-    public ResponseEntity<?> list(@RequestParam String requirementNo) {
-        return ResponseEntity.ok(bugService.listByRequirement(requirementNo));
+    /** 部分旧后端对 GET /manage 会 405；管理页可走 POST */
+    @PostMapping("/manage")
+    public ResponseEntity<?> managePost(@RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> p = body != null ? body : Map.of();
+        String environment = p.get("environment") != null ? String.valueOf(p.get("environment")) : null;
+        String status = p.get("status") != null ? String.valueOf(p.get("status")) : null;
+        String priority = p.get("priority") != null ? String.valueOf(p.get("priority")) : null;
+        String assignee = p.get("assignee") != null ? String.valueOf(p.get("assignee")) : null;
+        String q = p.get("q") != null ? String.valueOf(p.get("q")) : null;
+        return ResponseEntity.ok(bugService.listForManage(environment, status, priority, assignee, q));
     }
 
     @GetMapping("/summary")
