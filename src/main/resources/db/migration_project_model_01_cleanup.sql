@@ -2,14 +2,14 @@
 -- 项目归属模型 · 阶段 01：数据清洗 + 建立约束
 -- =====================================================================
 -- 本脚本已按【真实盘点结果】重写，不再是通用模板。
--- 盘点时间：2026-08-30，库：118.25.144.133:13306/mobile_standalone（MySQL 8.4.11）
+-- 盘点时间：2026-08-30，库：mobile_standalone（MySQL 8.4.11）；连接信息见本地 application.yml
 -- 盘点脚本：inventory_project_model.sql
 --
 -- 起点：34 个项目 / 0 个外键 / 23 个 category 为空 / 11 个 category 被污染
 -- 终点：27 个项目 / 11 个外键 / category 全部为合法 key
 --
 -- 【前置】备份：
---   mysqldump -h 118.25.144.133 -P 13306 -u root -p mobile_standalone > backup_$(date +%F).sql
+--   mysqldump -h <DB_HOST> -P <DB_PORT> -u <USER> -p mobile_standalone > backup_$(date +%F).sql
 --
 -- 执行顺序不可调换：先解引用 → 再删项目 → 再改名 → 最后加外键。
 -- 外键一旦建上，RESTRICT 会挡住删除、CASCADE 会改变改名行为。
