@@ -32,7 +32,15 @@ import java.util.UUID;
 @DependsOn("apiProjectService")
 public class ApiTestCaseService {
 
-    public static final String PROJECT_DATA_CENTER = "data-center";
+    /**
+     * 数据中心项目码。
+     * <p>
+     * 2026-08-30 由 {@code data-center} 统一为 {@code app-data-center}，与其余
+     * {@code app-{gitlab}} 命名一致（迁移见 {@code db/migration_project_model_01_cleanup.sql}）。
+     * 库里 500+ 行引用已随之更新，此处必须同步——否则启动时 {@code ensureExists}
+     * 会按旧码再造出一个空项目，和迁移后的项目并存。
+     */
+    public static final String PROJECT_DATA_CENTER = "app-data-center";
     /** 接口对比调试用的 CRUD 样例项目，和真实业务项目分开放 */
     public static final String PROJECT_DEBUG_TESTS = "debug-tests";
     /** 多层依赖 + 嵌套 JSON 抽取专用调试项目 */
@@ -156,7 +164,7 @@ public class ApiTestCaseService {
                     "VARCHAR(128) NULL COMMENT '务必用只读账号'");
             ensureColumn("api_test_envs", "db_password", "VARCHAR(255) NULL");
             seedEnvsIfEmpty();
-            projectService.ensureExists(PROJECT_DATA_CENTER, "data-center（数据中心）");
+            projectService.ensureExists(PROJECT_DATA_CENTER, "APP-DATA-CENTER（数据中心）");
             importProjectSeedIfAbsent(PROJECT_DATA_CENTER, "api-test/seed-data-center.json");
             // 接口对比调试用的那套 CRUD 用例。
             // 原来是一个要手跑的 seed_debug_api_test_cases.sql，里面先 DELETE 再 INSERT——
@@ -547,7 +555,11 @@ public class ApiTestCaseService {
 
     private void defaults(ApiTestCase body) {
         if (body.getProject() == null || body.getProject().isBlank()) {
-            body.setProject("default");
+            // 留 null，不要塞 "default"。
+            // validateCase 只在 project 非空时校验存在性，所以这条路是绕开校验的：
+            // 塞进去的 "default" 在 api_projects 里并不存在，等于凭空造孤儿值，
+            // 加上外键之后会直接写不进去。列本身可空，null 才是「未归属」的诚实表达。
+            body.setProject(null);
         } else {
             body.setProject(body.getProject().trim());
         }

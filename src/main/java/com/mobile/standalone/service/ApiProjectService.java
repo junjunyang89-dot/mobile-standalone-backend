@@ -466,16 +466,43 @@ public class ApiProjectService {
         }
     }
 
+    /**
+     * 确保分类已注册。
+     * <p>
+     * <b>只接受内置 key</b>。原先见到任何未注册的值就自动建一条分类，结果是：
+     * 有人把分类的 <i>label</i>（「APP后端」）当 key 写进了 {@code api_projects.category}，
+     * 这里就照单全收，把它注册成了一条正式分类——树上于是并排出现「APP」和「APP后端」两个
+     * 长得一样的节点。库里实测被这样污染出 2 条垃圾分类、11 个项目。
+     * <p>
+     * 自定义分类应当走 {@code POST /api-projects/categories} 显式创建，而不是靠写错一个值
+     * 顺带创建出来。未知值记警告并忽略，让问题停在日志里而不是长进分类表。
+     */
     void ensureCategoryRegistered(String categoryKey) {
         if (categoryKey == null || categoryKey.isBlank()) {
             return;
         }
         String key = normalizeCategoryKey(categoryKey);
+        if (!ApiProjectCatalog.isBuiltinCategory(key) && !categoryExists(key)) {
+            log.warn("[api-projects] 忽略未注册的分类值「{}」——请先在分类管理里创建，"
+                    + "或确认是不是把分类展示名误当成了 key", key);
+            return;
+        }
         String label = ApiProjectCatalog.categoryDisplayLabel(key);
         boolean builtin = ApiProjectCatalog.isBuiltinCategory(key);
         jdbcTemplate.update(
                 "INSERT IGNORE INTO api_project_categories (cat_key, label, sort_order, builtin) VALUES (?, ?, ?, ?)",
                 key, label, builtin ? categorySeedOrder(key) : nextCategorySortOrder(), builtin ? 1 : 0);
+    }
+
+    /** 分类是否已注册。功能模块挂在分类下，建模块前要先确认分类真实存在 */
+    public boolean categoryExists(String key) {
+        if (key == null || key.isBlank()) {
+            return false;
+        }
+        Integer n = jdbcTemplate.queryForObject(
+                "SELECT COUNT(1) FROM api_project_categories WHERE cat_key = ?",
+                Integer.class, normalizeCategoryKey(key));
+        return n != null && n > 0;
     }
 
     private int nextCategorySortOrder() {
@@ -628,6 +655,11 @@ public class ApiProjectService {
 
         if (ApiProjectCatalog.APP.key().equals(catKey)) {
             for (String slot : ApiProjectCatalog.appProjectSlots()) {
+                // 无条件渲染是刻意的：把 GitLab 上有、平台还没建的项目也摆出来，
+                // 「未覆盖」才看得见。见 appProjectSlots() 的 javadoc 与
+                // ApiEndpointInventoryTreeTest。
+                // 注意这跟下面 PVP/WEB 的「库里存在才渲染」不一致——那两处的 javadoc
+                // 写的是「树里固定展示」，与代码相反。要统一的话是个产品决定，别顺手改。
                 children.add(endpointProjectNode(slot, stats, projectsByCode));
                 assigned.add(slot);
                 assigned.add(inventoryProjectKey(slot));

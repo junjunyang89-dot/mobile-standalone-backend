@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.RequirementMapper">
+
+    <resultMap id="RequirementMap" type="com.mobile.standalone.entity.Requirement">
+        <id property="requirementNo" column="requirement_no"/>
+        <result property="title" column="title"/>
+        <result property="projectCode" column="project_code"/>
+        <result property="versionId" column="version_id"/>
+        <result property="status" column="status"/>
+        <result property="owner" column="owner"/>
+        <result property="note" column="note"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="projectName" column="project_name"/>
+        <result property="versionLabel" column="version_label"/>
+    </resultMap>
+
+    <resultMap id="ModuleMap" type="com.mobile.standalone.entity.ProjectModule">
+        <id property="id" column="id"/>
+        <result property="category" column="category"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="name" column="name"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="enabled" column="enabled"/>
+    </resultMap>
+
+    <!-- 带上项目名与版本对外叫法（9.3 国内客户端），列表页不用再逐行回查 -->
+    <select id="findByFilters" resultMap="RequirementMap">
+        SELECT r.*, p.name AS project_name, v.release_label AS version_label
+        FROM requirements r
+        LEFT JOIN api_projects p             ON p.code = r.project_code
+        LEFT JOIN release_version_archives v ON v.id   = r.version_id
+        <where>
+            <if test="projectCode != null and projectCode != ''">AND r.project_code = #{projectCode}</if>
+            <if test="versionId != null and versionId != ''">AND r.version_id = #{versionId}</if>
+            <if test="status != null and status != ''">AND r.status = #{status}</if>
+            <if test="keyword != null and keyword != ''">
+                AND (r.requirement_no LIKE CONCAT('%', #{keyword}, '%')
+                  OR r.title LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        ORDER BY r.updated_at DESC, r.requirement_no DESC
+    </select>
+
+    <select id="findByNo" resultMap="RequirementMap">
+        SELECT r.*, p.name AS project_name, v.release_label AS version_label
+        FROM requirements r
+        LEFT JOIN api_projects p             ON p.code = r.project_code
+        LEFT JOIN release_version_archives v ON v.id   = r.version_id
+        WHERE r.requirement_no = #{requirementNo}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO requirements (requirement_no, title, project_code, version_id, status, owner, note)
+        VALUES (#{requirementNo}, #{title}, #{projectCode}, #{versionId}, #{status}, #{owner}, #{note})
+    </insert>
+
+    <update id="update">
+        UPDATE requirements
+        SET title        = #{title},
+            project_code = #{projectCode},
+            version_id   = #{versionId},
+            status       = #{status},
+            owner        = #{owner},
+            note         = #{note}
+        WHERE requirement_no = #{requirementNo}
+    </update>
+
+    <delete id="deleteByNo">
+        DELETE FROM requirements WHERE requirement_no = #{requirementNo}
+    </delete>
+
+    <select id="findModules" resultMap="ModuleMap">
+        SELECT m.* FROM requirement_modules rm
+        JOIN project_modules m ON m.id = rm.module_id
+        WHERE rm.requirement_no = #{requirementNo}
+        ORDER BY m.category ASC, m.sort_order ASC, m.name ASC
+    </select>
+
+    <delete id="clearModules">
+        DELETE FROM requirement_modules WHERE requirement_no = #{requirementNo}
+    </delete>
+
+    <insert id="addModules">
+        INSERT IGNORE INTO requirement_modules (requirement_no, module_id) VALUES
+        <foreach collection="moduleIds" item="mid" separator=",">
+            (#{requirementNo}, #{mid})
+        </foreach>
+    </insert>
+
+</mapper>

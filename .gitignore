@@ -27,6 +27,11 @@ allure-results/
 patches/
 *.tmp
 *.bak
+# ========== 数据库导出（含生产数据，勿提交）==========
+backup*.sql
+*_backup.sql
+dump*.sql
+
 # ========== 敏感配置（含密码 / API Key，勿提交）==========
 src/main/resources/application.yml
 src/main/resources/application-dev.yml

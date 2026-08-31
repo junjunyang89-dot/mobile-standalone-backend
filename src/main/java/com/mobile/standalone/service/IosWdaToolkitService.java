@@ -4,6 +4,7 @@ import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -37,8 +38,11 @@ public class IosWdaToolkitService {
             Pattern.CASE_INSENSITIVE);
 
     private final DeviceManager deviceManager;
-    private final AppiumDriverAdapter appiumDriverAdapter;
     private final IosDeviceReadiness iosDeviceReadiness;
+
+    /** Appium 关闭时不注册该 Bean，工具箱仍应能做签名/证书排查 */
+    @Autowired(required = false)
+    private AppiumDriverAdapter appiumDriverAdapter;
 
     @Value("${ios.wda.bundle-id:com.travYang.wda.Runner}")
     private String wdaBundleId;
@@ -103,7 +107,7 @@ public class IosWdaToolkitService {
         r.getConfig().put("signingId", wdaSigningId);
         r.getConfig().put("wdaProject", defaultWdaProject().toString());
 
-        int port = appiumDriverAdapter.resolveWdaLocalPort(udid);
+        int port = wdaLocalPort(udid);
         r.getRuntime().put("localPort", port);
         r.getRuntime().putAll(deviceManager.getIosWdaRuntimeState(udid));
         r.getRuntime().put("statusOk", deviceManager.isIosWdaStatusOk(port));
@@ -154,7 +158,7 @@ public class IosWdaToolkitService {
                 }
                 case "ensure_running" -> {
                     deviceManager.clearIosWdaCooldown(udid);
-                    int port = appiumDriverAdapter.resolveWdaLocalPort(udid);
+                    int port = wdaLocalPort(udid);
                     boolean ok = deviceManager.ensureIosWdaRunning(udid, port);
                     ar.setOk(ok);
                     ar.setMessage(ok
@@ -163,7 +167,7 @@ public class IosWdaToolkitService {
                 }
                 case "rebuild_install" -> {
                     deviceManager.clearIosWdaCooldown(udid);
-                    int port = appiumDriverAdapter.resolveWdaLocalPort(udid);
+                    int port = wdaLocalPort(udid);
                     String msg = deviceManager.rebuildAndInstallIosWda(udid, port);
                     boolean ok = msg == null;
                     ar.setOk(ok);
@@ -431,6 +435,14 @@ public class IosWdaToolkitService {
             return "点「仅拉起 WDA」；仍失败再「重新编译并安装」";
         }
         return "日常跑任务即可；证书快过期时再回来用本工具箱重签";
+    }
+
+    /** 与 {@code AppiumDriverAdapter} 默认起点一致；未启用 Appium 时用 8101 */
+    private int wdaLocalPort(String udid) {
+        if (appiumDriverAdapter != null) {
+            return appiumDriverAdapter.resolveWdaLocalPort(udid);
+        }
+        return 8101;
     }
 
     private Path defaultWdaProject() {

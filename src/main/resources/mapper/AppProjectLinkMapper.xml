@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.AppProjectLinkMapper">
+
+    <resultMap id="LinkMap" type="com.mobile.standalone.entity.AppProjectLink">
+        <result property="appId" column="app_id"/>
+        <result property="projectCode" column="project_code"/>
+        <result property="platform" column="platform"/>
+        <result property="relation" column="relation"/>
+        <result property="note" column="note"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="appName" column="app_name"/>
+        <result property="projectName" column="project_name"/>
+    </resultMap>
+
+    <!-- 带上 App 与项目的展示名，列表页不用再逐行回查 -->
+    <select id="findByFilters" resultMap="LinkMap">
+        SELECT l.*, a.name_zh AS app_name, p.name AS project_name
+        FROM app_project_links l
+        LEFT JOIN ui_apps a      ON a.id   = l.app_id
+        LEFT JOIN api_projects p ON p.code = l.project_code
+        <where>
+            <if test="appId != null and appId != ''">AND l.app_id = #{appId}</if>
+            <if test="projectCode != null and projectCode != ''">AND l.project_code = #{projectCode}</if>
+        </where>
+        ORDER BY l.app_id ASC, l.platform ASC, l.project_code ASC
+    </select>
+
+    <select id="findOne" resultMap="LinkMap">
+        SELECT l.*, a.name_zh AS app_name, p.name AS project_name
+        FROM app_project_links l
+        LEFT JOIN ui_apps a      ON a.id   = l.app_id
+        LEFT JOIN api_projects p ON p.code = l.project_code
+        WHERE l.app_id = #{appId} AND l.project_code = #{projectCode}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO app_project_links (app_id, project_code, platform, relation, note)
+        VALUES (#{appId}, #{projectCode}, #{platform}, #{relation}, #{note})
+    </insert>
+
+    <update id="update">
+        UPDATE app_project_links
+        SET platform = #{platform},
+            relation = #{relation},
+            note     = #{note}
+        WHERE app_id = #{appId} AND project_code = #{projectCode}
+    </update>
+
+    <delete id="delete">
+        DELETE FROM app_project_links WHERE app_id = #{appId} AND project_code = #{projectCode}
+    </delete>
+
+    <!--
+      元素按 platform 精确归属：关联带端时只数该端的元素，不带端时全数。
+      不这么做的话，一个覆盖双端的 App 会把全部元素同时算进两个项目。
+      流程与页面表上没有端的维度，只能给 App 级的数——同一 App 的两个端会看到
+      相同的流程数，这是数据粒度所限，不是重复计算，字段名已注明「不分端」。
+    -->
+    <select id="countAssetsByProject" resultType="java.util.LinkedHashMap">
+        SELECT
+            l.project_code AS projectCode,
+            l.app_id       AS appId,
+            l.platform     AS platform,
+            (SELECT COUNT(*) FROM ui_elements e
+              WHERE e.app_id = l.app_id
+                AND (l.platform IS NULL OR UPPER(IFNULL(e.platform, '')) = l.platform)) AS elementCount,
+            (SELECT COUNT(*) FROM ui_flows f WHERE f.app_id = l.app_id) AS flowCount,
+            (SELECT COUNT(*) FROM ui_pages g WHERE g.app_id = l.app_id) AS pageCount
+        FROM app_project_links l
+        <where>
+            <if test="projectCode != null and projectCode != ''">AND l.project_code = #{projectCode}</if>
+        </where>
+        ORDER BY l.project_code ASC
+    </select>
+
+    <select id="findUnlinkedApps" resultType="java.util.LinkedHashMap">
+        SELECT a.id AS appId, a.name_zh AS appName
+        FROM ui_apps a
+        LEFT JOIN app_project_links l ON l.app_id = a.id
+        WHERE l.app_id IS NULL
+        ORDER BY a.sort_order ASC, a.id ASC
+    </select>
+
+</mapper>

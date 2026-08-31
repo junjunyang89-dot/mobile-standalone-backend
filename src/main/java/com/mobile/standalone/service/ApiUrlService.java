@@ -44,7 +44,7 @@ public class ApiUrlService {
                         INDEX idx_project_env (project, environment)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
-            projectService.ensureExists(ApiTestCaseService.PROJECT_DATA_CENTER, "data-center（数据中心）");
+            projectService.ensureExists(ApiTestCaseService.PROJECT_DATA_CENTER, "APP-DATA-CENTER（数据中心）");
             seedDataCenterUrlsIfEmpty();
             log.info("[api-url] 表已就绪");
         } catch (Exception e) {
@@ -55,9 +55,13 @@ public class ApiUrlService {
     private void seedDataCenterUrlsIfEmpty() {
         if (urlMapper.countByProject(ApiTestCaseService.PROJECT_DATA_CENTER) > 0) return;
         LocalDateTime now = LocalDateTime.now();
-        upsertSeed("url-dc-test", "data-center", "data-center · 测试网关", TestEnvironment.TEST,
+        // project 必须走常量：这里写死 "data-center" 的话，项目码统一成 app-data-center 之后
+        // 会直接违反 api_url_entries 的外键（fk_aue_project）
+        upsertSeed("url-dc-test", ApiTestCaseService.PROJECT_DATA_CENTER,
+                "data-center · 测试网关", TestEnvironment.TEST,
                 "https://gateway-qa.arca42.com", "QA 网关前缀；用例 path 拼在后面", 10, now);
-        upsertSeed("url-dc-prod", "data-center", "data-center · 线上网关", TestEnvironment.PROD,
+        upsertSeed("url-dc-prod", ApiTestCaseService.PROJECT_DATA_CENTER,
+                "data-center · 线上网关", TestEnvironment.PROD,
                 "https://gateway.arca42.com", "生产网关前缀", 20, now);
         log.info("[api-url] 已种子 data-center 测试/线上网关");
     }

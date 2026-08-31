@@ -1,0 +1,37 @@
+server:
+  port: 3000
+  servlet:
+    context-path: /api
+
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:mobile_standalone}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&connectionCollation=utf8mb4_unicode_ci
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.mobile.standalone.entity
+  configuration:
+    map-underscore-to-camel-case: true
+
+# 单机调试默认 ALL（控制面 + 执行都在本进程）。
+# 只要控制面：mvn spring-boot:run -Dspring-boot.run.profiles=control
+# 只要执行节点：mvn spring-boot:run -Dspring-boot.run.profiles=worker
+app:
+  node:
+    role: ALL
+
+appium:
+  enabled: true
+  auto-start: true
+  server-url: http://127.0.0.1:4723
+  new-command-timeout: 300
+  implicit-wait: 10

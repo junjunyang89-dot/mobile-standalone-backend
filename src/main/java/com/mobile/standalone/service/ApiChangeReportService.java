@@ -63,7 +63,11 @@ public class ApiChangeReportService {
         }
         try {
             ApiChangeReport row = new ApiChangeReport();
-            row.setProject(blankToNull(projectCode != null ? projectCode : report.getProject()));
+            // 只认显式传进来的 project code，不拿 report.getProject() 兜底。
+            // Report.project 是【展示名】不是 code——git 路径传的是 ApiProject.getName()，
+            // 目录对比路径传的是「本地目录对比」这个字面量。拿它兜底会把展示名写进
+            // project 列，之后既关联不上任何项目，还会挡住外键。
+            row.setProject(blankToNull(projectCode));
             row.setBaseRef(blankToNull(report.getBaseRef()));
             row.setHeadRef(blankToNull(report.getHeadRef()));
             row.setSummary(buildSummary(report));

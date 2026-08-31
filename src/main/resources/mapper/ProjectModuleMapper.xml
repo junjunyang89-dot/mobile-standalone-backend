@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mobile.standalone.mapper.ProjectModuleMapper">
+
+    <resultMap id="ModuleMap" type="com.mobile.standalone.entity.ProjectModule">
+        <id property="id" column="id"/>
+        <result property="category" column="category"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="sortOrder" column="sort_order"/>
+        <result property="enabled" column="enabled"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="requirementCount" column="requirement_count"/>
+    </resultMap>
+
+    <!-- 带上「有多少需求覆盖了它」：树上直接看得见哪些模块没人测 -->
+    <select id="findByCategory" resultMap="ModuleMap">
+        SELECT m.*,
+               (SELECT COUNT(*) FROM requirement_modules rm WHERE rm.module_id = m.id) AS requirement_count
+        FROM project_modules m
+        <where>
+            <if test="category != null and category != ''">AND m.category = #{category}</if>
+            <if test="enabledOnly != null and enabledOnly">AND m.enabled = 1</if>
+        </where>
+        ORDER BY m.category ASC, m.sort_order ASC, m.name ASC
+    </select>
+
+    <select id="findById" resultMap="ModuleMap">
+        SELECT m.*,
+               (SELECT COUNT(*) FROM requirement_modules rm WHERE rm.module_id = m.id) AS requirement_count
+        FROM project_modules m WHERE m.id = #{id}
+    </select>
+
+    <!--
+      parentId 为 null 时必须写成 IS NULL；用 = #{parentId} 的话，
+      SQL 里 NULL = NULL 恒为 unknown，顶层模块永远查不出同名兄弟，
+      重名就漏过去了。顶层恰恰是最容易重名的一层。
+    -->
+    <select id="findSibling" resultMap="ModuleMap">
+        SELECT m.* FROM project_modules m
+        WHERE m.category = #{category}
+          AND m.name = #{name}
+          <choose>
+              <when test="parentId != null and parentId != ''">AND m.parent_id = #{parentId}</when>
+              <otherwise>AND m.parent_id IS NULL</otherwise>
+          </choose>
+          <if test="excludeId != null and excludeId != ''">AND m.id &lt;&gt; #{excludeId}</if>
+        LIMIT 1
+    </select>
+
+    <select id="countChildren" resultType="int">
+        SELECT COUNT(*) FROM project_modules WHERE parent_id = #{id}
+    </select>
+
+    <insert id="insert">
+        INSERT INTO project_modules (id, category, parent_id, name, description, sort_order, enabled)
+        VALUES (#{id}, #{category}, #{parentId}, #{name}, #{description}, #{sortOrder}, #{enabled})
+    </insert>
+
+    <update id="update">
+        UPDATE project_modules
+        SET name        = #{name},
+            description = #{description},
+            parent_id   = #{parentId},
+            sort_order  = #{sortOrder},
+            enabled     = #{enabled}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM project_modules WHERE id = #{id}
+    </delete>
+
+</mapper>
