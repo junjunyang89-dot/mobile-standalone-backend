@@ -171,6 +171,15 @@ public class PacketCaptureController {
         String project = body == null ? null : str(body.get("project"));
 
         // 同一个接口一次操作里会被调好几次（列表页翻页、重试），去重后才是「涉及了哪些接口」
+        // 同一个接口一次操作会被调好几次（轮询、翻页、重试）。
+        // 去重后才是「涉及了哪些接口」，但<b>次数要留着</b>——
+        // 「12 次调用 → 4 个接口」和「只抓到 4 个请求」是完全不同的两件事，
+        // 不说清楚的话人会以为抓漏了
+        Map<String, Integer> callCounts = new LinkedHashMap<>();
+        for (JsonNode r : rows) {
+            String k = r.path("method").asText("GET") + " " + r.path("path").asText("");
+            callCounts.merge(k, 1, Integer::sum);
+        }
         Set<String> seen = new LinkedHashSet<>();
         List<RequirementEndpointService.Link> links = new ArrayList<>();
         List<Map<String, Object>> distinct = new ArrayList<>();
@@ -203,6 +212,7 @@ public class PacketCaptureController {
             d.put("respTruncated", r.path("respTruncated").asBoolean());
             d.put("bodyNote", r.path("bodyNote").asText(""));
             d.put("hasDetail", r.path("hasDetail").asBoolean(true));
+            d.put("calls", callCounts.getOrDefault(method + " " + path, 1));
             distinct.add(d);
             links.add(new RequirementEndpointService.Link(
                     null, method, path, r.path("host").asText(""), null, null,

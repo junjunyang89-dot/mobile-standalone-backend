@@ -135,6 +135,31 @@ public class RequirementService {
         return mapper.deleteByNo(requirementNo) > 0;
     }
 
+    /**
+     * 只改展示标题，供测试用例左侧树重命名。
+     * 单号来自 JIRA 不能改，但「选择玩家 · APP-8999」这类可读名可以手工维护。
+     */
+    @Transactional
+    public Requirement upsertTitle(String requirementNo, String title) {
+        String no = trim(requirementNo).toUpperCase(Locale.ROOT);
+        if (no.isEmpty()) {
+            throw new IllegalArgumentException("需求单号不能为空");
+        }
+        String t = trim(title);
+        Requirement existing = mapper.findByNo(no);
+        if (existing == null) {
+            Requirement created = new Requirement();
+            created.setRequirementNo(no);
+            created.setTitle(t.isEmpty() ? null : t);
+            created.setStatus(Requirement.STATUS_PLANNING);
+            mapper.insert(created);
+        } else {
+            existing.setTitle(t.isEmpty() ? null : t);
+            mapper.update(existing);
+        }
+        return get(no);
+    }
+
     private boolean versionExists(String versionId) {
         Integer n = jdbcTemplate.queryForObject(
                 "SELECT COUNT(1) FROM release_version_archives WHERE id = ?", Integer.class, versionId);

@@ -1,0 +1,27 @@
+-- 问题持续跟踪表：记录他人反馈的线上/测试问题及跟进状态
+CREATE TABLE IF NOT EXISTS issue_tracking (
+    id VARCHAR(64) PRIMARY KEY,
+    issue_no INT DEFAULT NULL COMMENT '展示编号',
+    title VARCHAR(512) NOT NULL COMMENT '问题标题',
+    environment VARCHAR(16) NOT NULL DEFAULT 'TEST' COMMENT 'TEST/PROD',
+    source VARCHAR(128) DEFAULT NULL COMMENT '反馈来源',
+    module VARCHAR(255) DEFAULT NULL COMMENT '所属模块',
+    description TEXT DEFAULT NULL COMMENT '问题描述',
+    reproduction_steps TEXT DEFAULT NULL COMMENT '复现步骤',
+    test_status TEXT DEFAULT NULL COMMENT '测试情况',
+    verified TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已验证',
+    deployed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已上线',
+    developers VARCHAR(255) DEFAULT NULL COMMENT '涉及的开发',
+    origin_note TEXT DEFAULT NULL COMMENT '问题怎么产生的',
+    dev_fixed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '开发是否修复',
+    tracking_tester VARCHAR(64) DEFAULT NULL COMMENT '跟踪的测试',
+    status VARCHAR(16) NOT NULL DEFAULT 'TRACKING' COMMENT 'TRACKING/VERIFYING/FIXED/DEPLOYED/CLOSED',
+    priority VARCHAR(16) DEFAULT 'MEDIUM' COMMENT 'CRITICAL/HIGH/MEDIUM/LOW',
+    note TEXT DEFAULT NULL COMMENT '备注',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_env (environment),
+    INDEX idx_status (status),
+    INDEX idx_tester (tracking_tester),
+    INDEX idx_issue_no (issue_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

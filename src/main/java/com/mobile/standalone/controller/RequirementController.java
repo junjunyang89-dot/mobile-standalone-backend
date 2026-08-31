@@ -70,6 +70,17 @@ public class RequirementController {
         return ResponseEntity.ok(Map.of("ok", service.delete(requirementNo)));
     }
 
+    /** 测试用例左侧树重命名：只改 title，不动项目/版本/模块关联 */
+    @PatchMapping("/{requirementNo}/title")
+    public ResponseEntity<?> updateTitle(@PathVariable String requirementNo,
+                                         @RequestBody Map<String, String> body) {
+        try {
+            return ResponseEntity.ok(service.upsertTitle(requirementNo, body.get("title")));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
     @Data
     public static class SaveRequest {
         private Requirement requirement;
