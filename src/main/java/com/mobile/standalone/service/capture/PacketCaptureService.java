@@ -60,6 +60,56 @@ public class PacketCaptureService {
      *  「抓完了再看」才是常态，抓的时候人在手机上操作，根本没空看屏幕 */
     private volatile Path lastOut;
 
+    /**
+     * 找到 mitmdump 可执行文件。
+     * <p>
+     * 不能直接依赖 PATH：从 IDE 或 launchd 起的进程拿不到登录 shell 的 PATH，
+     * {@code /opt/homebrew/bin} 常常不在里面。同一个坑 AppiumServerManager
+     * 已经踩过并用候选路径解决了，这里照做。
+     * <p>
+     * 配置里填了绝对路径就直接用它——那是给装在非常规位置的人留的出口。
+     */
+    private String resolveMitmdump() throws IOException {
+        String configured = mitmdumpBin == null ? "" : mitmdumpBin.trim();
+        if (configured.contains("/")) {
+            if (Files.isExecutable(Path.of(configured))) {
+                return configured;
+            }
+            throw new IOException("配置的 mitmdump 路径不可执行：" + configured
+                    + "（app.capture.mitmdump）");
+        }
+        String home = System.getProperty("user.home");
+        List<String> candidates = List.of(
+                "/opt/homebrew/bin/mitmdump",              // Apple Silicon 的 brew
+                "/usr/local/bin/mitmdump",                 // Intel 的 brew
+                home + "/.local/bin/mitmdump",             // pipx / pip --user
+                "/opt/homebrew/opt/mitmproxy/bin/mitmdump");
+        for (String c : candidates) {
+            if (Files.isExecutable(Path.of(c))) {
+                return c;
+            }
+        }
+        // 兜底交给 PATH：这条在终端里起的后端能走通，从 IDE 起的多半走不通
+        if (looksOnPath(configured.isEmpty() ? "mitmdump" : configured)) {
+            return configured.isEmpty() ? "mitmdump" : configured;
+        }
+        throw new IOException("没找到 mitmdump，抓包起不来。先装上：brew install mitmproxy"
+                + "；装在别处的话在 application.yml 里配 app.capture.mitmdump 为绝对路径");
+    }
+
+    private boolean looksOnPath(String bin) {
+        String path = System.getenv("PATH");
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        for (String dir : path.split(java.io.File.pathSeparator)) {
+            if (!dir.isBlank() && Files.isExecutable(Path.of(dir, bin))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public java.util.Map<String, Integer> lastSeenHosts() {
         return lastSeen;
     }
@@ -129,7 +179,7 @@ public class PacketCaptureService {
         String hostList = hosts == null || hosts.isBlank() ? defaultHosts : hosts.trim();
 
         List<String> cmd = new ArrayList<>(List.of(
-                mitmdumpBin, "-q", "-p", String.valueOf(proxyPort),
+                resolveMitmdump(), "-q", "-p", String.valueOf(proxyPort),
                 "-s", script.toAbsolutePath().toString(),
                 "--set", "out=" + out.toAbsolutePath(),
                 "--set", "hosts=" + hostList));
