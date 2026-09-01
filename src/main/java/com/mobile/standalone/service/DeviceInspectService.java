@@ -437,7 +437,20 @@ public class DeviceInspectService {
             }
             return null;
         }
-        // Android：必须先 adb dump。先 Appium 会挂旧首页树，且温馨提示页 waitForIdle 易卡死，导致 dump 来不及/被盖掉。
+        /*
+         * Android：先 dump 拿一份基线（快、不需要会话、永远拿得到），再取 Appium
+         * multiWindows，最后挑内容多的那份。
+         *
+         * 原先是「dump 有 2 个以上文案就直接用」，而任何页面都轻松满足这个条件，
+         * 于是 Appium 那条路几乎从不执行。两者拿到的东西本来就不一样：
+         * uiautomator dump 只有当前焦点窗口，弹窗 / Toast / PopupWindow 活在独立
+         * window 里，dump 根本看不到——这正是自研工具比 Appium Inspector 少认出
+         * 元素的主要原因。
+         *
+         * 当初退回 dump 是因为 Appium 在温馨提示页 waitForIdle 卡死。那个根因已经
+         * 在 applyAndroidMultiWindowSettings 里用 waitForIdleTimeout=0 治掉了，
+         * 所以这里可以放心把 Appium 摆回主路径。
+         */
         if (Device.isAndroidOrPogAndroid(device.getPlatform())) {
             String dump = dumpUiAutomatorXml(deviceId);
             if (dump == null || !dump.contains("<")) {
@@ -447,35 +460,39 @@ public class DeviceInspectService {
                     log.warn("uiautomator dump 失败: {}", e.getMessage());
                 }
             }
-            if (dump != null && dump.contains("<")) {
-                if (looksLikePrivacyWarmTip(dump)) {
-                    log.info("点选 pageSource 只用 dump（协议/温馨提示弹窗，跳过 Appium）");
-                    return dump;
-                }
-                // dump 已有足够文案：默认采用，避免 Appium 旧会话污染
-                int dumpTexts = countAttr(dump, "text=\"");
-                if (dumpTexts >= 2 && !looksLikeDumpMissingOverlay(dump)) {
-                    log.info("点选 pageSource 选用 dump（先 dump；文案节点 {}）", dumpTexts);
-                    return dump;
-                }
-            }
-            // dump 过瘦或疑似缺弹层时，再试 Appium multiWindows（系统 PopupWindow）
-            String appium = fetchAppiumPageSource(deviceId, device);
-            if (appium != null && dump != null && dump.contains("<")) {
-                if (looksLikeStaleHomeTree(appium) && !looksLikeStaleHomeTree(dump)) {
-                    log.info("点选 pageSource 选用 dump（Appium 仍是侧栏/首页旧树）");
-                    return dump;
-                }
-                int dumpTexts = countAttr(dump, "text=\"");
-                int appiumTexts = countAttr(appium, "text=\"");
-                if (appiumTexts > dumpTexts + 2) {
-                    log.info("点选 pageSource 选用 Appium multiWindows（文案 {} vs dump {}）", appiumTexts, dumpTexts);
-                    return appium;
-                }
+            boolean dumpUsable = dump != null && dump.contains("<");
+            // 协议 / 温馨提示页仍旧只信 dump：这类页面 Appium 建会话本身就容易出问题，
+            // 而它们的控件又极少，多窗口带不来任何好处。留着这条保护不亏
+            if (dumpUsable && looksLikePrivacyWarmTip(dump)) {
+                log.info("点选 pageSource 只用 dump（协议/温馨提示弹窗，跳过 Appium）");
                 return dump;
             }
-            if (dump != null && dump.contains("<")) return dump;
-            return appium;
+
+            String appium = fetchAppiumPageSource(deviceId, device);
+            boolean appiumUsable = appium != null && appium.contains("<");
+            if (!appiumUsable) {
+                return dumpUsable ? dump : null;
+            }
+            if (!dumpUsable) {
+                return appium;
+            }
+            // Appium 会话复用可能返回上一个界面的旧树。这个保护是踩过坑的，保留
+            if (looksLikeStaleHomeTree(appium) && !looksLikeStaleHomeTree(dump)) {
+                log.info("点选 pageSource 选用 dump（Appium 仍是侧栏/首页旧树）");
+                return dump;
+            }
+            // 用节点数而不是只看文案：多窗口带来的弹层里常常是图标按钮，没有 text，
+            // 只比文案会把这类差异整个漏掉。bounds= 在两种 XML 里都是每节点一个，
+            // 而 dump 用 <node>、Appium 用类名做标签，只能靠属性来数
+            int dumpNodes = countAttr(dump, "bounds=\"");
+            int appiumNodes = countAttr(appium, "bounds=\"");
+            if (appiumNodes > dumpNodes) {
+                log.info("点选 pageSource 选用 Appium multiWindows（节点 {} vs dump {}）",
+                        appiumNodes, dumpNodes);
+                return appium;
+            }
+            log.info("点选 pageSource 选用 dump（节点 {} 不少于 Appium {}）", dumpNodes, appiumNodes);
+            return dump;
         }
 
         // iOS：优先 Appium；无会话时走 WDA HTTP /source（真机点选截图同源）
@@ -528,12 +545,6 @@ public class DeviceInspectService {
     }
 
     /** dump 几乎只有背景壳、缺可点文案时，才值得再问 Appium */
-    private static boolean looksLikeDumpMissingOverlay(String dump) {
-        if (dump == null) return true;
-        int clickable = countAttr(dump, "clickable=\"true\"");
-        return clickable <= 1 && countAttr(dump, "text=\"") <= 1;
-    }
-
     /** 丢掉全屏 side_layout / 巨大 FrameLayout 等误导候选 */
     private static List<HitCandidate> dropUselessFullScreenContainers(List<HitCandidate> hits, int screenW, int screenH) {
         if (hits == null || hits.isEmpty()) return hits;
