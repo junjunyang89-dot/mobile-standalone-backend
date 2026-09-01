@@ -167,11 +167,16 @@ public class RequirementEndpointService {
             try {
                 String epId = adopt(resolved, l.httpMethod(), l.path(), l.summary());
                 applyCaptureDetail(l, epId);
+                // captured_at 每次都刷新，source 保持不变。
+                // 两者分工：source 记「它是怎么进来的」，captured_at 记「它被实际调用过」。
+                // 合成一个字段的话，SYNC 接口被抓到就得改 source，那就丢掉了
+                // 「这个接口是本次改动的」这个事实——而差集恰恰要靠它。
                 jdbcTemplate.update("""
                         INSERT INTO requirement_endpoints
-                            (id, requirement_no, project, endpoint_id, http_method, path, summary, source)
-                        VALUES (?,?,?,?,?,?,?, 'CAPTURE')
+                            (id, requirement_no, project, endpoint_id, http_method, path, summary, source, captured_at)
+                        VALUES (?,?,?,?,?,?,?, 'CAPTURE', NOW())
                         ON DUPLICATE KEY UPDATE linked_at = NOW(),
+                            captured_at = NOW(),
                             project = COALESCE(VALUES(project), project),
                             endpoint_id = COALESCE(VALUES(endpoint_id), endpoint_id)
                         """,
