@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class CaptureSeenHostsTest {
 
-    private final PacketCaptureService service = new PacketCaptureService();
+    private final PacketCaptureService service = new PacketCaptureService(org.mockito.Mockito.mock(CaptureStore.class));
 
     @Test
     void 读得出插件写的域名计数() throws Exception {

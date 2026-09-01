@@ -17,7 +17,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class CaptureBodyTest {
 
-    private final PacketCaptureService service = new PacketCaptureService();
+    private final PacketCaptureService service = new PacketCaptureService(org.mockito.Mockito.mock(CaptureStore.class));
 
     @Test
     void 读得出插件落盘的请求和响应体() throws Exception {

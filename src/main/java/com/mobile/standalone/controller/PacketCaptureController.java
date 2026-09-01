@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
@@ -34,6 +35,7 @@ public class PacketCaptureController {
     private final RequirementEndpointService requirementEndpointService;
     private final com.mobile.standalone.service.apitest.ApiEndpointService endpointService;
     private final com.mobile.standalone.service.ApiTestCaseService caseService;
+    private final com.mobile.standalone.service.capture.CaptureStore captureStore;
 
     @PostMapping("/start")
     public ResponseEntity<?> start(@RequestBody Map<String, Object> body) {
@@ -72,6 +74,25 @@ public class PacketCaptureController {
     }
 
     /** 上一场抓包见到的域名——结束之后才发现「一条都没抓到」时查这个 */
+    /**
+     * 历史抓包会话。
+     * <p>
+     * 原先会话只活在内存里、下一场还会把上一场的响应体删掉，所以「昨天那次抓的
+     * 再看一眼」做不到。现在元数据入库、文件落在稳定目录，重启也还在。
+     */
+    @GetMapping("/sessions")
+    public ResponseEntity<?> sessions(
+            @RequestParam(required = false) String requirementNo,
+            @RequestParam(required = false, defaultValue = "50") int limit) {
+        return ResponseEntity.ok(captureStore.list(requirementNo, limit));
+    }
+
+    @GetMapping("/sessions/{sessionId}")
+    public ResponseEntity<?> session(@PathVariable String sessionId) {
+        Map<String, Object> row = captureStore.get(sessionId);
+        return row == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(row);
+    }
+
     @GetMapping("/last-seen-hosts")
     public ResponseEntity<?> lastSeenHosts() {
         return ResponseEntity.ok(captureService.lastSeenHosts());
