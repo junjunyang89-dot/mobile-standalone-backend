@@ -8,6 +8,8 @@
         <result property="title" column="title"/>
         <result property="projectCode" column="project_code"/>
         <result property="versionId" column="version_id"/>
+        <result property="sourceBranch" column="source_branch"/>
+        <result property="mergedAt" column="merged_at"/>
         <result property="status" column="status"/>
         <result property="owner" column="owner"/>
         <result property="note" column="note"/>
@@ -53,8 +55,8 @@
     </select>
 
     <insert id="insert">
-        INSERT INTO requirements (requirement_no, title, project_code, version_id, status, owner, note)
-        VALUES (#{requirementNo}, #{title}, #{projectCode}, #{versionId}, #{status}, #{owner}, #{note})
+        INSERT INTO requirements (requirement_no, title, project_code, version_id, source_branch, status, owner, note)
+        VALUES (#{requirementNo}, #{title}, #{projectCode}, #{versionId}, #{sourceBranch}, #{status}, #{owner}, #{note})
     </insert>
 
     <update id="update">
@@ -62,9 +64,23 @@
         SET title        = #{title},
             project_code = #{projectCode},
             version_id   = #{versionId},
+            source_branch = #{sourceBranch},
             status       = #{status},
             owner        = #{owner},
             note         = #{note}
+        WHERE requirement_no = #{requirementNo}
+    </update>
+
+    <!--
+      分支用 COALESCE：标记上线时不一定带分支（可能之前就填过），
+      传空不该把已有的分支抹掉。merged_at 每次都刷新——重复标记上线
+      以最后一次为准，比保留第一次更符合直觉。
+    -->
+    <update id="markShipped">
+        UPDATE requirements
+        SET status        = 'DONE',
+            merged_at     = NOW(),
+            source_branch = COALESCE(NULLIF(#{sourceBranch}, ''), source_branch)
         WHERE requirement_no = #{requirementNo}
     </update>
 

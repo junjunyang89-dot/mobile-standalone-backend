@@ -657,6 +657,32 @@ public class AiTestCaseService {
     // ---------- 从流程侧关联用例 ----------
 
     /** 挂在这条流程上的用例 */
+    /**
+     * 需求上线后把它的黑盒用例推进到 ONLINE 阶段。
+     * <p>
+     * 这一步原先是漏的：releaseRequirement 归档了集合与涉及接口，却不碰这里，
+     * 于是上线之后 98 条用例仍停在 TESTING，测试视图里一直挂着已经完事的需求。
+     * <p>
+     * 用 release_stage 而不是另加归档列：这张表本来就用 TESTING/ONLINE 表达阶段，
+     * 再加一个语义重叠的字段只会让人不知道该看哪个。
+     *
+     * @return 推进的用例条数
+     */
+    public int archiveByRequirement(String requirementNo) {
+        if (requirementNo == null || requirementNo.isBlank()) {
+            return 0;
+        }
+        try {
+            return jdbcTemplate.update(
+                    "UPDATE ai_test_cases SET release_stage = 'ONLINE' "
+                            + "WHERE requirement_no = ? AND (release_stage IS NULL OR release_stage <> 'ONLINE')",
+                    requirementNo.trim());
+        } catch (Exception e) {
+            log.warn("[ai-test-cases] 归档失败 {}: {}", requirementNo, e.getMessage());
+            return 0;
+        }
+    }
+
     public List<Map<String, Object>> casesOfFlow(String flowId) {
         if (isBlank(flowId)) {
             return List.of();
