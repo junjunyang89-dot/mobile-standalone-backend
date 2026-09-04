@@ -393,6 +393,11 @@ public class CaseAskCodeSearch {
                 "--glob", "!**/target/**",
                 "--glob", "!**/.git/**",
                 "--glob", "!**/build/**",
+                // 这个 -- 是安全边界，不是格式：query 是用户可控的，没有它 rg 会把
+                // `--pre=/bin/sh` 之类当成选项，对每个被搜文件执行任意命令（以后端进程身份）。
+                // -F 只影响 pattern 怎么解释，不影响参数解析，挡不住这个。
+                // 而 /ask 在 READ_ONLY_POST_SUFFIXES 白名单里，只读账号就能调。
+                "--",
                 query,
                 root.toString());
         ProcessBuilder pb = new ProcessBuilder(cmd);

@@ -43,7 +43,15 @@ public class AuthController {
      */
     @GetMapping("/bootstrap-status")
     public ResponseEntity<Map<String, Object>> bootstrapStatus() {
-        boolean bootstrapping = userService.isBootstrapping();
+        boolean bootstrapping;
+        try {
+            bootstrapping = userService.isBootstrapping();
+        } catch (PlatformUserService.AuthUnavailableException e) {
+            // 这个接口决定登录页显示「登录」还是「创建第一个管理员」。
+            // DB 不可用时回 503，别让前端以为「还没建账号」而弹出建管理员的表单
+            return ResponseEntity.status(503).body(Map.of(
+                    "message", "账号服务暂时不可用，请稍后重试"));
+        }
         return ResponseEntity.ok(Map.of(
                 "bootstrapping", bootstrapping,
                 "message", bootstrapping

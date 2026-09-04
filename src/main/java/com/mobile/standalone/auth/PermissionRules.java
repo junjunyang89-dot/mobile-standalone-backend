@@ -82,9 +82,47 @@ public final class PermissionRules {
             // 抓包会改手机的代理设置，只读账号不该能碰真机
             Map.entry("/packet-capture", PlatformRole.TESTER));
 
+    /**
+     * 路径里出现 {@code .} / {@code ..} 段、反斜杠、或解码后仍残留的 {@code %}——正常业务路径不会有，一律拒绝。
+     * <p>
+     * <b>为什么是「拒绝」而不是「归一化后再判断」</b>：filter 归一化一次、Spring 路由再归一化一次，
+     * 只要两次结果有一点点不同，就又是一个绕过口子。而 filter 是这套东西唯一的权限边界——
+     * controller 里没有任何角色校验。对齐两套归一化很难保证，拒绝则不需要保证什么。
+     * <p>
+     * 具体绕过长这样：{@code POST /api/health/../platform-users} 带 {@code role: ADMIN}。
+     * filter 看到 {@code /health/../platform-users}，命中 {@code /health} 前缀直接放行；
+     * DispatcherServlet 归一化之后打到建账号接口——不用登录就造出一个管理员。
+     */
+    public static boolean looksTraversal(String path) {
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        // 解码之后还剩 % 说明是双重编码（%252e），正常路径不会有
+        if (path.indexOf('\\') >= 0 || path.indexOf('%') >= 0) {
+            return true;
+        }
+        for (String seg : path.split("/")) {
+            if (".".equals(seg) || "..".equals(seg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static boolean isPublic(String path) {
         String p = normalize(path);
-        return PUBLIC_PREFIXES.stream().anyMatch(p::startsWith);
+        return PUBLIC_PREFIXES.stream().anyMatch(pre -> matchesPrefix(p, pre));
+    }
+
+    /**
+     * 按<b>路径段</b>匹配，不是裸 startsWith。
+     * <p>
+     * 裸 startsWith 的话，以后任何新增的 {@code /health-check}、{@code /platform-users-export}
+     * 会自动继承 {@code /health}、{@code /platform-users} 的规则——前者变成免鉴权，后者可能反过来。
+     * 这种口子加路由的人根本不会意识到自己开了它。
+     */
+    private static boolean matchesPrefix(String path, String prefix) {
+        return path.equals(prefix) || path.startsWith(prefix + "/");
     }
 
     /** 这个路由至少要哪一档才看得见 */
@@ -109,7 +147,7 @@ public final class PermissionRules {
         if (SELF_SERVICE.contains(p)) {
             return PlatformRole.VIEWER;
         }
-        if (ADMIN_ONLY_PREFIXES.stream().anyMatch(p::startsWith)) {
+        if (ADMIN_ONLY_PREFIXES.stream().anyMatch(pre -> matchesPrefix(p, pre))) {
             return PlatformRole.ADMIN;
         }
         return switch (m) {

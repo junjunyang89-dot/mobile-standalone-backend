@@ -132,4 +132,45 @@ class PermissionRulesTest {
         // 但它要登录，不能是公开接口——公开了就能往任意邮箱发信
         assertThat(PermissionRules.isPublic("/auth/bind-email/code")).isFalse();
     }
+
+    /**
+     * 这条对应一个真实的越权链：{@code POST /api/health/../platform-users} 带 role=ADMIN，
+     * filter 看到 /health 前缀放行，请求却落到建账号接口——不登录就造出一个管理员。
+     * controller 里没有任何角色校验，filter 是唯一的边界，所以这里破了就是全破。
+     */
+    @Test
+    void 穿越路径一律拒绝() {
+        assertThat(PermissionRules.looksTraversal("/health/../platform-users")).isTrue();
+        assertThat(PermissionRules.looksTraversal("/auth/../platform-users")).isTrue();
+        assertThat(PermissionRules.looksTraversal("/./platform-users")).isTrue();
+        // 解码后还剩 % 说明是双重编码（%252e），同样拒绝
+        assertThat(PermissionRules.looksTraversal("/health/%2e%2e/platform-users")).isTrue();
+        assertThat(PermissionRules.looksTraversal("/health\\..\\platform-users")).isTrue();
+    }
+
+    @Test
+    void 正常路径不受影响() {
+        assertThat(PermissionRules.looksTraversal("/platform-users/usr-1/reset-password")).isFalse();
+        assertThat(PermissionRules.looksTraversal("/devices/emulator-5554/inspect/hierarchy")).isFalse();
+        assertThat(PermissionRules.looksTraversal("/ai-test-cases/requirements/APP-9069/ask")).isFalse();
+        assertThat(PermissionRules.looksTraversal("/")).isFalse();
+        assertThat(PermissionRules.looksTraversal(null)).isFalse();
+    }
+
+    /**
+     * 前缀按路径段匹配，不是裸 startsWith。
+     * 裸 startsWith 的话，以后新增一个 /health-check 会自动继承 /health 的免鉴权。
+     */
+    @Test
+    void 前缀按路径段匹配() {
+        assertThat(PermissionRules.isPublic("/health")).isTrue();
+        assertThat(PermissionRules.isPublic("/health/db")).isTrue();
+        // 同前缀开头但不同段：不能白拿免鉴权
+        assertThat(PermissionRules.isPublic("/health-check")).isFalse();
+        assertThat(PermissionRules.isPublic("/authorize")).isFalse();
+        assertThat(PermissionRules.isPublic("/auth/login-history")).isFalse();
+        // 管理员前缀同理，不能因为开头像就误判
+        assertThat(PermissionRules.required("GET", "/platform-users-export"))
+                .isNotEqualTo(PlatformRole.ADMIN);
+    }
 }

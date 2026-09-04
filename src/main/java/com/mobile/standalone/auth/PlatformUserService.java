@@ -88,20 +88,51 @@ public class PlatformUserService {
         }
     }
 
+    /** 账号服务查不动了。调用方必须当作「不确定」处理，绝不能退化成「还没建账号」 */
+    public static class AuthUnavailableException extends RuntimeException {
+        public AuthUnavailableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * 一旦见过账号，就永久记住「鉴权已开启」。
+     * <p>
+     * 单向闩，只会 false → true，不会退回去。有了它，平台正常运行期间就算 DB 整个挂掉，
+     * 也不会有任何一个请求被当成「还没建账号」而放行。
+     */
+    private volatile boolean authArmed = false;
+
     /**
      * 一个账号都还没有。
      * <p>
      * 这个状态下鉴权<b>整体放行</b>——否则 filter 一上线、账号还没建，
      * 你连创建第一个管理员的页面都进不去，只能去改数据库。
      * 而这套东西的前提就是「不用手跑 SQL」。
+     * <p>
+     * <b>但查不动库时抛异常，不返回 true。</b>原来那版是 fail-open：{@code countAll()} 一抛异常就
+     * 当作「还没建账号」，于是整套鉴权关闭。这不需要什么 0day——连接池打满、MySQL 主从切换、
+     * 表被误锁的那几十秒里，264 个端点、真机控制、抓包和 Jira/Wiki 凭据对内网所有人完全敞开，
+     * 而且 {@code /auth/me} 还会主动回 {@code role: ADMIN}。DB 抖动是常态，不是极端假设。
+     * <p>
+     * 「别把人锁在门外」这个出发点是对的，但方向反了：分不清「服务挂了」和「没账号」的时候，
+     * 该回 503 让人知道服务有问题，而不是把门拆掉。
+     *
+     * @throws AuthUnavailableException 读不到账号数——调用方应当拒绝请求，不是放行
      */
     public boolean isBootstrapping() {
+        if (authArmed) {
+            return false;
+        }
         try {
-            return userMapper.countAll() == 0;
+            boolean none = userMapper.countAll() == 0;
+            if (!none) {
+                authArmed = true;
+            }
+            return none;
         } catch (Exception e) {
-            // 表还没建好时也算未初始化：放行，别把平台锁死
-            log.warn("[auth] 读账号数失败，按未初始化处理: {}", e.getMessage());
-            return true;
+            log.error("[auth] 读账号数失败，按「服务不可用」处理（不放行）: {}", e.getMessage());
+            throw new AuthUnavailableException("账号服务暂时不可用", e);
         }
     }
 

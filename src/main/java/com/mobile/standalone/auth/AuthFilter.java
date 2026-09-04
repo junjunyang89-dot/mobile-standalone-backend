@@ -11,6 +11,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.UrlPathHelper;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +36,15 @@ public class AuthFilter extends OncePerRequestFilter {
 
     public static final String ATTR_USER = "platformUser";
 
+    /**
+     * 必须用它取路径，不能用 {@code getRequestURI()}。
+     * <p>
+     * {@code getRequestURI()} 返回的是<b>原始未解码</b>的 URI，而 Spring 的路由映射用的是解码归一化后的路径。
+     * 两者不一致就等于鉴权形同虚设：{@code /api/health/../platform-users} 在这里看着像公开的 /health，
+     * 打到的却是建账号接口。
+     */
+    private static final UrlPathHelper PATH_HELPER = new UrlPathHelper();
+
     private final AuthTokenService tokenService;
     private final PlatformUserService userService;
 
@@ -52,13 +62,31 @@ public class AuthFilter extends OncePerRequestFilter {
 
         String path = pathOf(request);
 
+        // 先挡穿越再谈放行：正常业务路径不会有 . / .. / %，有就是在试探边界
+        if (PermissionRules.looksTraversal(path)) {
+            log.warn("[auth] 拒绝可疑路径 method={} path={} from={}",
+                    request.getMethod(), path, request.getRemoteAddr());
+            deny(response, 400, "非法请求路径");
+            return;
+        }
+
         if (PermissionRules.isPublic(path)) {
             chain.doFilter(request, response);
             return;
         }
         // 还没建账号：整套鉴权当作没开启。这也是升级时的过渡态——
-        // 新版本部署上去、还没人建账号，平台照常用，不会一上线就全员打不开
-        if (userService.isBootstrapping()) {
+        // 新版本部署上去、还没人建账号，平台照常用，不会一上线就全员打不开。
+        // 但「查不到账号数」绝不能当成「还没建账号」：那样 DB 抖一下，
+        // 264 个端点、真机控制、抓包和 Jira/Wiki 凭据就对内网所有人敞开了
+        boolean bootstrapping;
+        try {
+            bootstrapping = userService.isBootstrapping();
+        } catch (PlatformUserService.AuthUnavailableException e) {
+            log.error("[auth] 账号服务不可用，本次拒绝（绝不放行）: {}", e.getMessage());
+            deny(response, 503, "账号服务暂时不可用，请稍后重试");
+            return;
+        }
+        if (bootstrapping) {
             chain.doFilter(request, response);
             return;
         }
@@ -89,9 +117,7 @@ public class AuthFilter extends OncePerRequestFilter {
     }
 
     private String pathOf(HttpServletRequest request) {
-        String uri = request.getRequestURI();
-        String ctx = request.getContextPath() == null ? "" : request.getContextPath();
-        return uri.startsWith(ctx) ? uri.substring(ctx.length()) : uri;
+        return PATH_HELPER.getPathWithinApplication(request);
     }
 
     private String bearerToken(HttpServletRequest request) {
