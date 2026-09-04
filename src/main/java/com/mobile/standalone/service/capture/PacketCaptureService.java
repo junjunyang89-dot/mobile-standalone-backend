@@ -34,6 +34,11 @@ import java.util.concurrent.TimeUnit;
  * <p>
  * 只留 {@code method/path/status/耗时/traceId}，<b>不存响应体</b>：
  * 一次抓包几十 MB，而「这个需求走了哪些接口」根本不需要 body。
+ * <p>
+ * H5 页面域名（{@code pogpog.gg}）必须 {@code --ignore-hosts} 原样转发。
+ * 解密的话 X5 WebView 不认用户证书，动态 import 会 Failed to fetch。
+ * 不能改成 {@code --allow-hosts} 只开白名单：mitmproxy 按 host:port 匹配，
+ * 正则对不上时会变成「全部放行、一条都抓不到」。
  */
 @Slf4j
 @Service
@@ -48,6 +53,13 @@ public class PacketCaptureService {
     /** 只抓这些域名。留空＝全抓，但那样一次操作会抓出几十条埋点和图片 */
     @Value("${app.capture.hosts:}")
     private String defaultHosts;
+
+    /**
+     * 这些域名只转发、不解密。H5 页面和 CDN 必须走这里——解密的话
+     * WebView 不认用户证书，动态加载的 JS 分包会直接 Failed to fetch。
+     */
+    @Value("${app.capture.passthrough-hosts:pogpog.gg,unpkg.com}")
+    private String passthroughHosts;
 
     private final ObjectMapper json = new ObjectMapper();
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
@@ -152,6 +164,9 @@ public class PacketCaptureService {
                 "-s", script.toAbsolutePath().toString(),
                 "--set", "out=" + out.toAbsolutePath(),
                 "--set", "hosts=" + hostList));
+        // 只放行 H5/CDN，不解密。不能用 --allow-hosts 只开白名单：
+        // mitmproxy 按 host:port 匹配，正则稍错就会变成「全部放行、一条都抓不到」。
+        appendIgnoreHosts(cmd, passthroughHosts);
         Process p = new ProcessBuilder(cmd)
                 .redirectErrorStream(true)
                 .redirectOutput(ProcessBuilder.Redirect.to(
@@ -180,7 +195,8 @@ public class PacketCaptureService {
             s.manualProxyTip = iosTip();
         }
         sessions.put(s.id, s);
-        log.info("[capture] 开始 {} device={} 域名={}", s.id, deviceId, hostList);
+        log.info("[capture] 开始 {} device={} 域名={} 不解密={}",
+                s.id, deviceId, hostList, ignoreHostPatterns(passthroughHosts));
         return s;
     }
 
@@ -343,6 +359,48 @@ public class PacketCaptureService {
             Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
         }
         return target;
+    }
+
+    private void appendIgnoreHosts(List<String> cmd, String passthrough) {
+        for (String pattern : ignoreHostPatterns(passthrough)) {
+            cmd.add("--ignore-hosts");
+            cmd.add(pattern);
+        }
+    }
+
+    /**
+     * mitmproxy 的 ignore/allow 匹配的是 {@code host:port}（如 {@code gateway-qa.arca42.com:443}）。
+     * 正则如果用 {@code .com$} 收尾，接口域名一条都对不上，表现就是页面能开、抓包是空的。
+     */
+    static List<String> ignoreHostPatterns(String passthrough) {
+        List<String> out = new ArrayList<>();
+        for (String host : splitHosts(passthrough)) {
+            out.add(ignoreHostRegex(host));
+        }
+        return out;
+    }
+
+    static String ignoreHostRegex(String host) {
+        // mitmproxy 用 Python re，不能用 Java 的 \Q...\E
+        String escaped = host.replace("\\", "\\\\").replace(".", "\\.");
+        if (host.matches("\\d{1,3}(?:\\.\\d{1,3}){3}")) {
+            return "^" + escaped + "(:\\d+)?$";
+        }
+        return "^(.+\\.)?" + escaped + "(:\\d+)?$";
+    }
+
+    private static List<String> splitHosts(String raw) {
+        List<String> out = new ArrayList<>();
+        if (raw == null || raw.isBlank()) {
+            return out;
+        }
+        for (String part : raw.split(",")) {
+            String h = part.trim().toLowerCase(Locale.ROOT);
+            if (!h.isEmpty()) {
+                out.add(h);
+            }
+        }
+        return out;
     }
 
     private String lanIp() {

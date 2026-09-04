@@ -75,6 +75,21 @@ public class AuthTokenService {
         }
     }
 
+    /**
+     * 用登录令牌那把（已落库的）密钥做 HMAC，返回 hex。
+     * <p>
+     * 给验证码散列复用：6 位数字只有 100 万种可能，不带密钥的散列谁读到库都能秒算一张彩虹表反查回来。
+     */
+    public String hmacHex(String data) {
+        byte[] raw = sign(data == null ? "" : data);
+        StringBuilder sb = new StringBuilder(raw.length * 2);
+        for (byte b : raw) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
     private byte[] sign(String payload) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");

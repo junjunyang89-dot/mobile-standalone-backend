@@ -76,6 +76,14 @@ public class TaskService {
         return taskMapper.findById(id);
     }
 
+    /** 某条流程最近一次执行；没有就返回 null */
+    public Task findLatestByFlowId(String flowId) {
+        if (flowId == null || flowId.isBlank()) {
+            return null;
+        }
+        return taskMapper.findLatestByFlowId(flowId.trim());
+    }
+
     public List<Task> getTasksByType(Task.TaskType taskType) {
         return taskMapper.findByTaskType(taskType);
     }

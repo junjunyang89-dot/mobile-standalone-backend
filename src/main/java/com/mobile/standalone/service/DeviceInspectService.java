@@ -6,6 +6,8 @@ import com.mobile.standalone.mapper.DeviceMapper;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import com.mobile.standalone.service.driver.PlatformRouter;
 import com.mobile.standalone.service.harmony.HarmonyHierarchyXml;
+import com.mobile.standalone.service.inspect.LocatorMatcher;
+import com.mobile.standalone.service.inspect.UiHierarchyBuilder;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -197,15 +199,7 @@ public class DeviceInspectService {
                                  String appId) {
         Device device = requireConnected(deviceId);
         String id = deviceId.trim();
-        int[] shotSize = lastScreenshotSizeByDevice.get(id);
-        if (shotSize == null) {
-            Path shot = lastScreenshotByDevice.get(id);
-            if (shot == null) shot = findLatestInspectFile(id);
-            if (shot != null) shotSize = readPngSize(shot);
-        }
-        if (shotSize == null) {
-            shotSize = resolveWindowSize(deviceId, device);
-        }
+        int[] shotSize = resolveShotSize(deviceId, device);
         if (shotSize == null || shotSize[0] <= 0 || shotSize[1] <= 0) {
             throw new IllegalStateException("无法读取截图/屏幕尺寸");
         }
@@ -296,18 +290,7 @@ public class DeviceInspectService {
         hits = appendCoordinateCandidate(hits, px, py, shotSize[0], shotSize[1]);
         hits = promoteCoordinateWhenOnlyH5Shell(hits);
         String platform = device.getPlatform() != null ? device.getPlatform().name() : null;
-        for (HitCandidate c : hits) {
-            if (c.getLocatorValue() == null || c.getLocatorValue().isBlank()) continue;
-            if (c.getMatchedElementId() != null) continue; // 库内 ACTIVE 已绑定
-            List<UiElement> matched = uiElementService.findByLocatorHint(appId, platform, c.getLocatorValue(), 5);
-            if (!matched.isEmpty()) {
-                UiElement m = matched.get(0);
-                c.setMatchedElementId(m.getId());
-                c.setMatchedNameEn(m.getNameEn());
-                c.setMatchedNameZh(m.getNameZh());
-                c.setMatchedStatus(m.getStatus());
-            }
-        }
+        enrichMatchedElements(hits, appId, platform);
 
         HitTestResult result = new HitTestResult();
         result.setDeviceId(deviceId);
@@ -316,6 +299,20 @@ public class DeviceInspectService {
         result.setY(py);
         result.setWidth(shotSize[0]);
         result.setHeight(shotSize[1]);
+        if (hierSize != null && hierSize[0] > 0 && hierSize[1] > 0) {
+            result.setHierarchyWidth(hierSize[0]);
+            result.setHierarchyHeight(hierSize[1]);
+        }
+        // 不替人拍板：把 locator 唯一性和「命中的是树上哪个节点」一起给出，选错了前端能往上跳一级
+        try {
+            org.w3c.dom.Document doc = UiHierarchyBuilder.parseDocument(xml);
+            enrichMatchCounts(doc, hits);
+            String selected = firstNodePath(hits);
+            result.setSelectedNodePath(selected);
+            result.setAncestors(ancestorChain(doc, selected));
+        } catch (Exception e) {
+            log.debug("补充 nodePath/locator 唯一性失败: {}", e.getMessage());
+        }
         result.setCandidates(hits);
         return result;
     }
@@ -837,7 +834,7 @@ public class DeviceInspectService {
             Document doc = f.newDocumentBuilder()
                     .parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
             int[] seq = {0};
-            walk(doc.getDocumentElement(), nodes, null, seq);
+            walk(doc.getDocumentElement(), nodes, null, seq, null, null);
         } catch (Exception e) {
             log.warn("解析 page source 失败，尝试正则扫描 bounds: {}", e.getMessage());
             return regexHitFallback(xml, px, py);
@@ -2110,9 +2107,16 @@ public class DeviceInspectService {
         return out;
     }
 
-    private void walk(Element el, List<HitNode> out, HitNode parent, int[] seq) {
+    private void walk(Element el, List<HitNode> out, HitNode parent, int[] seq,
+                      String parentPath, String parentXpath) {
         if (el == null) return;
+        String path = UiHierarchyBuilder.pathOf(parentPath, el);
+        String xpath = UiHierarchyBuilder.xpathOf(parentXpath, el);
         HitNode node = fromElement(el, parent);
+        if (node != null) {
+            node.nodePath = path;
+            node.xpath = xpath;
+        }
         if (node != null && node.right > node.left && node.bottom > node.top) {
             node.docOrder = seq[0]++;
             out.add(node);
@@ -2121,7 +2125,7 @@ public class DeviceInspectService {
         for (int i = 0; i < children.getLength(); i++) {
             Node n = children.item(i);
             if (n.getNodeType() == Node.ELEMENT_NODE) {
-                walk((Element) n, out, node != null ? node : parent, seq);
+                walk((Element) n, out, node != null ? node : parent, seq, path, xpath);
             }
         }
     }
@@ -2635,6 +2639,7 @@ public class DeviceInspectService {
         c.setClickable(n.clickable);
         c.setEnabled(n.enabled);
         c.setBounds(Map.of("left", n.left, "top", n.top, "right", n.right, "bottom", n.bottom));
+        c.setNodePath(n.nodePath);
         return c;
     }
 
@@ -2925,6 +2930,10 @@ public class DeviceInspectService {
 
     private static class HitNode {
         HitNode parent;
+        /** 树内唯一路径，前端点选/回选用 */
+        String nodePath;
+        /** Appium 风格绝对 xpath，容器类节点的兜底 locator */
+        String xpath;
         int left, top, right, bottom;
         String className;
         String resourceId;
@@ -2940,6 +2949,363 @@ public class DeviceInspectService {
         int area() {
             return Math.max(0, right - left) * Math.max(0, bottom - top);
         }
+    }
+
+    // ==================== Inspector 式控件树：整棵交给前端，选哪个节点是人的事 ====================
+
+    /**
+     * 返回当前屏的完整控件树，供前端做「截图 + 树」双栏：所有节点边框叠加、hover 高亮、点树选中。
+     *
+     * @param refresh true 强制重新 dump；false 优先用 snapshot 那一刻冻结的树（与截图严格对齐）
+     */
+    public HierarchyResult hierarchy(String deviceId, boolean refresh) {
+        Device device = requireConnected(deviceId);
+        String id = deviceId.trim();
+        int[] shotSize = resolveShotSize(deviceId, device);
+        if (shotSize == null || shotSize[0] <= 0 || shotSize[1] <= 0) {
+            throw new IllegalStateException("无法读取截图/屏幕尺寸，请先调用 snapshot");
+        }
+        String xml = currentPageSource(deviceId, device, refresh);
+        int[] hierSize = detectHierarchySize(xml, shotSize);
+        double[] scale = hierToShotScale(device.getPlatform(), shotSize, hierSize);
+
+        HierarchyResult r = new HierarchyResult();
+        r.setDeviceId(deviceId);
+        r.setPlatform(device.getPlatform() != null ? device.getPlatform().name() : null);
+        r.setScreenshotUrl("devices/" + id + "/inspect/screenshot?t=" + System.currentTimeMillis());
+        r.setWidth(shotSize[0]);
+        r.setHeight(shotSize[1]);
+        if (hierSize != null && hierSize[0] > 0 && hierSize[1] > 0) {
+            r.setHierarchyWidth(hierSize[0]);
+            r.setHierarchyHeight(hierSize[1]);
+        }
+        r.setScaleX(scale[0]);
+        r.setScaleY(scale[1]);
+        r.setRefreshed(refresh);
+        try {
+            org.w3c.dom.Document doc = UiHierarchyBuilder.parseDocument(xml);
+            UiHierarchyBuilder.HierarchyNode root = UiHierarchyBuilder.build(doc, scale[0], scale[1]);
+            r.setRoot(root);
+            r.setNodeCount(UiHierarchyBuilder.countNodes(root));
+        } catch (Exception e) {
+            throw new IllegalStateException("控件树解析失败: " + e.getMessage(), e);
+        }
+        log.info("控件树: deviceId={} 节点数={} 截图={}x{} 控件树={}x{} scale=({},{})",
+                id, r.getNodeCount(), shotSize[0], shotSize[1],
+                r.getHierarchyWidth(), r.getHierarchyHeight(), scale[0], scale[1]);
+        return r;
+    }
+
+    /**
+     * 按 nodePath 取某个节点的全部候选 locator（含唯一性校验）。
+     * 前端在树上点节点、或点「往上跳一级」后调这个接口，拿到的候选与 hit-test 同构，可直接落库。
+     */
+    public NodeLocatorsResult nodeLocators(String deviceId, String nodePath, String appId) {
+        if (nodePath == null || nodePath.isBlank()) {
+            throw new IllegalArgumentException("nodePath 不能为空");
+        }
+        Device device = requireConnected(deviceId);
+        String platform = device.getPlatform() != null ? device.getPlatform().name() : null;
+        int[] shotSize = resolveShotSize(deviceId, device);
+        String xml = currentPageSource(deviceId, device, false);
+        org.w3c.dom.Document doc;
+        try {
+            doc = UiHierarchyBuilder.parseDocument(xml);
+        } catch (Exception e) {
+            throw new IllegalStateException("控件树解析失败: " + e.getMessage(), e);
+        }
+        List<HitNode> nodes = new ArrayList<>();
+        walk(doc.getDocumentElement(), nodes, null, new int[]{0}, null, null);
+        HitNode target = null;
+        for (HitNode n : nodes) {
+            if (nodePath.equals(n.nodePath)) {
+                target = n;
+                break;
+            }
+        }
+        if (target == null) {
+            // hierarchy 返回的是完整 XML 树，而命中用的 HitNode 只收录「有 bounds 且非零尺寸」的节点：
+            // 根节点、零尺寸节点在树上点得到却查不到 HitNode。这时报「页面已变」是误导，走降级分支。
+            return boundlessNodeLocators(deviceId, platform, device, doc, xml, nodePath, shotSize, appId);
+        }
+
+        List<HitCandidate> list = new ArrayList<>(expandLocatorStrategies(target, nodes, -1, -1));
+        // 容器类节点常常无 id 无文案：绝对 xpath 兜底，保证任何节点都拿得到一个能用的 locator
+        if (target.xpath != null && !target.xpath.isBlank()) {
+            boolean dup = false;
+            for (HitCandidate c : list) {
+                if (target.xpath.equals(c.getLocatorValue())) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                HitCandidate abs = baseCandidate(target, firstNonBlank(target.text, target.contentDesc));
+                abs.setLocatorType("xpath");
+                abs.setLocatorValue(target.xpath);
+                abs.setVisualHint("绝对 xpath · 位置强相关，页面结构一变就失效");
+                if (abs.getSuggestedNameEn() == null || abs.getSuggestedNameEn().isBlank()) {
+                    abs.setSuggestedNameEn("node_" + target.left + "_" + target.top);
+                }
+                if (abs.getSuggestedNameZh() == null || abs.getSuggestedNameZh().isBlank()) {
+                    abs.setSuggestedNameZh("点选控件");
+                }
+                list.add(abs);
+            }
+        }
+        int rank = 0;
+        for (HitCandidate c : list) {
+            c.setRank(rank++);
+            if (c.getNodePath() == null) c.setNodePath(target.nodePath);
+        }
+        enrichMatchedElements(list, appId, platform);
+        enrichMatchCounts(doc, list);
+
+        double[] scale = hierToShotScale(device.getPlatform(), shotSize, detectHierarchySize(xml, shotSize));
+        NodeLocatorsResult r = new NodeLocatorsResult();
+        r.setDeviceId(deviceId);
+        r.setPlatform(platform);
+        r.setNodePath(target.nodePath);
+        r.setXpath(target.xpath);
+        r.setClassName(target.className);
+        r.setResourceId(target.resourceId);
+        r.setText(target.text);
+        r.setContentDesc(target.contentDesc);
+        r.setClickable(target.clickable);
+        r.setEnabled(target.enabled);
+        r.setBounds(Map.of("left", target.left, "top", target.top, "right", target.right, "bottom", target.bottom));
+        r.setScreenBounds(Map.of(
+                "left", (int) Math.round(target.left * scale[0]),
+                "top", (int) Math.round(target.top * scale[1]),
+                "right", (int) Math.round(target.right * scale[0]),
+                "bottom", (int) Math.round(target.bottom * scale[1])));
+        r.setAttrs(target.attrs);
+        r.setAncestors(ancestorChain(nodes, target));
+        r.setCandidates(list);
+        return r;
+    }
+
+    /**
+     * 无 bounds / 零尺寸节点（根节点、布局占位）的降级定位：拿不到 HitNode，就直接按 XML 属性出候选。
+     * 只给绝对 xpath 和属性型 locator，不做任何「哪个更好」的判断——够前端把节点信息铺开就行。
+     */
+    private NodeLocatorsResult boundlessNodeLocators(String deviceId, String platform, Device device,
+                                                     org.w3c.dom.Document doc, String xml, String nodePath,
+                                                     int[] shotSize, String appId) {
+        double[] scale = hierToShotScale(device.getPlatform(), shotSize, detectHierarchySize(xml, shotSize));
+        UiHierarchyBuilder.HierarchyNode root = UiHierarchyBuilder.build(doc, scale[0], scale[1]);
+        UiHierarchyBuilder.HierarchyNode node = UiHierarchyBuilder.findByPath(root, nodePath);
+        if (node == null) {
+            throw new IllegalArgumentException("nodePath 不在当前控件树上（页面可能已变），请重新刷新截图: " + nodePath);
+        }
+
+        List<HitCandidate> list = new ArrayList<>();
+        addAttrCandidate(list, node, "xpath", node.getXpath(), "绝对 xpath · 位置强相关，页面结构一变就失效");
+        addAttrCandidate(list, node, "id", node.getResourceId(), "resource-id");
+        addAttrCandidate(list, node, "text", node.getText(), "text");
+        addAttrCandidate(list, node, "accessibilityId", node.getContentDesc(), "content-desc / accessibility id");
+        addAttrCandidate(list, node, "className", node.getClassName(), "class · 通常不唯一");
+        int rank = 0;
+        for (HitCandidate c : list) {
+            c.setRank(rank++);
+            c.setNodePath(node.getNodePath());
+        }
+        enrichMatchedElements(list, appId, platform);
+        enrichMatchCounts(doc, list);
+
+        NodeLocatorsResult r = new NodeLocatorsResult();
+        r.setDeviceId(deviceId);
+        r.setPlatform(platform);
+        r.setNodePath(node.getNodePath());
+        r.setXpath(node.getXpath());
+        r.setClassName(node.getClassName());
+        r.setResourceId(node.getResourceId());
+        r.setText(node.getText());
+        r.setContentDesc(node.getContentDesc());
+        r.setClickable(node.getClickable());
+        r.setEnabled(node.getEnabled());
+        r.setBounds(node.getBounds());
+        r.setScreenBounds(node.getScreenBounds());
+        r.setAttrs(node.getAttrs());
+        r.setAncestors(ancestorRefsByPath(root, node.getNodePath()));
+        r.setCandidates(list);
+        log.info("控件树降级取值(无 bounds 节点): deviceId={} nodePath={} 候选={}", deviceId, nodePath, list.size());
+        return r;
+    }
+
+    private static void addAttrCandidate(List<HitCandidate> out, UiHierarchyBuilder.HierarchyNode n,
+                                         String type, String value, String hint) {
+        if (value == null || value.isBlank()) return;
+        HitCandidate c = new HitCandidate();
+        c.setClassName(n.getClassName());
+        c.setResourceId(n.getResourceId());
+        c.setText(n.getText());
+        c.setContentDesc(n.getContentDesc());
+        c.setClickable(n.getClickable());
+        c.setEnabled(n.getEnabled());
+        c.setBounds(n.getBounds());
+        c.setLocatorType(type);
+        c.setLocatorValue(value);
+        c.setVisualHint(hint);
+        c.setSuggestedNameZh("点选控件");
+        c.setSuggestedNameEn("node_" + n.getNodePath().replaceAll("[^A-Za-z0-9]+", "_"));
+        out.add(c);
+    }
+
+    /** nodePath 是 /a/b[2]/c[1] 这种绝对路径，逐段截断即可拿到由近及远的祖先 */
+    private static List<NodeRef> ancestorRefsByPath(UiHierarchyBuilder.HierarchyNode root, String nodePath) {
+        List<NodeRef> chain = new ArrayList<>();
+        if (root == null || nodePath == null) return chain;
+        String p = nodePath;
+        while (true) {
+            int cut = p.lastIndexOf('/');
+            if (cut <= 0) break;
+            p = p.substring(0, cut);
+            UiHierarchyBuilder.HierarchyNode a = UiHierarchyBuilder.findByPath(root, p);
+            if (a == null) break;
+            NodeRef r = new NodeRef();
+            r.setNodePath(a.getNodePath());
+            r.setXpath(a.getXpath());
+            r.setClassName(a.getClassName());
+            r.setResourceId(a.getResourceId());
+            r.setText(a.getText());
+            r.setContentDesc(a.getContentDesc());
+            r.setClickable(a.getClickable());
+            r.setBounds(a.getBounds());
+            chain.add(r);
+        }
+        return chain;
+    }
+
+    /** 截图像素尺寸：优先上次 snapshot 记录，其次读 PNG，最后问设备 */
+    private int[] resolveShotSize(String deviceId, Device device) {
+        String id = deviceId.trim();
+        int[] shotSize = lastScreenshotSizeByDevice.get(id);
+        if (shotSize == null) {
+            Path shot = lastScreenshotByDevice.get(id);
+            if (shot == null) shot = findLatestInspectFile(id);
+            if (shot != null) shotSize = readPngSize(shot);
+        }
+        if (shotSize == null) {
+            shotSize = resolveWindowSize(deviceId, device);
+        }
+        return shotSize;
+    }
+
+    /** 取当前可用的 page source（冻结优先），并裁掉 XML 前后杂字符 */
+    private String currentPageSource(String deviceId, Device device, boolean refresh) {
+        String id = deviceId.trim();
+        String xml = refresh ? null : lastPageSourceByDevice.get(id);
+        if (!usableHierarchy(xml)) {
+            xml = fetchPageSource(deviceId, device);
+            if (usableHierarchy(xml)) {
+                lastPageSourceByDevice.put(id, xml);
+            }
+        }
+        if (!usableHierarchy(xml)) {
+            throw new IllegalStateException(
+                    "无法获取控件树：请先点「刷新截图」。"
+                            + (Device.usesHdcAutomation(device.getPlatform())
+                            ? "鸿蒙请确认 hdc 已授权且 hmdriver2 可用。"
+                            : "Android 请确认 adb 可用；iOS 请确认 WDA 已启动（设置里信任开发者证书）"));
+        }
+        int start = xml.indexOf('<');
+        if (start > 0) xml = xml.substring(start);
+        int end = xml.lastIndexOf('>');
+        if (end > 0 && end < xml.length() - 1) xml = xml.substring(0, end + 1);
+        return xml;
+    }
+
+    /**
+     * 控件树坐标 → 截图像素坐标的比例。规则与 hitTest 的反向映射严格一致，
+     * 否则前端画的框会和点选结果对不上。
+     */
+    private static double[] hierToShotScale(Device.Platform platform, int[] shotSize, int[] hierSize) {
+        if (shotSize == null || shotSize[0] <= 1 || shotSize[1] <= 1) return new double[]{1.0, 1.0};
+        if (hierSize == null || hierSize[0] <= 1 || hierSize[1] <= 1) return new double[]{1.0, 1.0};
+        if (hierSize[0] == shotSize[0] && hierSize[1] == shotSize[1]) return new double[]{1.0, 1.0};
+        boolean sameWidth = Math.abs(hierSize[0] - shotSize[0]) <= 2;
+        int heightGap = Math.abs(shotSize[1] - hierSize[1]);
+        boolean statusBarLikeGap = sameWidth && heightGap > 0 && heightGap <= Math.max(320, shotSize[1] / 8);
+        if (statusBarLikeGap && Device.isAndroidOrPogAndroid(platform)) {
+            // Android 截图与 dump 顶部对齐、同宽，底部多出手势条：不缩放
+            return new double[]{1.0, 1.0};
+        }
+        return new double[]{
+                (shotSize[0] - 1.0) / (hierSize[0] - 1.0),
+                (shotSize[1] - 1.0) / (hierSize[1] - 1.0)};
+    }
+
+    /** 候选 locator 关联元素库已有记录 */
+    private void enrichMatchedElements(List<HitCandidate> hits, String appId, String platform) {
+        if (hits == null) return;
+        for (HitCandidate c : hits) {
+            if (c.getLocatorValue() == null || c.getLocatorValue().isBlank()) continue;
+            if (c.getMatchedElementId() != null) continue; // 库内 ACTIVE 已绑定
+            List<UiElement> matched = uiElementService.findByLocatorHint(appId, platform, c.getLocatorValue(), 5);
+            if (!matched.isEmpty()) {
+                UiElement m = matched.get(0);
+                c.setMatchedElementId(m.getId());
+                c.setMatchedNameEn(m.getNameEn());
+                c.setMatchedNameZh(m.getNameZh());
+                c.setMatchedStatus(m.getStatus());
+            }
+        }
+    }
+
+    /** 每个候选在当前树上跑一次匹配：「这个 xpath 命中 3 个」比任何推荐理由都直接 */
+    private static void enrichMatchCounts(org.w3c.dom.Document doc, List<HitCandidate> hits) {
+        if (doc == null || hits == null) return;
+        for (HitCandidate c : hits) {
+            int n = LocatorMatcher.count(doc, c.getLocatorType(), c.getLocatorValue());
+            c.setMatchCount(n);
+            c.setUnique(n < 0 ? null : (n == 1));
+        }
+    }
+
+    private static String firstNodePath(List<HitCandidate> hits) {
+        if (hits == null) return null;
+        for (HitCandidate c : hits) {
+            if (c.getNodePath() != null && !c.getNodePath().isBlank()) return c.getNodePath();
+        }
+        return null;
+    }
+
+    private List<NodeRef> ancestorChain(org.w3c.dom.Document doc, String nodePath) {
+        if (doc == null || nodePath == null || nodePath.isBlank()) return List.of();
+        List<HitNode> nodes = new ArrayList<>();
+        walk(doc.getDocumentElement(), nodes, null, new int[]{0}, null, null);
+        HitNode target = null;
+        for (HitNode n : nodes) {
+            if (nodePath.equals(n.nodePath)) {
+                target = n;
+                break;
+            }
+        }
+        return ancestorChain(nodes, target);
+    }
+
+    /** 由近及远的祖先链 */
+    private static List<NodeRef> ancestorChain(List<HitNode> nodes, HitNode target) {
+        if (target == null) return List.of();
+        List<NodeRef> chain = new ArrayList<>();
+        for (HitNode p = target.parent; p != null; p = p.parent) {
+            chain.add(toRef(p));
+        }
+        return chain;
+    }
+
+    private static NodeRef toRef(HitNode n) {
+        NodeRef r = new NodeRef();
+        r.setNodePath(n.nodePath);
+        r.setXpath(n.xpath);
+        r.setClassName(n.className);
+        r.setResourceId(n.resourceId);
+        r.setText(n.text);
+        r.setContentDesc(n.contentDesc);
+        r.setClickable(n.clickable);
+        r.setBounds(Map.of("left", n.left, "top", n.top, "right", n.right, "bottom", n.bottom));
+        return r;
     }
 
     @Data
@@ -2960,6 +3326,62 @@ public class DeviceInspectService {
         private int y;
         private int width;
         private int height;
+        /** 控件树自身尺寸，前端换算用 */
+        private Integer hierarchyWidth;
+        private Integer hierarchyHeight;
+        /** 首选候选对应的树节点，前端据此在树上高亮同一个节点 */
+        private String selectedNodePath;
+        /** 由近及远的祖先链，支持「选错了往上跳一级」 */
+        private List<NodeRef> ancestors;
+        private List<HitCandidate> candidates;
+    }
+
+    /** 树上一个节点的轻量引用，够前端展示和再取 locator */
+    @Data
+    public static class NodeRef {
+        private String nodePath;
+        private String xpath;
+        private String className;
+        private String resourceId;
+        private String text;
+        private String contentDesc;
+        private Boolean clickable;
+        private Map<String, Integer> bounds;
+    }
+
+    @Data
+    public static class HierarchyResult {
+        private String deviceId;
+        private String platform;
+        private String screenshotUrl;
+        /** 截图像素尺寸，screenBounds 就在这个坐标系里 */
+        private Integer width;
+        private Integer height;
+        private Integer hierarchyWidth;
+        private Integer hierarchyHeight;
+        private Double scaleX;
+        private Double scaleY;
+        private Integer nodeCount;
+        private Boolean refreshed;
+        private UiHierarchyBuilder.HierarchyNode root;
+    }
+
+    @Data
+    public static class NodeLocatorsResult {
+        private String deviceId;
+        private String platform;
+        private String nodePath;
+        private String xpath;
+        private String className;
+        private String resourceId;
+        private String text;
+        private String contentDesc;
+        private Boolean clickable;
+        private Boolean enabled;
+        private Map<String, Integer> bounds;
+        private Map<String, Integer> screenBounds;
+        private Map<String, String> attrs;
+        private List<NodeRef> ancestors;
         private List<HitCandidate> candidates;
     }
 
@@ -2982,6 +3404,12 @@ public class DeviceInspectService {
         private String matchedNameEn;
         private String matchedNameZh;
         private String matchedStatus;
+        /** 该候选对应的树节点路径，坐标方案等无节点来源时为 null */
+        private String nodePath;
+        /** 该 locator 在当前控件树上命中几个元素；-1 表示无法校验（如坐标方案） */
+        private Integer matchCount;
+        /** matchCount == 1；无法校验时为 null */
+        private Boolean unique;
     }
 }
 

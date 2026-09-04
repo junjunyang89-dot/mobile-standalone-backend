@@ -16,6 +16,7 @@
         <result property="lastRunId" column="last_run_id"/>
         <result property="lastStatus" column="last_status"/>
         <result property="lastMessage" column="last_message"/>
+        <result property="recentResults" column="recent_results"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="collectionName" column="collection_name"/>
@@ -76,7 +77,8 @@
             last_run_at = #{lastRunAt},
             last_run_id = #{lastRunId},
             last_status = #{lastStatus},
-            last_message = #{lastMessage}
+            last_message = #{lastMessage},
+            recent_results = #{recentResults}
         WHERE id = #{id}
     </update>
 

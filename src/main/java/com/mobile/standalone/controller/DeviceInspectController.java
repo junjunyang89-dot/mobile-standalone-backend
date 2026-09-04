@@ -79,6 +79,56 @@ public class DeviceInspectController {
         }
     }
 
+    /**
+     * 返回当前屏完整控件树（Appium Inspector 式），供前端「截图 + 树」双栏渲染与画框。
+     * refresh=true 强制重新 dump；默认用 snapshot 那一刻冻结的树，与截图严格对齐。
+     */
+    @GetMapping("/{id}/inspect/hierarchy")
+    public ResponseEntity<?> hierarchy(@PathVariable String id,
+                                       @RequestParam(required = false, defaultValue = "false") boolean refresh) {
+        try {
+            return ResponseEntity.ok(deviceInspectService.hierarchy(id, refresh));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "获取控件树失败"));
+        }
+    }
+
+    /**
+     * 取树上某个节点的候选 locator（含唯一性校验）。
+     * 前端在树上点节点、或按祖先链「往上跳一级」后调用，返回结构与 hit-test 的 candidates 一致。
+     */
+    @PostMapping("/{id}/inspect/node-locators")
+    public ResponseEntity<?> nodeLocators(@PathVariable String id, @RequestBody NodeLocatorsRequest body) {
+        try {
+            if (body == null) {
+                return ResponseEntity.badRequest().body(Map.of("message", "body 不能为空"));
+            }
+            return ResponseEntity.ok(deviceInspectService.nodeLocators(id, body.getNodePath(), body.getAppId()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "取节点定位失败"));
+        }
+    }
+
+    @Data
+    public static class NodeLocatorsRequest {
+        /** 来自 hierarchy 接口的 node.nodePath 或 hit-test 的 selectedNodePath / ancestors[].nodePath */
+        @JsonProperty("nodePath")
+        @JsonAlias({"node_path", "path"})
+        private String nodePath;
+        /** 可选，用于匹配 ui_elements */
+        private String appId;
+    }
+
     @Data
     public static class HitTestRequest {
         /** 相对截图宽度 0~1；须 @JsonProperty，否则 Jackson 对 xRatio 反序列化失败 */

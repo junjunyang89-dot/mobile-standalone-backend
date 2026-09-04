@@ -28,11 +28,14 @@ public final class PermissionRules {
      */
     private static final List<String> PUBLIC_PREFIXES = List.of(
             "/auth/login", "/auth/bootstrap-status", "/health", "/actuator",
+            // 忘记密码的人本来就登录不了，这两个必须公开。
+            // 它们自身的防护是恒定响应 + 三档限流 + 验证码限次，不是靠鉴权
+            "/auth/forgot-password", "/auth/reset-password",
             // 静态图片资源：报告里的截图是直接写进 <img src> 的，浏览器发这种请求时
             // 加不上任何请求头，拦下来的结果是所有报告的图全变成裂图。
             // 这些路径本身是不可猜的（任务 id + 时间戳），而真正要守的是接口那一层
             "/tmp/screenshots", "tmp/screenshots", "/ui-element-previews",
-            "/handbook-images", "/agent-uploads", "/bug-images");
+            "/handbook-images", "/agent-uploads", "/bug-images", "/issue-images");
 
     /**
      * 长得像写、其实是查的 POST。
@@ -42,7 +45,7 @@ public final class PermissionRules {
     private static final List<String> READ_ONLY_POST_SUFFIXES = List.of(
             "/analyze", "/analyze-dirs", "/diff", "/preview", "/preview-order",
             "/import/parse-text", "/inspector-xml/parse", "/resolve-dependencies",
-            "/table-schemas/preview");
+            "/table-schemas/preview", "/ask");
 
     /**
      * 登录后人人可用的自助操作，不看角色。
@@ -51,7 +54,9 @@ public final class PermissionRules {
      * 只能去找管理员重置。这不是权限，是障碍。
      */
     private static final List<String> SELF_SERVICE = List.of(
-            "/auth/me", "/auth/change-password", "/auth/logout");
+            "/auth/me", "/auth/change-password", "/auth/logout",
+            // 绑邮箱是每个人自己的事，只读账号也得能绑——不然他们永远只能找管理员重置
+            "/auth/bind-email/code", "/auth/bind-email/confirm");
 
     /** 只有管理员能碰的前缀：账号管理本身，以及节点/密钥这类改了会影响所有人的配置 */
     private static final List<String> ADMIN_ONLY_PREFIXES = List.of(
@@ -63,18 +68,19 @@ public final class PermissionRules {
      * 没列出来的路由默认 {@link PlatformRole#VIEWER}——菜单是给人找路的，
      * 默认藏起来只会让人以为功能没了然后来问你。真正的边界在接口那一层。
      */
-    private static final Map<String, PlatformRole> ROUTE_MIN_ROLE = Map.of(
-            "/platform-users", PlatformRole.ADMIN,
-            "/devices", PlatformRole.TESTER,
-            "/ui-apps", PlatformRole.TESTER,
-            "/app-online-regression", PlatformRole.TESTER,
-            "/ui-flows", PlatformRole.TESTER,
-            "/ui-elements", PlatformRole.TESTER,
-            "/ui-inspector-import", PlatformRole.TESTER,
-            "/api-environments", PlatformRole.TESTER,
-            "/api-schedules", PlatformRole.TESTER,
+    private static final Map<String, PlatformRole> ROUTE_MIN_ROLE = Map.ofEntries(
+            Map.entry("/platform-users", PlatformRole.ADMIN),
+            Map.entry("/devices", PlatformRole.TESTER),
+            Map.entry("/ui-apps", PlatformRole.TESTER),
+            Map.entry("/app-online-regression", PlatformRole.TESTER),
+            Map.entry("/app-automation", PlatformRole.TESTER),
+            Map.entry("/ui-flows", PlatformRole.TESTER),
+            Map.entry("/ui-elements", PlatformRole.TESTER),
+            Map.entry("/ui-inspector-import", PlatformRole.TESTER),
+            Map.entry("/api-environments", PlatformRole.TESTER),
+            Map.entry("/api-schedules", PlatformRole.TESTER),
             // 抓包会改手机的代理设置，只读账号不该能碰真机
-            "/packet-capture", PlatformRole.TESTER);
+            Map.entry("/packet-capture", PlatformRole.TESTER));
 
     public static boolean isPublic(String path) {
         String p = normalize(path);

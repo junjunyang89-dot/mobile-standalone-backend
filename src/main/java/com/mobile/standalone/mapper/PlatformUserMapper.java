@@ -15,6 +15,8 @@ public interface PlatformUserMapper {
 
     PlatformUser findByUsername(@Param("username") String username);
 
+    PlatformUser findByEmail(@Param("email") String email);
+
     int countAll();
 
     /** 还有几个「启用中的管理员」——用来挡住把最后一个管理员停用或降级 */
@@ -24,7 +26,12 @@ public interface PlatformUserMapper {
 
     int update(PlatformUser user);
 
+    /** 改密码同时记 password_changed_at：两件事必须一起发生，分开写迟早有一条路径漏掉 */
     int updatePassword(@Param("id") String id, @Param("passwordHash") String passwordHash);
+
+    int updateEmail(@Param("id") String id, @Param("email") String email);
+
+    int setMustChangePassword(@Param("id") String id, @Param("must") boolean must);
 
     int touchLogin(@Param("id") String id);
 

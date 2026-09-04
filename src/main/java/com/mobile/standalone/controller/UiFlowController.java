@@ -124,6 +124,32 @@ public class UiFlowController {
         return ResponseEntity.ok(uiFlowService.list(appId, platform, catalog, componentOnly, environment, name));
     }
 
+    /**
+     * 一批流程各自最近一次执行。
+     * <p>
+     * 自动化目录页要在列表上标「通过 / 失败 / 未跑」，不能从「挂了哪些用例」倒推——
+     * 没挂用例的流程照样会跑，倒推的结果是永远「未跑」。
+     */
+    @GetMapping("/last-runs")
+    public ResponseEntity<Map<String, Map<String, Object>>> lastRuns(
+            @RequestParam(required = false) String ids) {
+        Map<String, Map<String, Object>> out = new java.util.LinkedHashMap<>();
+        if (ids == null || ids.isBlank()) {
+            return ResponseEntity.ok(out);
+        }
+        for (String raw : ids.split(",")) {
+            String id = raw == null ? "" : raw.trim();
+            if (id.isEmpty() || out.containsKey(id)) continue;
+            Task t = taskService.findLatestByFlowId(id);
+            Map<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("lastRunStatus", t == null || t.getStatus() == null ? null : t.getStatus().name());
+            m.put("lastRunAt", t == null ? null : (t.getUpdatedAt() != null ? t.getUpdatedAt() : t.getCreatedAt()));
+            m.put("lastRunTaskId", t == null ? null : t.getId());
+            out.put(id, m);
+        }
+        return ResponseEntity.ok(out);
+    }
+
     @GetMapping("/{id}")
     public ResponseEntity<UiFlow> get(@PathVariable String id) {
         UiFlow f = uiFlowService.get(id);

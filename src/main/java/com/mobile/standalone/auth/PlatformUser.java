@@ -24,6 +24,14 @@ public class PlatformUser {
     @JsonIgnore
     private String passwordHash;
 
+    /**
+     * 找回密码用的邮箱，全库唯一。
+     * <p>
+     * 没有它就没有任何办法确认「申请重置的人就是账号本人」，只能靠管理员一个个手工重置。
+     * 允许为空：存量账号是先有账号后有这个字段的，空着的那些走管理员重置。
+     */
+    private String email;
+
     /** ADMIN / TESTER / VIEWER */
     private String role;
 
@@ -34,6 +42,12 @@ public class PlatformUser {
      * 而人员离职恰恰是最需要能回溯的时候。
      */
     private Boolean enabled;
+
+    /** 最近一次改密时间。留给「改完密码把旧登录态踢掉」用（见忘记密码方案 P1） */
+    private LocalDateTime passwordChangedAt;
+
+    /** 管理员手工重置密码后置 1，逼用户下次登录先改掉——管理员设的密码管理员自己知道 */
+    private Boolean mustChangePassword;
 
     private LocalDateTime lastLoginAt;
     private LocalDateTime createdAt;

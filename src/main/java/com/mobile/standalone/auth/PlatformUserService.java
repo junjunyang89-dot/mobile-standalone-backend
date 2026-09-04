@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Slf4j
@@ -40,6 +41,50 @@ public class PlatformUserService {
             log.info("[auth] platform_users 表已就绪");
         } catch (Exception e) {
             log.warn("[auth] 建表失败: {}", e.getMessage());
+        }
+        // 存量库是先有表后有这几个字段的，逐个补。MySQL 没有 ADD COLUMN IF NOT EXISTS，
+        // 靠 try/catch 吞异常的话每次启动都刷一遍 warn，真出问题反而看不见
+        addColumnIfMissing("platform_users", "email",
+                "ADD COLUMN email VARCHAR(255) DEFAULT NULL COMMENT '找回密码用邮箱，唯一'");
+        addColumnIfMissing("platform_users", "password_changed_at",
+                "ADD COLUMN password_changed_at DATETIME DEFAULT NULL COMMENT '最近改密时间'");
+        addColumnIfMissing("platform_users", "must_change_password",
+                "ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0 COMMENT '强制下次登录改密'");
+        // 唯一索引允许多个 NULL，所以存量账号邮箱全空也能直接加，不用先补数据
+        addIndexIfMissing("platform_users", "uk_platform_users_email",
+                "ADD UNIQUE KEY uk_platform_users_email (email)");
+    }
+
+    private void addColumnIfMissing(String table, String column, String alter) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS"
+                            + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    Integer.class, table, column);
+            if (n != null && n > 0) {
+                return;
+            }
+            jdbcTemplate.execute("ALTER TABLE " + table + " " + alter);
+            log.info("[auth] {} 已补列 {}", table, column);
+        } catch (Exception e) {
+            log.warn("[auth] 补列 {}.{} 失败: {}", table, column, e.getMessage());
+        }
+    }
+
+    private void addIndexIfMissing(String table, String index, String alter) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.STATISTICS"
+                            + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?",
+                    Integer.class, table, index);
+            if (n != null && n > 0) {
+                return;
+            }
+            jdbcTemplate.execute("ALTER TABLE " + table + " " + alter);
+            log.info("[auth] {} 已加索引 {}", table, index);
+        } catch (Exception e) {
+            // 存量里已经有重复邮箱时会失败——那是数据问题，得人来看，不能悄悄跳过
+            log.warn("[auth] 加索引 {}.{} 失败（可能已有重复邮箱，需人工处理）: {}", table, index, e.getMessage());
         }
     }
 
@@ -72,6 +117,20 @@ public class PlatformUserService {
         return username == null || username.isBlank() ? null : userMapper.findByUsername(username.trim());
     }
 
+    public PlatformUser findByEmail(String email) {
+        String e = normalizeEmail(email);
+        return e.isEmpty() ? null : userMapper.findByEmail(e);
+    }
+
+    public boolean passwordMatches(String id, String rawPassword) {
+        PlatformUser user = get(id);
+        return user != null && PasswordHasher.matches(rawPassword, user.getPasswordHash());
+    }
+
+    private static String normalizeEmail(String email) {
+        return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
+    }
+
     /**
      * 校验口令。
      * <p>
@@ -96,6 +155,12 @@ public class PlatformUserService {
 
     @Transactional
     public PlatformUser create(String username, String displayName, String rawPassword, String role) {
+        return create(username, displayName, null, rawPassword, role);
+    }
+
+    @Transactional
+    public PlatformUser create(String username, String displayName, String email,
+                               String rawPassword, String role) {
         String name = username == null ? "" : username.trim();
         if (name.isEmpty()) {
             throw new IllegalArgumentException("登录名不能为空");
@@ -106,7 +171,13 @@ public class PlatformUserService {
         if (userMapper.findByUsername(name) != null) {
             throw new IllegalArgumentException("登录名已存在：" + name);
         }
+        String mail = normalizeEmail(email);
+        if (!mail.isEmpty() && userMapper.findByEmail(mail) != null) {
+            throw new IllegalArgumentException("这个邮箱已经绑在另一个账号上了：" + mail);
+        }
         PlatformUser user = new PlatformUser();
+        user.setEmail(mail.isEmpty() ? null : mail);
+        user.setMustChangePassword(false);
         user.setId("usr-" + UUID.randomUUID());
         user.setUsername(name);
         user.setDisplayName(displayName == null || displayName.isBlank() ? name : displayName.trim());
@@ -158,6 +229,7 @@ public class PlatformUserService {
         return get(id);
     }
 
+    /** 只落新密码，不动 must_change_password——三个调用方对这个标记的期望完全相反，交给它们各自决定 */
     @Transactional
     public void resetPassword(String id, String rawPassword) {
         if (rawPassword == null || rawPassword.length() < 6) {
@@ -170,6 +242,35 @@ public class PlatformUserService {
         userMapper.updatePassword(id, PasswordHasher.hash(rawPassword));
     }
 
+    /**
+     * 管理员手工重置。
+     * <p>
+     * 置 must_change_password：管理员设的这个密码<b>管理员自己知道</b>，而且多半是通过 IM 口头告诉本人的——
+     * 这是最常见的一条密码泄露路径。不逼着改掉，它就会一直是那个人的长期密码。
+     */
+    @Transactional
+    public void adminResetPassword(String id, String rawPassword) {
+        resetPassword(id, rawPassword);
+        userMapper.setMustChangePassword(id, true);
+    }
+
+    /** 走完邮箱验证码之后落新密码：不验旧密码（人本来就是因为忘了才走到这一步） */
+    @Transactional
+    public void applyNewPassword(String id, String rawPassword) {
+        resetPassword(id, rawPassword);
+        userMapper.setMustChangePassword(id, false);
+    }
+
+    @Transactional
+    public void updateEmail(String id, String email) {
+        String mail = normalizeEmail(email);
+        PlatformUser owner = mail.isEmpty() ? null : userMapper.findByEmail(mail);
+        if (owner != null && !owner.getId().equals(id)) {
+            throw new IllegalArgumentException("这个邮箱已经绑在另一个账号上了");
+        }
+        userMapper.updateEmail(id, mail.isEmpty() ? null : mail);
+    }
+
     /** 自己改自己的密码：要先验旧密码，否则一个被别人借用的登录态就能永久夺走账号 */
     @Transactional
     public void changeOwnPassword(String id, String oldPassword, String newPassword) {
@@ -180,7 +281,7 @@ public class PlatformUserService {
         if (!PasswordHasher.matches(oldPassword, existing.getPasswordHash())) {
             throw new IllegalArgumentException("原密码不对");
         }
-        resetPassword(id, newPassword);
+        applyNewPassword(id, newPassword);
     }
 
     @Transactional

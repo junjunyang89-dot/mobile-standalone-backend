@@ -4,6 +4,7 @@ import com.mobile.standalone.config.ReleaseDocProperties.Mail;
 import org.eclipse.angus.mail.util.MailSSLSocketFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 
@@ -16,6 +17,14 @@ import java.util.Properties;
 @Configuration
 public class ReleaseMailConfig {
 
+    /**
+     * 加了认证邮件通道（{@link AuthMailConfig}）之后，容器里有两个 JavaMailSender。
+     * <p>
+     * {@code ReleaseMailService} 是按类型注入的、没写限定符，两个候选会让它在<b>启动时</b>直接失败。
+     * 标 Primary 让它继续拿到发版这个（和以前完全一样的行为）；认证那边是显式
+     * {@code @Qualifier("authMailSender")}，不受影响。
+     */
+    @Primary
     @Bean
     public JavaMailSender releaseJavaMailSender(ReleaseDocProperties props) throws GeneralSecurityException {
         Mail m = props.getMail() != null ? props.getMail() : new Mail();

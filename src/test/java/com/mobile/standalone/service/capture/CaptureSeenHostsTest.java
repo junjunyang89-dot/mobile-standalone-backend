@@ -7,7 +7,9 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,5 +57,36 @@ class CaptureSeenHostsTest {
     void 抓包会改手机代理设置所以只读账号进不去() {
         assertThat(PermissionRules.minRoleForRoute("/packet-capture"))
                 .isEqualTo(PlatformRole.TESTER);
+    }
+
+    @Test
+    void H5域名会带端口一起忽略() {
+        List<String> patterns = PacketCaptureService.ignoreHostPatterns("pogpog.gg,unpkg.com");
+        assertThat(patterns).containsExactly(
+                PacketCaptureService.ignoreHostRegex("pogpog.gg"),
+                PacketCaptureService.ignoreHostRegex("unpkg.com"));
+
+        Pattern pog = Pattern.compile(PacketCaptureService.ignoreHostRegex("pogpog.gg"));
+        assertThat(pog.matcher("www-qa.pogpog.gg:443").find()).isTrue();
+        assertThat(pog.matcher("pogpog.gg:443").find()).isTrue();
+        assertThat(pog.matcher("gateway-qa.arca42.com:443").find()).isFalse();
+    }
+
+    @Test
+    void 接口域名带端口仍能被当作要抓的对象() {
+        // ignore 不能误伤网关，否则就是「页面能开、抓包是空的」
+        Pattern pog = Pattern.compile(PacketCaptureService.ignoreHostRegex("pogpog.gg"));
+        assertThat(pog.matcher("gwapi-staging.pwesports.cn:443").find()).isFalse();
+        assertThat(pog.matcher("172.16.108.140:443").find()).isFalse();
+    }
+
+    @Test
+    void 子域和hostPort都能命中且不会误伤后缀相似的域名() {
+        String re = PacketCaptureService.ignoreHostRegex("arca42.com");
+        Pattern p = Pattern.compile(re);
+        assertThat(p.matcher("arca42.com").find()).isTrue();
+        assertThat(p.matcher("arca42.com:443").find()).isTrue();
+        assertThat(p.matcher("gateway-qa.arca42.com:443").find()).isTrue();
+        assertThat(p.matcher("evilarca42.com:443").find()).isFalse();
     }
 }

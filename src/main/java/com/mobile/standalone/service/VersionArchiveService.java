@@ -202,9 +202,16 @@ public class VersionArchiveService {
         }
         String appVersion = req.getAppVersion() == null || req.getAppVersion().isBlank()
                 ? label : req.getAppVersion().trim();
+        // 先按名称找：页面下拉选的是「9.3 国内客户端」，版本号可能是 4.1.5。
+        // 如果还按 (版本号, 名称) 一起比，手选已有名称却对不上，会再插一条。
         List<String> existing = jdbc.queryForList(
-                "SELECT id FROM release_version_archives WHERE app_version = ? AND release_label = ?",
-                String.class, appVersion, label);
+                "SELECT id FROM release_version_archives WHERE release_label = ?",
+                String.class, label);
+        if (existing.isEmpty()) {
+            existing = jdbc.queryForList(
+                    "SELECT id FROM release_version_archives WHERE app_version = ? AND release_label = ?",
+                    String.class, appVersion, label);
+        }
         if (!existing.isEmpty()) {
             // 同名版本已存在就直接返回它，不报错——重复点一次「新建」不该变成一个错误弹窗
             return get(existing.get(0));

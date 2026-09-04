@@ -58,6 +58,8 @@ public class ApiTestScheduleService {
                         INDEX idx_due (enabled, next_run_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
+            ensureColumn("api_test_schedules", "recent_results",
+                    "TEXT NULL COMMENT '最近几次执行 JSON，列表页近7次圆点'");
             log.info("[api-test-schedule] 表已就绪");
             seedDebugSmokeScheduleIfAbsent();
         } catch (Exception e) {
@@ -94,7 +96,11 @@ public class ApiTestScheduleService {
     }
 
     public List<ApiTestSchedule> list() {
-        return mapper.findAll();
+        List<ApiTestSchedule> rows = mapper.findAll();
+        for (ApiTestSchedule s : rows) {
+            attachRecent(s);
+        }
+        return rows;
     }
 
     /**
@@ -145,7 +151,7 @@ public class ApiTestScheduleService {
         } else {
             mapper.update(body);
         }
-        return mapper.findById(body.getId());
+        return attachRecent(mapper.findById(body.getId()));
     }
 
     public boolean delete(String id) {
@@ -236,6 +242,8 @@ public class ApiTestScheduleService {
         patch.setLastRunId(result == null ? null : result.getRunId());
         patch.setLastStatus(status);
         patch.setLastMessage(message == null ? null : message.substring(0, Math.min(message.length(), 512)));
+        patch.setRecentResults(ScheduleRecentRuns.push(
+                s.getRecentResults(), status, patch.getLastRunId(), now, message));
         // 即使这次挂了也要推进下次时间，否则会卡在同一个时间点每分钟重试一次
         patch.setNextRunAt(advance ? safeNext(s.getCron(), now) : s.getNextRunAt());
         mapper.updateAfterRun(patch);
@@ -264,5 +272,27 @@ public class ApiTestScheduleService {
                         + " ORDER BY sort_order ASC, name ASC",
                 String.class,
                 project == null || project.isBlank() ? new Object[0] : new Object[]{project});
+    }
+
+    private ApiTestSchedule attachRecent(ApiTestSchedule s) {
+        if (s != null) {
+            s.setRecentRuns(ScheduleRecentRuns.hydrate(s));
+        }
+        return s;
+    }
+
+    private void ensureColumn(String table, String column, String definition) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    Integer.class, table, column);
+            if (n != null && n == 0) {
+                jdbcTemplate.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+                log.info("[api-test-schedule] 已补充 {}.{}", table, column);
+            }
+        } catch (Exception e) {
+            log.debug("[api-test-schedule] {}.{} 列检查跳过: {}", table, column, e.getMessage());
+        }
     }
 }

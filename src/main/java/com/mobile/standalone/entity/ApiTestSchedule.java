@@ -1,8 +1,11 @@
 package com.mobile.standalone.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 定时执行。
@@ -31,10 +34,24 @@ public class ApiTestSchedule {
     private String lastStatus;
     private String lastMessage;
 
+    /** 最近几次执行的 JSON，接口不直接暴露，用 {@link #recentRuns} */
+    @JsonIgnore
+    private String recentResults;
+
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
     // ---- 查询时拼上 ----
     private String collectionName;
     private Integer caseCount;
+    /** 近 7 次，新的在前。给列表页画圆点和算成功率 */
+    private List<RecentRun> recentRuns = new ArrayList<>();
+
+    @Data
+    public static class RecentRun {
+        private String status;
+        private String runId;
+        private LocalDateTime at;
+        private String message;
+    }
 }

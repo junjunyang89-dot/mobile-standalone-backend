@@ -1,5 +1,7 @@
 package com.mobile.standalone.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +27,8 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 public class IssueTrackingService {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -54,6 +58,9 @@ public class IssueTrackingService {
                         status VARCHAR(16) NOT NULL DEFAULT 'TRACKING' COMMENT 'TRACKING/VERIFYING/FIXED/DEPLOYED/CLOSED',
                         priority VARCHAR(16) DEFAULT 'MEDIUM' COMMENT 'CRITICAL/HIGH/MEDIUM/LOW',
                         note TEXT DEFAULT NULL COMMENT '备注',
+                        project_type VARCHAR(16) NOT NULL DEFAULT 'APP' COMMENT 'APP/PVP/WEB',
+                        images TEXT DEFAULT NULL COMMENT '截图 URL JSON 数组',
+                        related_apis TEXT DEFAULT NULL COMMENT '涉及的接口 JSON 数组',
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         INDEX idx_env (environment),
@@ -62,10 +69,44 @@ public class IssueTrackingService {
                         INDEX idx_issue_no (issue_no)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """);
+            ensureColumn("project_type",
+                    "VARCHAR(16) NOT NULL DEFAULT 'APP' COMMENT 'APP/PVP/WEB'");
+            ensureColumn("images", "TEXT DEFAULT NULL COMMENT '截图 URL JSON 数组'");
+            ensureColumn("related_apis", "TEXT DEFAULT NULL COMMENT '涉及的接口 JSON 数组'");
+            ensureIndex("idx_project", "(project_type)");
             backfillIssueNo();
             log.info("[issue-tracking] 表已就绪");
         } catch (Exception e) {
             log.warn("[issue-tracking] 建表失败: {}", e.getMessage());
+        }
+    }
+
+    private void ensureColumn(String column, String definition) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    Integer.class, "issue_tracking", column);
+            if (n != null && n == 0) {
+                jdbcTemplate.execute("ALTER TABLE issue_tracking ADD COLUMN " + column + " " + definition);
+                log.info("[issue-tracking] 已补充 {} 列", column);
+            }
+        } catch (Exception e) {
+            log.debug("[issue-tracking] {} 列检查跳过: {}", column, e.getMessage());
+        }
+    }
+
+    private void ensureIndex(String name, String columns) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.STATISTICS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?",
+                    Integer.class, "issue_tracking", name);
+            if (n != null && n == 0) {
+                jdbcTemplate.execute("ALTER TABLE issue_tracking ADD INDEX " + name + " " + columns);
+            }
+        } catch (Exception e) {
+            log.debug("[issue-tracking] 索引 {} 检查跳过: {}", name, e.getMessage());
         }
     }
 
@@ -89,6 +130,8 @@ public class IssueTrackingService {
             String status,
             String priority,
             String trackingTester,
+            String projectType,
+            String developer,
             String keyword) {
         StringBuilder sql = new StringBuilder("""
                 SELECT id, issue_no AS issueNo, title, environment, source, module,
@@ -96,6 +139,7 @@ public class IssueTrackingService {
                        test_status AS testStatus, verified, deployed,
                        developers, origin_note AS originNote, dev_fixed AS devFixed,
                        tracking_tester AS trackingTester, status, priority, note,
+                       project_type AS projectType, images, related_apis AS relatedApis,
                        created_at AS createdAt, updated_at AS updatedAt
                   FROM issue_tracking
                  WHERE 1=1
@@ -117,11 +161,19 @@ public class IssueTrackingService {
             sql.append(" AND tracking_tester = ?");
             args.add(trackingTester.trim());
         }
+        if (projectType != null && !projectType.isBlank() && !"ALL".equalsIgnoreCase(projectType)) {
+            sql.append(" AND project_type = ?");
+            args.add(normalizeProjectType(projectType));
+        }
+        if (developer != null && !developer.isBlank()) {
+            sql.append(" AND developers LIKE ?");
+            args.add("%" + developer.trim() + "%");
+        }
         if (keyword != null && !keyword.isBlank()) {
             String like = "%" + keyword.trim() + "%";
             sql.append(" AND (title LIKE ? OR description LIKE ? OR module LIKE ?");
-            sql.append(" OR developers LIKE ? OR CAST(issue_no AS CHAR) LIKE ?)");
-            for (int i = 0; i < 5; i++) {
+            sql.append(" OR developers LIKE ? OR CAST(issue_no AS CHAR) LIKE ? OR related_apis LIKE ?)");
+            for (int i = 0; i < 6; i++) {
                 args.add(like);
             }
         }
@@ -136,6 +188,7 @@ public class IssueTrackingService {
         }
 
         Set<String> testers = new LinkedHashSet<>();
+        Set<String> developers = new LinkedHashSet<>();
         Map<String, Long> statusCounts = new LinkedHashMap<>();
         statusCounts.put("ALL", (long) issues.size());
         for (String st : STATUSES) {
@@ -146,6 +199,9 @@ public class IssueTrackingService {
             if (tester != null && !String.valueOf(tester).isBlank()) {
                 testers.add(String.valueOf(tester));
             }
+            for (String name : splitNames(row.get("developers"))) {
+                developers.add(name);
+            }
             String st = String.valueOf(row.get("status"));
             statusCounts.merge(st, 1L, Long::sum);
         }
@@ -153,6 +209,7 @@ public class IssueTrackingService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("issues", issues);
         out.put("testers", new ArrayList<>(testers));
+        out.put("developers", new ArrayList<>(developers));
         out.put("statusCounts", statusCounts);
         return out;
     }
@@ -168,6 +225,7 @@ public class IssueTrackingService {
                            test_status AS testStatus, verified, deployed,
                            developers, origin_note AS originNote, dev_fixed AS devFixed,
                            tracking_tester AS trackingTester, status, priority, note,
+                           project_type AS projectType, images, related_apis AS relatedApis,
                            created_at AS createdAt, updated_at AS updatedAt
                       FROM issue_tracking
                      WHERE id = ?
@@ -189,8 +247,9 @@ public class IssueTrackingService {
                 INSERT INTO issue_tracking
                     (id, issue_no, title, environment, source, module, description,
                      reproduction_steps, test_status, verified, deployed, developers,
-                     origin_note, dev_fixed, tracking_tester, status, priority, note)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     origin_note, dev_fixed, tracking_tester, status, priority, note,
+                     project_type, images, related_apis)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 id, nextIssueNo(), title.trim(),
                 normalizeEnvironment(body.get("environment")),
@@ -198,7 +257,9 @@ public class IssueTrackingService {
                 str(body.get("reproductionSteps")), str(body.get("testStatus")),
                 sf.verified(), sf.deployed(), str(body.get("developers")),
                 str(body.get("originNote")), sf.devFixed(), str(body.get("trackingTester")),
-                sf.status(), normalizePriority(body.get("priority")), str(body.get("note")));
+                sf.status(), normalizePriority(body.get("priority")), str(body.get("note")),
+                normalizeProjectType(body.get("projectType")), imagesToJson(body.get("images")),
+                imagesToJson(firstPresent(body, "relatedApis", "related_apis")));
         log.info("[issue-tracking] 新增 {}", title);
         return id;
     }
@@ -215,7 +276,8 @@ public class IssueTrackingService {
                        SET title = ?, environment = ?, source = ?, module = ?,
                            description = ?, reproduction_steps = ?, test_status = ?,
                            verified = ?, deployed = ?, developers = ?, origin_note = ?,
-                           dev_fixed = ?, tracking_tester = ?, status = ?, priority = ?, note = ?
+                           dev_fixed = ?, tracking_tester = ?, status = ?, priority = ?, note = ?,
+                           project_type = ?, images = ?, related_apis = ?
                      WHERE id = ?
                     """,
                     body.containsKey("title") ? str(body.get("title")) : str(existing.get("title")),
@@ -241,6 +303,15 @@ public class IssueTrackingService {
                             ? normalizePriority(body.get("priority"))
                             : normalizePriority(existing.get("priority")),
                     body.containsKey("note") ? str(body.get("note")) : str(existing.get("note")),
+                    body.containsKey("projectType")
+                            ? normalizeProjectType(body.get("projectType"))
+                            : normalizeProjectType(existing.get("projectType")),
+                    body.containsKey("images")
+                            ? imagesToJson(body.get("images"))
+                            : imagesToJson(existing.get("images")),
+                    body.containsKey("relatedApis") || body.containsKey("related_apis")
+                            ? imagesToJson(firstPresent(body, "relatedApis", "related_apis"))
+                            : imagesToJson(existing.get("relatedApis")),
                     id) > 0;
         } catch (Exception e) {
             log.warn("[issue-tracking] 更新失败 {}: {}", id, e.getMessage());
@@ -279,6 +350,11 @@ public class IssueTrackingService {
             m.put("priority", normalizePriority(m.get("priority")));
             m.put("issueCode", formatIssueCode(m.get("issueNo")));
             m.put("environmentLabel", "PROD".equals(m.get("environment")) ? "线上" : "测试");
+            String projectType = normalizeProjectType(m.get("projectType"));
+            m.put("projectType", projectType);
+            m.put("projectTypeLabel", projectType);
+            m.put("images", parseImages(m.get("images")));
+            m.put("relatedApis", parseImages(m.get("relatedApis")));
             out.add(m);
         }
         return out;
@@ -361,6 +437,17 @@ public class IssueTrackingService {
         return "PROD".equals(s) ? "PROD" : "TEST";
     }
 
+    private String normalizeProjectType(Object v) {
+        if (v == null || String.valueOf(v).isBlank()) {
+            return "APP";
+        }
+        String s = String.valueOf(v).trim().toUpperCase(Locale.ROOT);
+        return switch (s) {
+            case "PVP", "WEB" -> s;
+            default -> "APP";
+        };
+    }
+
     private String normalizePriority(Object v) {
         if (v == null || String.valueOf(v).isBlank()) {
             return "MEDIUM";
@@ -370,6 +457,76 @@ public class IssueTrackingService {
             case "CRITICAL", "HIGH", "LOW" -> s;
             default -> "MEDIUM";
         };
+    }
+
+    private List<String> parseImages(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        if (raw instanceof List<?> list) {
+            List<String> out = new ArrayList<>();
+            for (Object o : list) {
+                if (o != null && !String.valueOf(o).isBlank()) {
+                    out.add(String.valueOf(o).trim());
+                }
+            }
+            return out;
+        }
+        String s = String.valueOf(raw).trim();
+        if (s.isEmpty() || "[]".equals(s)) {
+            return List.of();
+        }
+        try {
+            JsonNode n = JSON.readTree(s);
+            if (n.isArray()) {
+                List<String> out = new ArrayList<>();
+                for (JsonNode e : n) {
+                    String u = e.asText();
+                    if (u != null && !u.isBlank()) {
+                        out.add(u.trim());
+                    }
+                }
+                return out;
+            }
+        } catch (Exception ignored) {
+            /* 非 JSON 就当没有图 */
+        }
+        return List.of();
+    }
+
+    private String imagesToJson(Object raw) {
+        List<String> list = parseImages(raw);
+        if (list.isEmpty()) {
+            return null;
+        }
+        try {
+            return JSON.writeValueAsString(list);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static List<String> splitNames(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (String part : String.valueOf(raw).split("[,，、]")) {
+            String name = part.trim();
+            if (!name.isEmpty()) {
+                out.add(name);
+            }
+        }
+        return out;
+    }
+
+    private static Object firstPresent(Map<String, Object> body, String... keys) {
+        for (String k : keys) {
+            if (body.containsKey(k)) {
+                return body.get(k);
+            }
+        }
+        return null;
     }
 
     private static String str(Object v) {

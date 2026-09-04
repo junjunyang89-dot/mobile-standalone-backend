@@ -18,10 +18,13 @@ CREATE TABLE IF NOT EXISTS issue_tracking (
     status VARCHAR(16) NOT NULL DEFAULT 'TRACKING' COMMENT 'TRACKING/VERIFYING/FIXED/DEPLOYED/CLOSED',
     priority VARCHAR(16) DEFAULT 'MEDIUM' COMMENT 'CRITICAL/HIGH/MEDIUM/LOW',
     note TEXT DEFAULT NULL COMMENT '备注',
+    project_type VARCHAR(16) NOT NULL DEFAULT 'APP' COMMENT 'APP/PVP/WEB',
+    images TEXT DEFAULT NULL COMMENT '截图 URL JSON 数组',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_env (environment),
     INDEX idx_status (status),
     INDEX idx_tester (tracking_tester),
-    INDEX idx_issue_no (issue_no)
+    INDEX idx_issue_no (issue_no),
+    INDEX idx_project (project_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

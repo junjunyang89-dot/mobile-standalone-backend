@@ -52,7 +52,8 @@ public class PlatformUserController {
     public ResponseEntity<?> create(@RequestBody CreateRequest req) {
         try {
             return ResponseEntity.ok(userService.create(
-                    req.getUsername(), req.getDisplayName(), req.getPassword(), req.getRole()));
+                    req.getUsername(), req.getDisplayName(), req.getEmail(),
+                    req.getPassword(), req.getRole()));
         } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
@@ -61,6 +62,9 @@ public class PlatformUserController {
     @PutMapping("/{id}")
     public ResponseEntity<?> update(@PathVariable String id, @RequestBody UpdateRequest req) {
         try {
+            if (req.getEmail() != null) {
+                userService.updateEmail(id, req.getEmail());
+            }
             PlatformUser updated = userService.update(
                     id, req.getDisplayName(), req.getRole(), req.getEnabled());
             return updated == null
@@ -74,8 +78,11 @@ public class PlatformUserController {
     @PostMapping("/{id}/reset-password")
     public ResponseEntity<?> resetPassword(@PathVariable String id, @RequestBody ResetRequest req) {
         try {
-            userService.resetPassword(id, req.getPassword());
-            return ResponseEntity.ok(Map.of("success", true));
+            // 走 adminResetPassword 而不是 resetPassword：管理员设的密码管理员自己知道，
+            // 而且多半是 IM 口头告诉本人的，必须逼着下次登录改掉
+            userService.adminResetPassword(id, req.getPassword());
+            return ResponseEntity.ok(Map.of("success", true,
+                    "message", "已重置，该账号下次登录会被要求先改密码"));
         } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
@@ -108,6 +115,8 @@ public class PlatformUserController {
     public static class CreateRequest {
         private String username;
         private String displayName;
+        /** 建号时就填上，是让这个人以后能自助找回密码的唯一办法 */
+        private String email;
         private String password;
         private String role;
     }
@@ -115,6 +124,8 @@ public class PlatformUserController {
     @Data
     public static class UpdateRequest {
         private String displayName;
+        /** 传空串＝解绑。管理员填的邮箱视为可信，不需要用户再确认——账号本来就是管理员建的 */
+        private String email;
         private String role;
         private Boolean enabled;
     }

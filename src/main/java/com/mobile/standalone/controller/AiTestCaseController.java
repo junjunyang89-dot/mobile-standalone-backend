@@ -33,6 +33,7 @@ public class AiTestCaseController {
     private final com.mobile.standalone.service.apitest.RequirementEndpointService requirementEndpointService;
     private final com.mobile.standalone.service.RequirementCoverageService requirementCoverageService;
     private final com.mobile.standalone.service.apitest.RequirementCaseGenerator caseGenerator;
+    private final com.mobile.standalone.service.CaseAskService caseAskService;
 
     /** 分页列表：GET /ai-test-cases?category=&pageName=&priority=&status=&batchId=&page=1&size=20 */
     @GetMapping
@@ -325,11 +326,47 @@ public class AiTestCaseController {
         return ResponseEntity.ok(aiTestCaseService.listVersions(category));
     }
 
-    @GetMapping("/{id}")
+    /** id 必须是数字，否则 {@code /ask} 会被当成「查 id=ask」，POST 就变成 405。 */
+    @GetMapping("/{id:\\d+}")
     public ResponseEntity<?> get(@PathVariable Long id) {
         AiTestCase row = aiTestCaseService.getById(id);
         if (row == null) return ResponseEntity.notFound().build();
         return ResponseEntity.ok(aiTestCaseService.toView(row));
+    }
+
+    /**
+     * 需求页标题旁还没点到某一条 TC 时，按整单问。
+     * 不用 {@code POST /ask}：它和 {@code GET /{id}} 抢路径，未重启时就是
+     * 「Method POST is not supported」。
+     */
+    @PostMapping("/requirements/{requirementNo}/ask")
+    public ResponseEntity<?> askRequirement(
+            @PathVariable String requirementNo,
+            @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            return ResponseEntity.ok(caseAskService.ask(
+                    null,
+                    requirementNo,
+                    str(body == null ? null : body.get("question")),
+                    com.mobile.standalone.service.CaseAskService.parseHistory(body == null ? null : body.get("history"))));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{id:\\d+}/ask")
+    public ResponseEntity<?> ask(@PathVariable Long id, @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            return ResponseEntity.ok(caseAskService.ask(
+                    id,
+                    null,
+                    str(body == null ? null : body.get("question")),
+                    com.mobile.standalone.service.CaseAskService.parseHistory(body == null ? null : body.get("history"))));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
     }
 
     /**
@@ -419,7 +456,7 @@ public class AiTestCaseController {
     }
 
     /** 编辑：只覆盖请求里给了的字段。AI 生成的用例也能在这里改，改完仍保留 source=AI */
-    @PutMapping("/{id}")
+    @PutMapping("/{id:\\d+}")
     public ResponseEntity<?> update(@PathVariable Long id, @RequestBody AiTestCase body) {
         try {
             AiTestCase updated = aiTestCaseService.updateManual(id, body);
@@ -488,7 +525,7 @@ public class AiTestCaseController {
     }
 
     /** 复核：PATCH /ai-test-cases/{id}/status  body: { "status": "REVIEWED" } */
-    @PatchMapping("/{id}/status")
+    @PatchMapping("/{id:\\d+}/status")
     public ResponseEntity<?> updateStatus(@PathVariable Long id, @RequestBody Map<String, String> body) {
         try {
             String status = body == null ? null : body.get("status");
@@ -501,7 +538,7 @@ public class AiTestCaseController {
     }
 
     /** 单条提升为线上稳定 */
-    @PostMapping("/{id}/promote")
+    @PostMapping("/{id:\\d+}/promote")
     public ResponseEntity<?> promote(@PathVariable Long id) {
         try {
             AiTestCase updated = aiTestCaseService.promote(id);
@@ -533,7 +570,7 @@ public class AiTestCaseController {
         }
     }
 
-    @DeleteMapping("/{id}")
+    @DeleteMapping("/{id:\\d+}")
     public ResponseEntity<?> delete(@PathVariable Long id) {
         return aiTestCaseService.delete(id)
                 ? ResponseEntity.ok(Map.of("ok", true))

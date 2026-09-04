@@ -30,6 +30,9 @@ class PermissionRulesTest {
         assertThat(PermissionRules.required("POST", "/api-changes/diff")).isEqualTo(PlatformRole.VIEWER);
         assertThat(PermissionRules.required("POST", "/api-code-dirs/analyze")).isEqualTo(PlatformRole.VIEWER);
         assertThat(PermissionRules.required("POST", "/ui-flows/preview")).isEqualTo(PlatformRole.VIEWER);
+        assertThat(PermissionRules.required("POST", "/ai-test-cases/12/ask")).isEqualTo(PlatformRole.VIEWER);
+        assertThat(PermissionRules.required("POST", "/ai-test-cases/requirements/APP-9069/ask"))
+                .isEqualTo(PlatformRole.VIEWER);
     }
 
     /** 只读用户必须能改自己的密码，否则只能去找管理员重置——那不是权限，是障碍 */
@@ -61,6 +64,8 @@ class PermissionRulesTest {
     void 截图和登录接口公开() {
         assertThat(PermissionRules.isPublic("/tmp/screenshots/task-1/1.png")).isTrue();
         assertThat(PermissionRules.isPublic("/ui-element-previews/a.png")).isTrue();
+        assertThat(PermissionRules.isPublic("/bug-images/2026-09-04/a.png")).isTrue();
+        assertThat(PermissionRules.isPublic("/issue-images/2026-09-04/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/auth/login")).isTrue();
         assertThat(PermissionRules.isPublic("/health")).isTrue();
         // 业务接口一律不公开
@@ -94,7 +99,37 @@ class PermissionRulesTest {
     void 路由权限按角色下发() {
         assertThat(PermissionRules.minRoleForRoute("/platform-users")).isEqualTo(PlatformRole.ADMIN);
         assertThat(PermissionRules.minRoleForRoute("/app-online-regression")).isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.minRoleForRoute("/app-automation")).isEqualTo(PlatformRole.TESTER);
         // 没列出来的默认可见——菜单是给人找路的，默认藏起来只会让人以为功能没了
         assertThat(PermissionRules.minRoleForRoute("/reports")).isEqualTo(PlatformRole.VIEWER);
+    }
+
+    /** 忘记密码的人本来就登录不了，这两个必须免登录——防护靠恒定响应 + 限流，不靠鉴权 */
+    @Test
+    void 忘记密码接口免登录() {
+        assertThat(PermissionRules.isPublic("/auth/forgot-password")).isTrue();
+        assertThat(PermissionRules.isPublic("/auth/reset-password")).isTrue();
+    }
+
+    /**
+     * 免登录前缀是按 startsWith 匹配的，很容易误伤同名后缀。
+     * 管理员那条重置接口路径里也有 reset-password，放开了就是任何人能重置任何人的密码。
+     */
+    @Test
+    void 管理员重置接口不能被误放行() {
+        assertThat(PermissionRules.isPublic("/platform-users/usr-1/reset-password")).isFalse();
+        assertThat(PermissionRules.required("POST", "/platform-users/usr-1/reset-password"))
+                .isEqualTo(PlatformRole.ADMIN);
+    }
+
+    /** 绑邮箱是每个人自己的事：只读账号也得能绑，否则他们永远只能找管理员重置 */
+    @Test
+    void 绑邮箱只读账号也能用() {
+        assertThat(PermissionRules.required("POST", "/auth/bind-email/code"))
+                .isEqualTo(PlatformRole.VIEWER);
+        assertThat(PermissionRules.required("POST", "/auth/bind-email/confirm"))
+                .isEqualTo(PlatformRole.VIEWER);
+        // 但它要登录，不能是公开接口——公开了就能往任意邮箱发信
+        assertThat(PermissionRules.isPublic("/auth/bind-email/code")).isFalse();
     }
 }
