@@ -276,8 +276,11 @@ public class ApiTestController {
 
     /** secret 的值返回掩码。真值只在执行时从库里取，不下发给浏览器 */
     @GetMapping("/envs/{environment}/variables")
-    public ResponseEntity<List<EnvVariable>> listVariables(@PathVariable String environment) {
-        return ResponseEntity.ok(variableService.listMasked(environment));
+    public ResponseEntity<List<EnvVariable>> listVariables(
+            @PathVariable String environment,
+            /** 传项目码则同时列出该项目专属变量；不传只列全局 */
+            @RequestParam(required = false) String project) {
+        return ResponseEntity.ok(variableService.listMasked(environment, project));
     }
 
     @PutMapping("/envs/{environment}/variables")
@@ -291,8 +294,11 @@ public class ApiTestController {
     }
 
     @DeleteMapping("/envs/{environment}/variables/{name}")
-    public ResponseEntity<?> deleteVariable(@PathVariable String environment, @PathVariable String name) {
-        variableService.delete(environment, name);
+    public ResponseEntity<?> deleteVariable(@PathVariable String environment,
+                                            @PathVariable String name,
+                                            /** 不传＝删全局那条；项目专属变量必须带上项目码 */
+                                            @RequestParam(required = false) String project) {
+        variableService.delete(environment, project, name);
         return ResponseEntity.ok(Map.of("ok", true));
     }
 

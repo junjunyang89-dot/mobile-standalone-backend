@@ -34,6 +34,18 @@ public class Requirement {
     /** 归属版本，对应 {@code release_version_archives.id} */
     private String versionId;
 
+    /**
+     * 开发分支，如 {@code fch/20260804/APP-8928}。
+     * <p>
+     * 记在需求上而不是集合上：一个需求对应一个分支，而一个需求可能有多个集合，
+     * 记在集合上等于同一个事实存好几份。分支名里本来就带着单号，
+     * 接口对比分析时 {@code BranchIssueKey} 靠它自动把变更接口挂到需求上。
+     */
+    private String sourceBranch;
+
+    /** 分支合并到 master 的时间；「本单上线」时写入。空＝尚未上线 */
+    private LocalDateTime mergedAt;
+
     private String status;
     private String owner;
     private String note;

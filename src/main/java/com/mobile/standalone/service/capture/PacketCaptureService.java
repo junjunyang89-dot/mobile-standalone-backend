@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 @Service
+@lombok.RequiredArgsConstructor
 public class PacketCaptureService {
 
     @Value("${app.capture.mitmdump:mitmdump}")
@@ -61,6 +62,7 @@ public class PacketCaptureService {
     @Value("${app.capture.passthrough-hosts:pogpog.gg,unpkg.com}")
     private String passthroughHosts;
 
+    private final CaptureStore captureStore;
     private final ObjectMapper json = new ObjectMapper();
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
     /** 上一场抓包见到的域名。结束之后 session 就没了，但这份清单还得能查——
@@ -69,6 +71,56 @@ public class PacketCaptureService {
     /** 上一场抓包的落盘位置。结束之后还要能点开看响应体——
      *  「抓完了再看」才是常态，抓的时候人在手机上操作，根本没空看屏幕 */
     private volatile Path lastOut;
+
+    /**
+     * 找到 mitmdump 可执行文件。
+     * <p>
+     * 不能直接依赖 PATH：从 IDE 或 launchd 起的进程拿不到登录 shell 的 PATH，
+     * {@code /opt/homebrew/bin} 常常不在里面。同一个坑 AppiumServerManager
+     * 已经踩过并用候选路径解决了，这里照做。
+     * <p>
+     * 配置里填了绝对路径就直接用它——那是给装在非常规位置的人留的出口。
+     */
+    private String resolveMitmdump() throws IOException {
+        String configured = mitmdumpBin == null ? "" : mitmdumpBin.trim();
+        if (configured.contains("/")) {
+            if (Files.isExecutable(Path.of(configured))) {
+                return configured;
+            }
+            throw new IOException("配置的 mitmdump 路径不可执行：" + configured
+                    + "（app.capture.mitmdump）");
+        }
+        String home = System.getProperty("user.home");
+        List<String> candidates = List.of(
+                "/opt/homebrew/bin/mitmdump",              // Apple Silicon 的 brew
+                "/usr/local/bin/mitmdump",                 // Intel 的 brew
+                home + "/.local/bin/mitmdump",             // pipx / pip --user
+                "/opt/homebrew/opt/mitmproxy/bin/mitmdump");
+        for (String c : candidates) {
+            if (Files.isExecutable(Path.of(c))) {
+                return c;
+            }
+        }
+        // 兜底交给 PATH：这条在终端里起的后端能走通，从 IDE 起的多半走不通
+        if (looksOnPath(configured.isEmpty() ? "mitmdump" : configured)) {
+            return configured.isEmpty() ? "mitmdump" : configured;
+        }
+        throw new IOException("没找到 mitmdump，抓包起不来。先装上：brew install mitmproxy"
+                + "；装在别处的话在 application.yml 里配 app.capture.mitmdump 为绝对路径");
+    }
+
+    private boolean looksOnPath(String bin) {
+        String path = System.getenv("PATH");
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        for (String dir : path.split(java.io.File.pathSeparator)) {
+            if (!dir.isBlank() && Files.isExecutable(Path.of(dir, bin))) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     public java.util.Map<String, Integer> lastSeenHosts() {
         return lastSeen;
@@ -94,31 +146,6 @@ public class PacketCaptureService {
         } catch (Exception e) {
             log.warn("[capture] 读取 body 失败 seq={}: {}", seq, e.getMessage());
             return null;
-        }
-    }
-
-    /**
-     * 开新的一场时，把上一场的 body 删掉。
-     * <p>
-     * body 是留给「抓完再看」的，开了新的一场就说明上一场不看了。
-     * 不删的话，临时目录会随着抓包次数一直涨——而没人会想到去清它。
-     */
-    private void purgeLastBodies() {
-        Path old = lastOut;
-        if (old == null) {
-            return;
-        }
-        Path dir = Path.of(old.toAbsolutePath() + ".details");
-        try (var walk = Files.walk(dir)) {
-            walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException ignore) {
-                    // 删不掉就算了，绝不能因为清理失败让新的一场起不来
-                }
-            });
-        } catch (IOException ignore) {
-            // 目录不存在是正常的：上一场可能一条都没抓到
         }
     }
 
@@ -154,13 +181,17 @@ public class PacketCaptureService {
             // 同时跑两场会抢同一个端口，而且抓出来的东西会混进同一个需求
             throw new IllegalStateException("已经有一场抓包在进行中，先结束它");
         }
-        purgeLastBodies();
+        // 不再删上一场：那正是「重启/再抓一次就没了」的原因。
+        // 磁盘增长改由 CaptureStore 的保留策略兜（默认留 30 天）
         Path script = extractScript();
-        Path out = Files.createTempFile("capture-", ".jsonl");
+        String sessionId = "cap-" + System.currentTimeMillis();
+        // 落到稳定目录而不是 createTempFile：/tmp 会被系统清理，
+        // 而压测配比和「昨天那次再看一眼」都要求它留得住
+        Path out = captureStore.flowFileOf(sessionId);
         String hostList = hosts == null || hosts.isBlank() ? defaultHosts : hosts.trim();
 
         List<String> cmd = new ArrayList<>(List.of(
-                mitmdumpBin, "-q", "-p", String.valueOf(proxyPort),
+                resolveMitmdump(), "-q", "-p", String.valueOf(proxyPort),
                 "-s", script.toAbsolutePath().toString(),
                 "--set", "out=" + out.toAbsolutePath(),
                 "--set", "hosts=" + hostList));
@@ -174,7 +205,7 @@ public class PacketCaptureService {
                 .start();
 
         Session s = new Session();
-        s.id = "cap-" + System.currentTimeMillis();
+        s.id = sessionId;
         s.deviceId = deviceId;
         s.platform = platform == null ? "ANDROID" : platform.toUpperCase(Locale.ROOT);
         s.requirementNo = requirementNo;
@@ -195,8 +226,9 @@ public class PacketCaptureService {
             s.manualProxyTip = iosTip();
         }
         sessions.put(s.id, s);
-        log.info("[capture] 开始 {} device={} 域名={} 不解密={}",
-                s.id, deviceId, hostList, ignoreHostPatterns(passthroughHosts));
+        captureStore.open(s.id, deviceId, s.platform, requirementNo, null, hostList, out.getParent());
+        log.info("[capture] 开始 {} device={} 域名={} 不解密={} 落盘={}",
+                s.id, deviceId, hostList, ignoreHostPatterns(passthroughHosts), out.getParent());
         return s;
     }
 
@@ -255,6 +287,7 @@ public class PacketCaptureService {
         List<JsonNode> rows = readFlows(s.outFile);
         lastSeen = readSeen(s.outFile);
         lastOut = s.outFile;
+        captureStore.close(sessionId, rows.size(), lastSeen.size());
         log.info("[capture] 结束 {}，抓到 {} 条（代理上共见到 {} 个域名）",
                 sessionId, rows.size(), lastSeen.size());
         return rows;

@@ -5,6 +5,8 @@ import com.mobile.standalone.entity.ApiProject;
 import com.mobile.standalone.mapper.ApiProjectMapper;
 import com.mobile.standalone.service.ApiChangeReportService;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer;
+import com.mobile.standalone.service.apichange.EndpointDependencyResolver;
+import com.mobile.standalone.service.apichange.ConcurrencyRiskScanner;
 import lombok.Data;
 import com.mobile.standalone.service.apitest.BranchIssueKey;
 import com.mobile.standalone.service.apitest.RequirementEndpointService;
@@ -117,6 +119,45 @@ public class ApiChangeController {
             t.setRemark(sc.getRemark());
             t.setTestHints(com.mobile.standalone.service.apichange.TableTestHints.derive(sc.getDdl()));
         }
+    }
+
+    /**
+     * 算出哪些接口需要并发测试。
+     * <p>
+     * 必须排在 {@link #attachTableSchemas} <b>之后</b>：并发风险的依据是建表语句
+     * （唯一索引、计数列），而 DDL 是那一步才挂上去的。放前面的话拿不到 DDL，
+     * 扫描器会因为「没有依据」把所有表都跳过，静默返回空——看着像没风险，其实是没分析。
+     */
+    private void attachConcurrencyRisks(ApiChangeAnalyzer.Report report) {
+        if (report == null || report.getEndpoints().isEmpty()) {
+            return;
+        }
+        java.util.Map<String, String> ddlByTable = new java.util.HashMap<>();
+        for (ApiChangeAnalyzer.TableChange t : report.getTables()) {
+            if (t.getTable() != null && t.getDdlText() != null && !t.getDdlText().isBlank()) {
+                ddlByTable.put(t.getTable().toLowerCase(java.util.Locale.ROOT), t.getDdlText());
+            }
+        }
+        List<ConcurrencyRiskScanner.Risk> risks = new ArrayList<>();
+        for (ApiChangeAnalyzer.EndpointChange e : report.getEndpoints()) {
+            com.mobile.standalone.service.apichange.ApiEndpoint ep =
+                    new com.mobile.standalone.service.apichange.ApiEndpoint(
+                            e.getHttpMethod(), e.getPath(), e.getHandler(),
+                            null, e.getSummary(), e.getPayloadType(), List.of(), java.util.Set.of());
+            List<String> keys = new ArrayList<>();
+            if (e.getRedisKeys() != null) {
+                for (EndpointDependencyResolver.RedisKeyRef k : e.getRedisKeys()) {
+                    if (k != null && k.getValue() != null && !k.getValue().isBlank()) {
+                        keys.add(k.getValue());
+                    }
+                }
+            }
+            risks.addAll(ConcurrencyRiskScanner.scan(ep, e.getTables(), ddlByTable, keys));
+        }
+        // RISK 排在 INFO 前面：这份清单人只会从上往下扫，顺序就是优先级
+        risks.sort((a, b) -> Integer.compare(
+                "RISK".equals(a.level()) ? 0 : 1, "RISK".equals(b.level()) ? 0 : 1));
+        report.setConcurrencyRisks(risks);
     }
 
     /**
@@ -289,6 +330,7 @@ public class ApiChangeController {
                     p.getRepoPath(), base, body.getHeadRef());
             markCoverage(report, p.getCode());
             attachTableSchemas(report, p.getCode());
+            attachConcurrencyRisks(report);
             apiChangeReportService.saveSnapshot(p.getCode(), report);
             Map<String, Object> sync = syncToEndpointCatalog(report, p.getCode());
             if (sync != null) {
@@ -328,6 +370,7 @@ public class ApiChangeController {
             }
             markCoverage(report, body.getProject());
             attachTableSchemas(report, body.getProject());
+            attachConcurrencyRisks(report);
             apiChangeReportService.saveSnapshot(body.getProject(), report);
             Map<String, Object> sync = syncToEndpointCatalog(report, body.getProject());
             if (sync != null) {

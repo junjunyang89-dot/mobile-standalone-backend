@@ -33,6 +33,8 @@ public class ApiTestCollectionService {
     private final ApiEndpointService endpointService;
     private final RequirementEndpointService requirementEndpointService;
     private final ApiProjectService projectService;
+    private final com.mobile.standalone.service.AiTestCaseService aiTestCaseService;
+    private final com.mobile.standalone.service.RequirementService requirementService;
 
     public List<ApiTestCollection> list(String project, String scope, Boolean includeArchived, String appVersion) {
         return mapper.findAll(project, scope, null, includeArchived, appVersion, null);
@@ -1025,15 +1027,54 @@ public class ApiTestCollectionService {
     }
 
     /** 本单已上线：归档测试集合 + 需求涉及接口 */
+    /**
+     * 本单已上线：一个动作收口整条链。
+     * <p>
+     * 原先只做前两件事，于是上线之后黑盒用例还停在 TESTING、需求登记还是进行中，
+     * 人得再去两个页面各点一次——漏一处链路就断了。这里一并收掉。
+     * <p>
+     * 分支从集合上取：测试集合建的时候记了 sourceBranch，上线时把它固化到需求登记上，
+     * 「这个需求走的哪个分支」从此有个唯一的落点。
+     */
     @Transactional
     public Map<String, Object> releaseRequirement(String requirementNo) {
         if (requirementNo == null || requirementNo.isBlank()) {
             throw new IllegalArgumentException("需求单号必填");
         }
-        int cols = mapper.archiveByRequirement(requirementNo.trim());
-        int eps = requirementEndpointService.archiveByRequirement(requirementNo.trim());
-        log.info("[api-test] 需求 {} 已标记上线：归档 {} 个集合、{} 条涉及接口", requirementNo, cols, eps);
-        return Map.of("requirementNo", requirementNo.trim(), "collectionsArchived", cols, "endpointsArchived", eps);
+        String no = requirementNo.trim();
+        String branch = branchOfRequirement(no);
+
+        int cols = mapper.archiveByRequirement(no);
+        int eps = requirementEndpointService.archiveByRequirement(no);
+        int blackBox = aiTestCaseService.archiveByRequirement(no);
+        boolean marked = requirementService.markShipped(no, branch);
+
+        log.info("[api-test] 需求 {} 已标记上线：归档 {} 个集合、{} 条涉及接口、{} 条黑盒用例；登记状态更新={} 分支={}",
+                no, cols, eps, blackBox, marked, branch == null ? "(未记录)" : branch);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("requirementNo", no);
+        out.put("collectionsArchived", cols);
+        out.put("endpointsArchived", eps);
+        out.put("blackBoxCasesArchived", blackBox);
+        out.put("requirementMarked", marked);
+        out.put("sourceBranch", branch);
+        return out;
+    }
+
+    /** 该需求的测试集合上记的分支；多个集合取第一个非空的 */
+    private String branchOfRequirement(String requirementNo) {
+        try {
+            for (ApiTestCollection c : mapper.findAll(null, null, null, true, null, null)) {
+                if (requirementNo.equalsIgnoreCase(c.getRequirementNo())
+                        && c.getSourceBranch() != null && !c.getSourceBranch().isBlank()) {
+                    return c.getSourceBranch().trim();
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[api-test] 取需求分支失败 {}: {}", requirementNo, e.getMessage());
+        }
+        return null;
     }
 
     @Transactional

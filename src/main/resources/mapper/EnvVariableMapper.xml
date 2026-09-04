@@ -5,6 +5,7 @@
 
     <resultMap id="varMap" type="com.mobile.standalone.entity.EnvVariable">
         <result property="environment" column="environment"/>
+        <result property="project" column="project"/>
         <result property="name" column="name"/>
         <result property="value" column="value"/>
         <result property="secret" column="secret"/>
@@ -14,22 +15,37 @@
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
-    <sql id="cols">environment, name, value, secret, enabled, description, sort_order, updated_at</sql>
+    <sql id="cols">environment, project, name, value, secret, enabled, description, sort_order, updated_at</sql>
 
+    <!-- 只取全局。项目专属的要走 findByEnvironmentAndProject -->
     <select id="findByEnvironment" resultMap="varMap">
         SELECT <include refid="cols"/> FROM env_variables
-        WHERE environment = #{environment}
+        WHERE environment = #{environment} AND project = ''
         ORDER BY sort_order, name
+    </select>
+
+    <!--
+      全局在前、项目专属在后。调用方按顺序塞进 Map，后写的覆盖先写的，
+      项目专属就自然盖过了同名的全局变量——不需要额外的优先级判断。
+      项目为空时退化成只查全局，与 findByEnvironment 等价。
+    -->
+    <select id="findByEnvironmentAndProject" resultMap="varMap">
+        SELECT <include refid="cols"/> FROM env_variables
+        WHERE environment = #{environment}
+          AND (project = ''
+               <if test="project != null and project != ''">OR project = #{project}</if>
+              )
+        ORDER BY CASE WHEN project = '' THEN 0 ELSE 1 END, sort_order, name
     </select>
 
     <select id="findOne" resultMap="varMap">
         SELECT <include refid="cols"/> FROM env_variables
-        WHERE environment = #{environment} AND name = #{name}
+        WHERE environment = #{environment} AND project = #{project} AND name = #{name}
     </select>
 
     <insert id="upsert">
-        INSERT INTO env_variables (environment, name, value, secret, enabled, description, sort_order)
-        VALUES (#{environment}, #{name}, #{value}, #{secret}, #{enabled}, #{description}, #{sortOrder})
+        INSERT INTO env_variables (environment, project, name, value, secret, enabled, description, sort_order)
+        VALUES (#{environment}, #{project}, #{name}, #{value}, #{secret}, #{enabled}, #{description}, #{sortOrder})
         ON DUPLICATE KEY UPDATE
             value = VALUES(value),
             secret = VALUES(secret),
@@ -39,6 +55,7 @@
     </insert>
 
     <delete id="delete">
-        DELETE FROM env_variables WHERE environment = #{environment} AND name = #{name}
+        DELETE FROM env_variables
+        WHERE environment = #{environment} AND project = #{project} AND name = #{name}
     </delete>
 </mapper>

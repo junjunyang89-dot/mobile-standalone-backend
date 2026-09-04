@@ -24,6 +24,10 @@ public interface RequirementMapper {
 
     int deleteByNo(@Param("requirementNo") String requirementNo);
 
+    /** 标记上线：status→DONE，记录合并时间与分支。分支为空时不覆盖已有值 */
+    int markShipped(@Param("requirementNo") String requirementNo,
+                    @Param("sourceBranch") String sourceBranch);
+
     // ---- 需求 ↔ 模块 ----
 
     List<ProjectModule> findModules(@Param("requirementNo") String requirementNo);

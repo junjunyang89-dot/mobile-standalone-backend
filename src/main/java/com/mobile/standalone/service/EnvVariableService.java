@@ -29,6 +29,7 @@ public class EnvVariableService {
     public static final String MASK = "••••••••••";
 
     private final EnvVariableMapper mapper;
+    private final ApiProjectService projectService;
 
     /**
      * 给界面看的。secret 一律打码。
@@ -37,8 +38,14 @@ public class EnvVariableService {
      * 等于给这份密钥多开一条泄露路径，而它换来的只是省一次登数据库。
      */
     public List<EnvVariable> listMasked(String environment) {
+        return listMasked(environment, null);
+    }
+
+    /** @param project 传项目码则同时列出该项目专属的变量；空则只列全局 */
+    public List<EnvVariable> listMasked(String environment, String project) {
         List<EnvVariable> out = new ArrayList<>();
-        for (EnvVariable v : mapper.findByEnvironment(TestEnvironment.normalize(environment))) {
+        for (EnvVariable v : mapper.findByEnvironmentAndProject(
+                TestEnvironment.normalize(environment), scope(project))) {
             if (Boolean.TRUE.equals(v.getSecret()) && v.getValue() != null && !v.getValue().isEmpty()) {
                 v.setValue(MASK);
             }
@@ -47,10 +54,21 @@ public class EnvVariableService {
         return out;
     }
 
-    /** 执行时用：只取启用的，值是真值 */
+    /** 执行时用：只取启用的，值是真值。不带项目＝只取全局变量 */
     public Map<String, String> resolveValues(String environment) {
+        return resolveValues(environment, null);
+    }
+
+    /**
+     * 全局变量 + 该项目专属变量，<b>同名时项目专属胜出</b>。
+     * <p>
+     * 覆盖不是靠比较优先级实现的：SQL 已经把全局排在前面，这里按顺序 put，
+     * 后写的自然盖掉先写的。少一处需要维护的判断。
+     */
+    public Map<String, String> resolveValues(String environment, String project) {
         Map<String, String> out = new LinkedHashMap<>();
-        for (EnvVariable v : mapper.findByEnvironment(TestEnvironment.normalize(environment))) {
+        for (EnvVariable v : mapper.findByEnvironmentAndProject(
+                TestEnvironment.normalize(environment), scope(project))) {
             if (Boolean.FALSE.equals(v.getEnabled())) {
                 continue;
             }
@@ -77,6 +95,14 @@ public class EnvVariableService {
         }
         row.setName(name);
         row.setEnvironment(TestEnvironment.normalize(row.getEnvironment()));
+        // 项目作用域归一。空串＝该环境下全局；填了就校验项目真实存在——
+        // 这一列进了主键却挂不了外键（'' 在 api_projects 里不存在），
+        // 所以存在性只能在这儿把住，不然写错一个项目码就是个永远取不到值的哑变量
+        row.setProject(scope(row.getProject()));
+        if (!row.getProject().isEmpty() && projectService.get(row.getProject()) == null) {
+            throw new IllegalArgumentException(
+                    "项目不存在: " + row.getProject() + "，请先到「项目管理」创建；留空表示该环境下全局通用");
+        }
         if (row.getSecret() == null) {
             row.setSecret(false);
         }
@@ -88,7 +114,7 @@ public class EnvVariableService {
         }
         // 前端把掩码原样提交回来（人只改了描述没动值）时，不能把真值覆盖成一串点
         if (Boolean.TRUE.equals(row.getSecret()) && MASK.equals(row.getValue())) {
-            EnvVariable old = mapper.findOne(row.getEnvironment(), name);
+            EnvVariable old = mapper.findOne(row.getEnvironment(), row.getProject(), name);
             row.setValue(old == null ? "" : old.getValue());
         }
         mapper.upsert(row);
@@ -107,6 +133,15 @@ public class EnvVariableService {
     }
 
     public void delete(String environment, String name) {
-        mapper.delete(TestEnvironment.normalize(environment), name);
+        delete(environment, null, name);
+    }
+
+    public void delete(String environment, String project, String name) {
+        mapper.delete(TestEnvironment.normalize(environment), scope(project), name);
+    }
+
+    /** 项目作用域归一：null/空白一律成空串，也就是「该环境下全局」 */
+    private static String scope(String project) {
+        return project == null || project.isBlank() ? "" : project.trim();
     }
 }

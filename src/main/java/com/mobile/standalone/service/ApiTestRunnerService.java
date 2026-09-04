@@ -95,7 +95,10 @@ public class ApiTestRunnerService {
             throw new IllegalStateException("环境 baseUrl 为空: " + envKey);
         }
 
-        Map<String, String> envVars = variableService.resolveValues(envKey);
+        // 变量按项目解析：全局变量 + 该项目专属变量，同名时项目专属胜出。
+        // 按项目缓存而不是逐条用例去查——一个集合基本是同一个项目，
+        // 这样一轮下来只查一两次；不缓存的话，300 条用例就是 300 次公网往返。
+        Map<String, Map<String, String>> varsByProject = new LinkedHashMap<>();
         // 本轮共享：前面的用例 extract 出来的值，后面的用例能引用。
         // 作用域是「一次执行」而不是全局——留到下一轮就成了脏数据，
         // 上一轮的 token 早过期了，却会让这一轮看起来「配好了」，失败原因指向错的地方。
@@ -124,6 +127,9 @@ public class ApiTestRunnerService {
                 cr.setError("用例不存在");
                 failed++;
             } else {
+                Map<String, String> envVars = varsByProject.computeIfAbsent(
+                        c.getProject() == null ? "" : c.getProject(),
+                        pj -> variableService.resolveValues(envKey, pj));
                 cr = executeOne(c, env, req.getTokenOverride(), req.getUrlIdOverride(), envVars, runtime);
                 boolean ok = "PASSED".equals(cr.getStatus());
                 if (ok) passed++;

@@ -741,6 +741,25 @@ public class AppiumDriverAdapter implements PlatformDriver {
         } catch (Exception e) {
             log.warn("enableTopmostWindowFromActivePackage 设置失败: {}", e.getMessage());
         }
+        try {
+            // 这一条是关键：UiAutomator2 默认要等界面 idle 才返回控件树，
+            // 页面上有常驻动画（温馨提示页的渐变、加载转圈）时永远等不到，表现为「卡死」。
+            // 设 0 就是不等——采集控件树本来也不需要界面停稳。
+            // 当初正是这个卡死让取源退回了 adb dump，代价是丢掉多窗口里的节点。
+            androidDriver.setSetting("waitForIdleTimeout", 0);
+        } catch (Exception e) {
+            log.warn("waitForIdleTimeout 设置失败: {}", e.getMessage());
+        }
+        try {
+            // 不要压缩层级。压缩会把「对无障碍不重要」的节点整棵剪掉，
+            // 而那里面往往就有要定位的自定义控件——这是自研工具比 Appium Inspector
+            // 少认出元素的原因之一。
+            androidDriver.setSetting("ignoreUnimportantViews", false);
+        } catch (Exception e) {
+            log.warn("ignoreUnimportantViews 设置失败: {}", e.getMessage());
+        }
+        // 刻意不开 allowInvisibleElements：这个采集是给「按点击坐标命中控件」用的，
+        // 把 displayed=false 的节点放进来会产生命中不到的假目标，反而更难选。
     }
 
     /**

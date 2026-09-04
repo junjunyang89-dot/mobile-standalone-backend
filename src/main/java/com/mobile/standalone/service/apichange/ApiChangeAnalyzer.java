@@ -63,6 +63,12 @@ public class ApiChangeAnalyzer {
         /** 从代码里能确证的安全与字段设计问题 */
         private List<ApiRiskScanner.Finding> findings = new ArrayList<>();
         /**
+         * 哪些接口需要并发测试。单独一份而不是并进 findings：
+         * 它回答的是「要不要并发测」，findings 回答的是「有没有安全/设计问题」，
+         * 混在一起人就没法只看其中一类。
+         */
+        private List<ConcurrencyRiskScanner.Risk> concurrencyRisks = new ArrayList<>();
+        /**
          * 这份报告同步进接口清单的结果，{@code {created, updated, deprecated}}。
          * <p>
          * 回给前端是为了让人当场看见「清单已经跟着更新了」——

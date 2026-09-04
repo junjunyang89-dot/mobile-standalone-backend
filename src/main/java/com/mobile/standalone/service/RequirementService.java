@@ -104,6 +104,36 @@ public class RequirementService {
         return get(no);
     }
 
+    /**
+     * 标记需求已上线。
+     * <p>
+     * 只负责需求登记这一侧；集合、涉及接口、黑盒用例的归档由
+     * {@code ApiTestCollectionService.releaseRequirement} 统一编排——
+     * 上线是一个动作，不该让人在三个页面各点一次。
+     * <p>
+     * 需求不在登记表里时<b>自动补一条</b>而不是报错：单号本来就散在集合和
+     * requirement_endpoints 里，很多是历史数据，因为「没登记过」就拒绝上线，
+     * 等于逼着人先去补录一遍。
+     *
+     * @return 是否落库成功
+     */
+    @Transactional
+    public boolean markShipped(String requirementNo, String sourceBranch) {
+        String no = trim(requirementNo).toUpperCase(Locale.ROOT);
+        if (no.isEmpty()) {
+            return false;
+        }
+        if (mapper.findByNo(no) == null) {
+            Requirement r = new Requirement();
+            r.setRequirementNo(no);
+            r.setStatus(Requirement.STATUS_TESTING);
+            r.setSourceBranch(trim(sourceBranch).isEmpty() ? null : trim(sourceBranch));
+            r.setNote("标记上线时自动登记");
+            mapper.insert(r);
+        }
+        return mapper.markShipped(no, trim(sourceBranch)) > 0;
+    }
+
     @Transactional
     public void replaceModules(String requirementNo, List<String> moduleIds) {
         List<String> clean = new ArrayList<>(new LinkedHashSet<>(

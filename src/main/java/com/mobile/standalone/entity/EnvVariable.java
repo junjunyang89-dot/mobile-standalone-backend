@@ -14,6 +14,15 @@ import java.time.LocalDateTime;
 public class EnvVariable {
     /** TEST | PROD */
     private String environment;
+
+    /**
+     * 归属项目；<b>空串＝该环境下全局</b>。
+     * <p>
+     * 用空串而不是 null：它是主键 (environment, project, name) 的一部分，
+     * MySQL 主键列不允许 NULL。没有这一维的话，全局 token 和某项目专属 token
+     * 会主键冲突，等于这个功能加了也用不了。
+     */
+    private String project;
     /** 变量名，用例里写 {{name}} */
     private String name;
     private String value;
