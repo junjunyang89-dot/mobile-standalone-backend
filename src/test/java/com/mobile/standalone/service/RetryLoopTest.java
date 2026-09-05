@@ -35,7 +35,7 @@ class RetryLoopTest {
     @BeforeEach
     void setUp() {
         executor = new UiFlowExecutor(null, null, null, null, null, null,
-                new ExecutionCancelRegistry(), null, null, null);
+                new ExecutionCancelRegistry(), null, null, null, null);
         logs = new ArrayList<>();
         state = new KeywordContext.RunState(false, null);
         Task task = new Task();

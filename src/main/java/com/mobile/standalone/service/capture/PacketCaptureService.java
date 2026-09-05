@@ -90,20 +90,25 @@ public class PacketCaptureService {
             throw new IOException("配置的 mitmdump 路径不可执行：" + configured
                     + "（app.capture.mitmdump）");
         }
-        String home = System.getProperty("user.home");
-        List<String> candidates = List.of(
-                "/opt/homebrew/bin/mitmdump",              // Apple Silicon 的 brew
-                "/usr/local/bin/mitmdump",                 // Intel 的 brew
-                home + "/.local/bin/mitmdump",             // pipx / pip --user
-                "/opt/homebrew/opt/mitmproxy/bin/mitmdump");
-        for (String c : candidates) {
-            if (Files.isExecutable(Path.of(c))) {
-                return c;
+        String binName = configured.isEmpty() ? "mitmdump" : configured;
+        // 内置候选路径是给默认名 mitmdump 准备的。配了别的名字说明是刻意指定，
+        // 这时候还去查候选、拿 mitmdump 顶替，等于把人配的东西无声忽略掉
+        if ("mitmdump".equals(binName)) {
+            String home = System.getProperty("user.home");
+            List<String> candidates = List.of(
+                    "/opt/homebrew/bin/mitmdump",              // Apple Silicon 的 brew
+                    "/usr/local/bin/mitmdump",                 // Intel 的 brew
+                    home + "/.local/bin/mitmdump",             // pipx / pip --user
+                    "/opt/homebrew/opt/mitmproxy/bin/mitmdump");
+            for (String c : candidates) {
+                if (Files.isExecutable(Path.of(c))) {
+                    return c;
+                }
             }
         }
         // 兜底交给 PATH：这条在终端里起的后端能走通，从 IDE 起的多半走不通
-        if (looksOnPath(configured.isEmpty() ? "mitmdump" : configured)) {
-            return configured.isEmpty() ? "mitmdump" : configured;
+        if (looksOnPath(binName)) {
+            return binName;
         }
         throw new IOException("没找到 mitmdump，抓包起不来。先装上：brew install mitmproxy"
                 + "；装在别处的话在 application.yml 里配 app.capture.mitmdump 为绝对路径");
