@@ -38,7 +38,12 @@ export async function applyAuth(
   }
 ): Promise<void> {
   const token = (opts.token || '').trim()
-  if (!token || opts.mode === 'none') return
+  const cookieCount = opts.cookies ? Object.keys(opts.cookies).length : 0
+  if (opts.mode === 'none') return
+  // 不能只看 token：cookie 模式下登录态整个在 cookie 里，往往没有独立的 token 值。
+  // 原先「token 为空就 return」会把这类配置整个挡掉，而且不留任何痕迹——
+  // 表现就是「配了 cookie 还是未登录」
+  if (!token && cookieCount === 0) return
 
   const key = opts.storageKey || 'token'
   // 域名优先从被测页面推出来。原先写死 lock.pogpog.gg，换个站点就注不进去——
