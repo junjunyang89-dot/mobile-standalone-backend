@@ -14,6 +14,8 @@ type CasePayload = {
   authToken?: string
   authQueryKey?: string
   cookieDomain?: string
+  /** Cookie 登录态：名 → 值。有些活动页要好几个 cookie 都在才认 */
+  authCookies?: Record<string, string>
   steps: Step[]
 }
 
@@ -42,7 +44,15 @@ async function runStep(
   page: Page,
   request: APIRequestContext,
   step: Step,
-  ctx: { pageUrl?: string; authMode: AuthMode; token: string; authKey: string; cookieDomain?: string }
+  ctx: {
+    pageUrl?: string
+    authMode: AuthMode
+    token: string
+    authKey: string
+    cookieDomain?: string
+    /** cookie 模式下的多个登录态 cookie：名 → 值 */
+    authCookies?: Record<string, string>
+  }
 ) {
   const code = (step.keywordCode || '').toUpperCase()
   const p = step.params || {}
@@ -58,7 +68,10 @@ async function runStep(
         token,
         mode: mode === 'query' ? 'none' : mode,
         cookieDomain: p.cookieDomain || ctx.cookieDomain,
-        storageKey: 'token'
+        // 不给 cookieDomain 时按被测页面的 host 推，别再落到写死的默认域上
+        pageUrl: url,
+        storageKey: 'token',
+        cookies: p.authCookies || ctx.authCookies
       })
       if (mode === 'query' && token) url = withQueryToken(url, token, key)
       const resp = await page.goto(url, { waitUntil: 'domcontentloaded' })
@@ -244,7 +257,8 @@ test.describe('平台步骤用例', () => {
         authMode: (c.authMode || 'none') as AuthMode,
         token: (c.authToken || '').trim(),
         authKey: c.authQueryKey || 'token',
-        cookieDomain: c.cookieDomain
+        cookieDomain: c.cookieDomain,
+        authCookies: c.authCookies
       }
       const steps = Array.isArray(c.steps) ? c.steps : []
       expect(steps.length, '用例至少一步').toBeGreaterThan(0)
