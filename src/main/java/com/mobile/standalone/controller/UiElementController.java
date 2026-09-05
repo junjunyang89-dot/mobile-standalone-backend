@@ -31,6 +31,50 @@ import java.util.UUID;
 public class UiElementController {
 
     private final com.mobile.standalone.service.InspectorShotReader inspectorShotReader;
+    private final com.mobile.standalone.service.UiElementHealthService elementHealthService;
+
+    /**
+     * 元素健康报表。
+     * <p>
+     * 四张表回答四个不同的问题，刻意不合成一个「健康分」——分数看着好看，
+     * 但拿到 78 分之后没人知道该干什么，而「这 6 个元素定位已失效」是能直接派活的。
+     *
+     * @param staleDays 多少天没被任何用例验证过算「陈旧」，默认 14
+     */
+    @GetMapping("/health")
+    public ResponseEntity<?> health(@RequestParam(required = false) String appId,
+                                    @RequestParam(required = false) String platform,
+                                    @RequestParam(required = false, defaultValue = "14") int staleDays) {
+        try {
+            return ResponseEntity.ok(elementHealthService.report(appId, platform, staleDays));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        }
+    }
+
+    /**
+     * 对着一台真机的当前屏做体检：手动走到某一页，点一下就知道这页的元素还活着几个。
+     * <p>
+     * 平时不该靠这个——真正省事的是把「页面元素体检」关键字插进已有流程搭车跑，
+     * 跑用例的时候顺手就把沿途页面全体检了。这个接口是给「临时想看一眼」和排查用的。
+     */
+    @PostMapping("/health/probe")
+    public ResponseEntity<?> probe(@RequestBody Map<String, Object> body) {
+        try {
+            String deviceId = body.get("deviceId") == null ? null : String.valueOf(body.get("deviceId"));
+            String appId = body.get("appId") == null ? null : String.valueOf(body.get("appId"));
+            String platform = body.get("platform") == null ? null : String.valueOf(body.get("platform"));
+            String pageId = body.get("pageId") == null ? null : String.valueOf(body.get("pageId"));
+            return ResponseEntity.ok(elementHealthService.probeDevice(deviceId, appId, platform, pageId));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("message", String.valueOf(e.getMessage())));
+        } catch (RuntimeException e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "体检失败"));
+        }
+    }
 
     /**
      * 从 Appium Inspector 截图里认元素，<b>只出草稿，不入库</b>。

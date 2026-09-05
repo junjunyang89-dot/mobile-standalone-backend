@@ -84,6 +84,7 @@ public class UiFlowExecutor implements FlowRuntime {
     private final KeywordRegistry keywordRegistry;
     private final EnvVariableService envVariableService;
     private final PgyerAppService pgyerAppService;
+    private final UiElementHealthService elementHealthService;
 
     @Autowired(required = false)
     private AppiumDriverAdapter appiumDriverAdapter;
@@ -204,6 +205,13 @@ public class UiFlowExecutor implements FlowRuntime {
             // 后果很隐蔽：之后这台机跑什么都带着它，冒出一堆跟本次改动无关的失败，
             // 没人会想到是几天前某条流程留下的
             restoreDeviceToggles(device, logs);
+            // 元素健康记账。放在 finally 里是因为失败的那次执行信息量最大——
+            // 恰恰是挂掉的流程才知道哪个元素定位不到了
+            try {
+                elementHealthService.flush(state.elementUsages);
+            } catch (Exception e) {
+                log.warn("[ui-flow] 元素健康记账失败（不影响本次执行结果）: {}", e.getMessage());
+            }
         }
 
         FunctionalTestExecutionResult result =
@@ -309,7 +317,18 @@ public class UiFlowExecutor implements FlowRuntime {
             if (policy.capturesBefore()) {
                 captureScreenshot(env.driver(), env.deviceId(), env.task(), env.logs(), "开始 · " + numberedLabel);
             }
-            executeWithRetry(handler, ctx, env, stepParams);
+            String usedElement = ctx.getElementKey();
+            try {
+                executeWithRetry(handler, ctx, env, stepParams);
+                recordElementUsage(env, usedElement, true, null);
+            } catch (Exception e) {
+                // 断言类关键字失败不算元素的账：元素多半是找到了，只是内容不符。
+                // 把它记成「元素失效」会让健康报表里全是冤案，而报表一旦不可信就没人看了
+                if (!"ASSERT".equalsIgnoreCase(handler.category())) {
+                    recordElementUsage(env, usedElement, false, numberedLabel + " · " + shortMessage(e));
+                }
+                throw e;
+            }
             // 已请求停止：不再为这一步补拍收尾图。留一张「动作做了一半」的证据只会误导复核，
             // 而且等页面稳定还要多花几秒，白白拖长停止的响应时间
             boolean cancelledDuringStep = env.task() != null && env.task().getId() != null
@@ -562,6 +581,32 @@ public class UiFlowExecutor implements FlowRuntime {
             expanded.add(next);
         }
         return expanded;
+    }
+
+    /**
+     * 记一笔「这个元素这次用没用成」。只攒在内存里，执行结束才落库。
+     * <p>
+     * 记的是 (appId, platform, nameEn) 而不是元素 id：这样不需要在执行链路上多查一次库，
+     * 落库时按这三个字段直接 UPDATE 就行。
+     */
+    private void recordElementUsage(FlowEnv env, String elementKey, boolean ok, String note) {
+        if (elementKey == null || elementKey.isBlank() || env.uiAppId() == null) {
+            return;
+        }
+        try {
+            env.state().elementUsages.add(new UiElementHealthService.ElementUsage(
+                    env.uiAppId(), PlatformNames.normalize(env.platform()), elementKey.trim(), ok, note));
+        } catch (Exception e) {
+            log.debug("[ui-flow] 记元素使用失败: {}", e.getMessage());
+        }
+    }
+
+    private static String shortMessage(Exception e) {
+        String m = e.getMessage();
+        if (m == null || m.isBlank()) {
+            return e.getClass().getSimpleName();
+        }
+        return m.length() <= 200 ? m : m.substring(0, 200);
     }
 
     /**

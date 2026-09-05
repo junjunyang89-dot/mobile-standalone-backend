@@ -70,6 +70,16 @@ public class KeywordContext {
         /** 本次执行是否已保存过失败现场：异常逐层上抛，只在最内层存一次就够 */
         public boolean failureDumped;
 
+        /**
+         * 本次执行用到了哪些元素、成没成。执行结束后由
+         * {@code UiElementHealthService.flush} 一次性落库。
+         * <p>
+         * 攒着不立即写，是因为这条链路上每多一次 DB 往返都直接加在用例耗时上；
+         * 而且同一个元素在一条流程里常被点很多次，逐次写等于把一次执行放大成几十条 UPDATE。
+         */
+        public final java.util.List<com.mobile.standalone.service.UiElementHealthService.ElementUsage>
+                elementUsages = new java.util.ArrayList<>();
+
         public RunState(boolean earlyReturn, String returnMessage) {
             this.earlyReturn = earlyReturn;
             this.returnMessage = returnMessage;
