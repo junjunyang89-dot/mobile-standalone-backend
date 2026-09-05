@@ -176,9 +176,13 @@ async function runStep(
             if (items[j].tier > items[i].tier && (!worst || items[j].tier > worst.tier)) worst = items[j]
           }
           if (worst) {
+            // 直接引用规则片段而不是报「第几级」：人要核对的就是文档里那句
+            // 「大会员 > 段位保护盾」，报级数还得回去把阶梯数一遍
+            const nameOf = (it: typeof items[0]) =>
+              it.cat ? it.cat : `${it.raw}(未匹配，按「其他」)`
             problems.push(
-              `第 ${g + 1} 组：「${items[i].raw}」(第${items[i].tier + 1}级) 应排在 ` +
-              `「${worst.raw}」(第${worst.tier + 1}级) 前面，实际排在后面`
+              `第 ${g + 1} 组：「${items[i].raw}」应排在「${worst.raw}」前面` +
+              `——按优先级：${nameOf(items[i])} > ${nameOf(worst)}`
             )
           }
         }

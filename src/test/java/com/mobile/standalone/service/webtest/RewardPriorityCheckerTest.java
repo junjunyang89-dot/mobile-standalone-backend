@@ -70,8 +70,8 @@ class RewardPriorityCheckerTest {
         assertThat(r.ok()).isFalse();
         assertThat(r.violations()).singleElement().satisfies(v -> {
             assertThat(v.message()).contains("大会员").contains("段位保护盾");
-            // 只说「顺序不对」的话人还得回去自己数一遍，级数必须带上
-            assertThat(v.message()).contains("第1级").contains("第5级");
+            // 直接引用文档里那条规则片段，人不用回去数阶梯
+            assertThat(v.message()).contains("大会员 > 段位保护盾");
         });
     }
 

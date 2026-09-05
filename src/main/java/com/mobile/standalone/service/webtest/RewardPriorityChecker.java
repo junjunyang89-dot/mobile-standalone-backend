@@ -128,14 +128,19 @@ public final class RewardPriorityChecker {
         return new Result(items, violations, unmatched);
     }
 
+    /**
+     * 直接引用需求文档里那条规则的相关片段。
+     * <p>
+     * 报「第1级 / 第5级」的话，人还得回去把阶梯数一遍才知道谁该在前——
+     * 而他真正要核对的就是文档里那句「大会员 &gt; 段位保护盾」。
+     */
     private static String describe(Item earlier, Item later) {
-        return "「" + later.raw() + "」(" + tierText(later) + ") 应排在 「"
-                + earlier.raw() + "」(" + tierText(earlier) + ") 前面，实际排在后面";
+        return "「" + later.raw() + "」应排在「" + earlier.raw() + "」前面"
+                + "——按优先级：" + name(later) + " > " + name(earlier);
     }
 
-    private static String tierText(Item it) {
-        return it.matched() ? "第" + (it.tier() + 1) + "级 " + it.category()
-                : "第" + (it.tier() + 1) + "级 未匹配→按其他";
+    private static String name(Item it) {
+        return it.matched() ? it.category() : it.raw() + "(未匹配，按「其他」)";
     }
 
     /**
