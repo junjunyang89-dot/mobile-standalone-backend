@@ -75,7 +75,8 @@ public class ApiChangeController {
                         e.getChangeType(),
                         EndpointChangeFlag.of(in),
                         EndpointChangeFlag.note(in, e.getRisk()),
-                        topLevelFieldNames(e)));
+                        topLevelFieldNames(e),
+                        e.getTables()));
             }
             var r = apiEndpointService.syncFromChangeReport(projectCode, report.getHeadRef(), changes);
             return Map.of("created", r.created(), "updated", r.updated(), "deprecated", r.deprecated());

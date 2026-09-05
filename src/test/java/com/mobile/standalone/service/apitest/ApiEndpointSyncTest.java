@@ -24,7 +24,7 @@ class ApiEndpointSyncTest {
 
     private EndpointChange ch(String method, String path, String type, String flag) {
         return new EndpointChange(method, path, "SomeController", "说明", "Some.java", type, flag, "备注",
-                java.util.List.of("code", "data"));
+                java.util.List.of("code", "data"), java.util.List.of("some_table"));
     }
 
     private ApiEndpoint existing(String id) {
