@@ -3,6 +3,7 @@ package com.mobile.standalone.service.keyword.handlers;
 import com.mobile.standalone.service.keyword.KeywordContext;
 import com.mobile.standalone.service.keyword.KeywordHandler;
 import com.mobile.standalone.service.keyword.ParamDef;
+import com.mobile.standalone.service.keyword.ScreenVisibility;
 import com.mobile.standalone.service.keyword.ScreenshotPolicy;
 import org.springframework.stereotype.Component;
 
@@ -83,7 +84,11 @@ public class ScrollUntilHandler implements KeywordHandler {
         boolean failIfNotFound = ctx.boolParam("failIfNotFound", true);
         String elementKey = ctx.getElementKey();
 
-        if (ctx.getDriver().waitForElement(ctx.getDeviceId(), selector, 1)) {
+        // 只问「控件树里有没有」会一次都不滑：资讯列表这种 RecyclerView
+        // 会把屏幕外的「专栏推荐」也留在树上，标题刚露一条边也算存在。
+        // 和区域内滑动同一套：中心点必须落在屏幕内才算到。
+        int[] screen = ScreenVisibility.screenSize(ctx);
+        if (ScreenVisibility.isOnScreen(ctx, selector, screen)) {
             ctx.ok("滑动直到元素", elementKey + " 已在屏上，无需滑动");
             return;
         }
@@ -100,7 +105,7 @@ public class ScrollUntilHandler implements KeywordHandler {
             if (intervalMs > 0) {
                 ctx.sleep(intervalMs);
             }
-            if (ctx.getDriver().waitForElement(ctx.getDeviceId(), selector, 1)) {
+            if (ScreenVisibility.isOnScreen(ctx, selector, screen)) {
                 found = true;
                 break;
             }
