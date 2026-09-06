@@ -61,6 +61,10 @@ public class ClickWhenEnabledHandler implements KeywordHandler {
                 ParamDef.number("timeoutSec", "超时秒", 10)
                         .withHelp("等到按钮点亮的最长时间；超时请检查手机号、协议勾选等前置步骤"),
                 ParamDef.enumOf("clickMethod", "点击方式", CLICK_METHODS, "AUTO"),
+                ParamDef.number("offsetXPercent", "横向点击位置", 50)
+                        .withHelp("相对本元素宽度。换机不用手算：点「真机点选算出位置」，在截图上点你要点的字。"),
+                ParamDef.number("offsetYPercent", "纵向点击位置", 50)
+                        .withHelp("相对本元素高度。一般保持 50。"),
                 ParamDef.number("waitAfterMs", "点击后等待毫秒", 0)
         );
     }
@@ -80,6 +84,8 @@ public class ClickWhenEnabledHandler implements KeywordHandler {
         }
 
         String clickMethod = KeywordContext.firstNonBlank(ctx.str("clickMethod"), "AUTO");
+        int offsetX = (int) Math.min(100L, Math.max(0L, ctx.longParam("offsetXPercent", 50)));
+        int offsetY = (int) Math.min(100L, Math.max(0L, ctx.longParam("offsetYPercent", 50)));
         AppiumDriverAdapter appium = ctx.getRuntime().appiumDriverAdapter();
         boolean ok = false;
         String used = ready;
@@ -92,7 +98,8 @@ public class ClickWhenEnabledHandler implements KeywordHandler {
                 ok = ctx.getDriver().clickElement(ctx.getDeviceId(), selector);
             } else if (appium != null) {
                 ok = appium.clickElementPreferCoordinates(
-                        ctx.getDeviceId(), selector, clickMethod, ctx.getElementKey());
+                        ctx.getDeviceId(), selector, clickMethod, ctx.getElementKey(),
+                        offsetX, offsetY);
             } else {
                 ok = ctx.getDriver().clickElement(ctx.getDeviceId(), selector);
             }

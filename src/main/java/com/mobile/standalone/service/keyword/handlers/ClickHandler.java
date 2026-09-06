@@ -56,6 +56,11 @@ public class ClickHandler implements KeywordHandler {
         return List.of(
                 ParamDef.element("elementKey", "元素英文名"),
                 ParamDef.enumOf("clickMethod", "点击方式", CLICK_METHODS, "AUTO"),
+                ParamDef.number("offsetXPercent", "横向点击位置", 50)
+                        .withHelp("相对本元素宽度，不是整屏。50=中心。"
+                                + "换机不用手算：点「真机点选算出位置」，在截图上点你要点的字，会自动回填。"),
+                ParamDef.number("offsetYPercent", "纵向点击位置", 50)
+                        .withHelp("相对本元素高度。一般保持 50。"),
                 ParamDef.number("waitAfterMs", "点击后等待毫秒", 0),
                 // 只在「仅元素 click」下露出：别的点击方式要么会补点（勾选框连点两次，断言注定不稳），
                 // 要么是坐标/ADB 兜底，都不是拿来点勾选框的。默认 AUTO 时这个开关根本不该占位置。
@@ -70,6 +75,8 @@ public class ClickHandler implements KeywordHandler {
     public void execute(KeywordContext ctx) throws Exception {
         List<String> selectors = ctx.selectors("点击");
         String clickMethod = KeywordContext.firstNonBlank(ctx.str("clickMethod"), "AUTO");
+        int offsetX = (int) Math.min(100L, Math.max(0L, ctx.longParam("offsetXPercent", 50)));
+        int offsetY = (int) Math.min(100L, Math.max(0L, ctx.longParam("offsetYPercent", 50)));
         AppiumDriverAdapter appium = ctx.getRuntime().appiumDriverAdapter();
 
         boolean ok = false;
@@ -93,7 +100,8 @@ public class ClickHandler implements KeywordHandler {
                 }
             } else if (appium != null) {
                 ok = appium.clickElementPreferCoordinates(
-                        ctx.getDeviceId(), selector, clickMethod, ctx.getElementKey());
+                        ctx.getDeviceId(), selector, clickMethod, ctx.getElementKey(),
+                        offsetX, offsetY);
             } else {
                 ok = ctx.getDriver().clickElement(ctx.getDeviceId(), selector);
             }

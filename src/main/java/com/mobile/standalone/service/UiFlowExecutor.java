@@ -566,6 +566,22 @@ public class UiFlowExecutor implements FlowRuntime {
                                          Map<String, String> execParams,
                                          List<ExecutionLogEntryDto> logs, String stepName)
             throws UiFlowExecutionException {
+        return resolveSelectors(platform, uiAppId, elementKey, execParams, logs, stepName, true);
+    }
+
+    @Override
+    public List<String> requireSelectorTemplates(String platform, String uiAppId, String elementKey,
+                                                 Map<String, String> execParams,
+                                                 List<ExecutionLogEntryDto> logs, String stepName)
+            throws UiFlowExecutionException {
+        return resolveSelectors(platform, uiAppId, elementKey, execParams, logs, stepName, false);
+    }
+
+    private List<String> resolveSelectors(String platform, String uiAppId, String elementKey,
+                                          Map<String, String> execParams,
+                                          List<ExecutionLogEntryDto> logs, String stepName,
+                                          boolean expandRandom)
+            throws UiFlowExecutionException {
         if (elementKey == null || elementKey.isBlank()) {
             logs.add(ExecutionLogEntryDto.fail(stepName, "缺少 elementKey", null));
             throw new UiFlowExecutionException(stepName + " 缺少 elementKey", logs);
@@ -611,6 +627,9 @@ public class UiFlowExecutor implements FlowRuntime {
             }
         }
 
+        if (!expandRandom) {
+            return resolved;
+        }
         // xpath 下标 [X] / [X:1-5] → 本次执行随机成具体数字（列表里随机点一场比赛等）
         List<String> expanded = new ArrayList<>(resolved.size());
         for (String sel : resolved) {
@@ -908,18 +927,23 @@ public class UiFlowExecutor implements FlowRuntime {
 
     @Override
     public boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction, int durationMs) {
+        return directionalSwipe(driver, deviceId, direction, durationMs, 0);
+    }
+
+    @Override
+    public boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction,
+                                    int durationMs, int distancePercent) {
+        return directionalSwipe(driver, deviceId, direction, durationMs, (double) distancePercent);
+    }
+
+    @Override
+    public boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction,
+                                    int durationMs, double distancePercent) {
         int[] size = appiumDriverAdapter != null ? appiumDriverAdapter.getWindowSize(deviceId) : null;
         int w = size != null && size.length >= 2 ? size[0] : 1080;
         int h = size != null && size.length >= 2 ? size[1] : 1920;
-        int x1 = w / 2, y1 = h / 2, x2 = w / 2, y2 = h / 2;
-        switch (normalizeSwipeDirection(direction)) {
-            case "up" -> { y1 = (int) (h * 0.72); y2 = (int) (h * 0.28); }
-            case "down" -> { y1 = (int) (h * 0.28); y2 = (int) (h * 0.72); }
-            case "left" -> { x1 = (int) (w * 0.82); x2 = (int) (w * 0.18); }
-            case "right" -> { x1 = (int) (w * 0.18); x2 = (int) (w * 0.82); }
-            default -> { y1 = (int) (h * 0.72); y2 = (int) (h * 0.28); }
-        }
-        return driver.swipe(deviceId, x1, y1, x2, y2, Math.max(100, durationMs));
+        int[] p = swipeEndpoints(w, h, direction, distancePercent);
+        return driver.swipe(deviceId, p[0], p[1], p[2], p[3], Math.max(100, durationMs));
     }
 
     /** Appium 不可用时的 Android 回退：优先 am start 指定组件，否则 monkey 拉起 launcher */
@@ -1104,6 +1128,38 @@ public class UiFlowExecutor implements FlowRuntime {
             }
             default -> raw.contains("/") ? (raw.startsWith("xpath:") ? raw : "xpath:" + raw) : raw;
         };
+    }
+
+    /**
+     * 整屏滑动的起止点。{@code distancePercent <= 0} 保持原来的大半屏；
+     * 小幅滑动只挪一小截，避免「滑动直到元素」一把把目标划出屏幕。
+     */
+    static int[] swipeEndpoints(int w, int h, String direction, double distancePercent) {
+        int x1 = w / 2, y1 = h / 2, x2 = w / 2, y2 = h / 2;
+        String dir = normalizeSwipeDirection(direction);
+        if (distancePercent <= 0) {
+            switch (dir) {
+                case "up" -> { y1 = (int) (h * 0.72); y2 = (int) (h * 0.28); }
+                case "down" -> { y1 = (int) (h * 0.28); y2 = (int) (h * 0.72); }
+                case "left" -> { x1 = (int) (w * 0.82); x2 = (int) (w * 0.18); }
+                case "right" -> { x1 = (int) (w * 0.18); x2 = (int) (w * 0.82); }
+                default -> { y1 = (int) (h * 0.72); y2 = (int) (h * 0.28); }
+            }
+            return new int[]{x1, y1, x2, y2};
+        }
+        double pct = Math.min(70, Math.max(1, distancePercent));
+        int dy = Math.max(8, (int) Math.round(h * pct / 100.0));
+        int dx = Math.max(8, (int) Math.round(w * pct / 100.0));
+        // 不对称绕中心：资讯页正中间经常是大卡片/视频，4% 来回等于按在卡片上。
+        // 从内容区下半段起手，往上顶一小截，列表才吃得到。
+        switch (dir) {
+            case "up" -> { y1 = (int) (h * 0.62); y2 = Math.max(8, y1 - dy); }
+            case "down" -> { y1 = (int) (h * 0.38); y2 = Math.min(h - 8, y1 + dy); }
+            case "left" -> { x1 = (int) (w * 0.62); x2 = Math.max(8, x1 - dx); }
+            case "right" -> { x1 = (int) (w * 0.38); x2 = Math.min(w - 8, x1 + dx); }
+            default -> { y1 = (int) (h * 0.62); y2 = Math.max(8, y1 - dy); }
+        }
+        return new int[]{x1, y1, x2, y2};
     }
 
     /** up/down/left/right；兼容「up（上滑）」等展示文案 */

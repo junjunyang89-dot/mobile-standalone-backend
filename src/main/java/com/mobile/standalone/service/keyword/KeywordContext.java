@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
  * 关键字实现只拿这一个入参，不再像原来的 switch 那样每个分支都要透传十几个参数。
  */
 @Getter
-@Builder
+@Builder(toBuilder = true)
 public class KeywordContext {
 
     /**
@@ -60,6 +60,12 @@ public class KeywordContext {
 
     private final RunState state;
     private final FlowRuntime runtime;
+
+    /**
+     * 已展开好的定位，优先于再查元素库。
+     * 「滑到并点击」这类组合关键字先解析一次随机下标，滑动和点击共用这一份。
+     */
+    private final List<String> resolvedSelectors;
 
     /** 流程级可变状态：提前返回标记与判定 */
     public static class RunState {
@@ -123,6 +129,10 @@ public class KeywordContext {
 
     public long longParam(String key, long defaultVal) {
         return asLong(stepParams.get(key), defaultVal);
+    }
+
+    public double doubleParam(String key, double defaultVal) {
+        return asDouble(stepParams.get(key), defaultVal);
     }
 
     public boolean boolParam(String key, boolean defaultVal) {
@@ -251,6 +261,9 @@ public class KeywordContext {
     // —— 常用回调的快捷方式 ——
 
     public List<String> selectors(String stepName) throws UiFlowExecutionException {
+        if (resolvedSelectors != null && !resolvedSelectors.isEmpty()) {
+            return resolvedSelectors;
+        }
         return runtime.requireSelectors(platform, uiAppId, elementKey, execParams, logs, sn(stepName));
     }
 
@@ -323,6 +336,16 @@ public class KeywordContext {
         if (o == null) return defaultVal;
         try {
             return Long.parseLong(String.valueOf(o).trim());
+        } catch (NumberFormatException e) {
+            return defaultVal;
+        }
+    }
+
+    public static double asDouble(Object o, double defaultVal) {
+        if (o instanceof Number n) return n.doubleValue();
+        if (o == null) return defaultVal;
+        try {
+            return Double.parseDouble(String.valueOf(o).trim());
         } catch (NumberFormatException e) {
             return defaultVal;
         }

@@ -68,7 +68,8 @@ public class DeviceInspectController {
                 return ResponseEntity.badRequest().body(Map.of("message", "body 不能为空"));
             }
             return ResponseEntity.ok(deviceInspectService.hitTest(
-                    id, body.getXRatio(), body.getYRatio(), body.getX(), body.getY(), body.getAppId()));
+                    id, body.getXRatio(), body.getYRatio(), body.getX(), body.getY(),
+                    body.getAppId(), body.getElementKey()));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         } catch (IllegalStateException e) {
@@ -142,5 +143,7 @@ public class DeviceInspectController {
         private Integer y;
         /** 可选，用于匹配 ui_elements */
         private String appId;
+        /** 步骤已绑的元素英文名：百分比相对它的矩形，而不是 H5 屏幕坐标 */
+        private String elementKey;
     }
 }

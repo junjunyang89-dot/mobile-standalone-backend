@@ -76,6 +76,15 @@ public class DeviceManager {
     /** 每台设备连续失败次数；成功即清零 */
     private final java.util.concurrent.ConcurrentHashMap<String, Integer> iosWdaFailCounts =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** TDT 这类机会挂「手机助手」光驱把 ADB 口占掉；恢复要节流，不能每 5 秒 kill-server */
+    private volatile long lastAndroidUsbRecoverMs;
+    private static final long ANDROID_USB_RECOVER_COOLDOWN_MS = 45_000L;
+
+    /** 充电时保持亮屏，避免锁屏把 USB 调试挂掉 */
+    private final ConcurrentHashMap<String, Long> lastStayAwakeMs = new ConcurrentHashMap<>();
+    private static final long STAY_AWAKE_REFRESH_MS = 60_000L;
+    private Process macCaffeinate;
     
     /**
      * 扫描 Android 设备（使用 ADB）
@@ -129,6 +138,7 @@ public class DeviceManager {
                             device.setVersion(version);
                             device.setStatus(Device.DeviceStatus.CONNECTED);
                             devices.add(device);
+                            keepAndroidAwakeOnUsb(deviceId);
                             log.info("发现 Android 设备: {} ({})", device.getName(), deviceId);
                         }
                     }
@@ -143,8 +153,156 @@ public class DeviceManager {
         } catch (IOException | InterruptedException e) {
             log.error("扫描 Android 设备失败", e);
         }
-        
+
+        recoverMacAndroidUsbIfEmpty(devices);
+        keepMacAwakeWhileBackendRuns();
         return devices;
+    }
+
+    /**
+     * TDT 锁屏后 USB 调试经常直接没。充电插着时保持亮屏，并点亮一次。
+     * 有锁屏密码的机子只能亮屏，解不了锁——那种要改成滑动解锁或关掉自动锁屏。
+     */
+    private void keepAndroidAwakeOnUsb(String deviceId) {
+        long now = System.currentTimeMillis();
+        Long last = lastStayAwakeMs.get(deviceId);
+        if (last != null && now - last < STAY_AWAKE_REFRESH_MS) {
+            return;
+        }
+        lastStayAwakeMs.put(deviceId, now);
+        // 3 = AC + USB 插着就别熄屏（比 svc power stayon 在华为/TDT 上稳）
+        runQuiet("adb", "-s", deviceId, "shell", "settings", "put", "global",
+                "stay_on_while_plugged_in", "3");
+        runQuiet("adb", "-s", deviceId, "shell", "input", "keyevent", "KEYCODE_WAKEUP");
+    }
+
+    /** Mini 自己锁屏/休眠也会把 USB 挂起，后端活着就别让这台 Mac 睡 */
+    private synchronized void keepMacAwakeWhileBackendRuns() {
+        String os = System.getProperty("os.name", "");
+        if (!os.toLowerCase(Locale.ROOT).contains("mac")) {
+            return;
+        }
+        if (macCaffeinate != null && macCaffeinate.isAlive()) {
+            return;
+        }
+        try {
+            macCaffeinate = new ProcessBuilder(
+                    "caffeinate", "-dims", "-w", String.valueOf(ProcessHandle.current().pid()))
+                    .redirectErrorStream(true)
+                    .start();
+            log.info("已启动 caffeinate，后端退出前这台 Mac 不因空闲锁屏休眠");
+        } catch (Exception e) {
+            log.debug("启动 caffeinate 失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 线还在、adb 是空的：多半是 TDT/华为把「手机助手」虚拟光驱挂上来了。
+     * 只弹光驱，不重启 adb——kill-server 自己就会把刚连上的机子打掉。
+     */
+    private void recoverMacAndroidUsbIfEmpty(List<Device> devices) {
+        if (devices != null && !devices.isEmpty()) {
+            return;
+        }
+        String os = System.getProperty("os.name", "");
+        if (!os.toLowerCase(Locale.ROOT).contains("mac")) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastAndroidUsbRecoverMs < ANDROID_USB_RECOVER_COOLDOWN_MS) {
+            return;
+        }
+        if (!macUsbHasTdtech()) {
+            return;
+        }
+        lastAndroidUsbRecoverMs = now;
+        int ejected = ejectMacPhoneHelperCds();
+        if (ejected > 0) {
+            log.warn("USB 看得到 TDT，adb 却是空的：已弹出 {} 个「手机助手」虚拟光驱", ejected);
+        }
+        // 没有光驱时也常见：USB 上 ADB 口还在，本机 adb 守护进程却丢了这台机。
+        // 只在「已经扫到 0 台」时重启，不会把还在线的设备踢掉。
+        if (restartAdbDaemon()) {
+            log.warn("USB 看得到 TDT，adb 列表为空：已重启本机 adb，下一轮扫描再认");
+        }
+    }
+
+    private static boolean restartAdbDaemon() {
+        try {
+            Process kill = new ProcessBuilder("adb", "kill-server").redirectErrorStream(true).start();
+            kill.waitFor(6, TimeUnit.SECONDS);
+            Process start = new ProcessBuilder("adb", "start-server").redirectErrorStream(true).start();
+            start.waitFor(8, TimeUnit.SECONDS);
+            return start.exitValue() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean macUsbHasTdtech() {
+        try {
+            Process p = new ProcessBuilder("ioreg", "-p", "IOUSB", "-w0")
+                    .redirectErrorStream(true)
+                    .start();
+            String out;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append('\n');
+                }
+                out = sb.toString();
+            }
+            p.waitFor(4, TimeUnit.SECONDS);
+            return out.contains("TDT-MA01") || out.contains("TDTech");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static int ejectMacPhoneHelperCds() {
+        int n = 0;
+        Path vol = Path.of("/Volumes/手机助手");
+        if (Files.exists(vol)) {
+            if (runQuiet("diskutil", "eject", "/Volumes/手机助手")) {
+                n++;
+            }
+        }
+        try {
+            Process p = new ProcessBuilder("diskutil", "list")
+                    .redirectErrorStream(true)
+                    .start();
+            String currentDisk = null;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Matcher disk = Pattern.compile("^/dev/(disk\\d+)").matcher(line.trim());
+                    if (disk.find()) {
+                        currentDisk = disk.group(1);
+                    }
+                    if (currentDisk != null && line.contains("手机助手")) {
+                        if (runQuiet("diskutil", "eject", currentDisk)) {
+                            n++;
+                        }
+                        currentDisk = null;
+                    }
+                }
+            }
+            p.waitFor(6, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+            // 弹不出就等下一轮，不把扫描打挂
+        }
+        return n;
+    }
+
+    private static boolean runQuiet(String... cmd) {
+        try {
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            p.waitFor(8, TimeUnit.SECONDS);
+            return p.exitValue() == 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     /**

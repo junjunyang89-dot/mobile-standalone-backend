@@ -39,6 +39,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 基于 Appium 的驱动适配器，支持 Android 与 iOS，与 ADB/idevice 驱动二选一（通过 appium.enabled 切换）。
@@ -1230,6 +1231,15 @@ public class AppiumDriverAdapter implements PlatformDriver {
      */
     public boolean clickElementPreferCoordinates(String deviceId, String selector, String clickMethod,
                                                  String elementKey) {
+        return clickElementPreferCoordinates(deviceId, selector, clickMethod, elementKey, 50, 50);
+    }
+
+    /**
+     * @param offsetXPercent 元素宽度百分比，50=中心；H5 合并栏点「最新」大约 90
+     * @param offsetYPercent 元素高度百分比，50=中心
+     */
+    public boolean clickElementPreferCoordinates(String deviceId, String selector, String clickMethod,
+                                                 String elementKey, int offsetXPercent, int offsetYPercent) {
         String method = normalizeClickMethod(clickMethod);
         int[] coord = parseCoordinateSelector(selector);
         if (coord != null) {
@@ -1258,8 +1268,10 @@ public class AppiumDriverAdapter implements PlatformDriver {
         int y;
         try {
             rect = el.getRect();
-            x = rect.getX() + Math.max(1, rect.getWidth() / 2);
-            y = rect.getY() + Math.max(1, rect.getHeight() / 2);
+            int[] tap = ClickTapPoint.of(rect.getX(), rect.getY(), rect.getWidth(), rect.getHeight(),
+                    offsetXPercent, offsetYPercent);
+            x = tap[0];
+            y = tap[1];
         } catch (Exception e) {
             log.warn("读取元素坐标失败: {}", e.getMessage());
             if ("ADB".equals(method) || "COORDINATE".equals(method)) {
@@ -1269,7 +1281,8 @@ public class AppiumDriverAdapter implements PlatformDriver {
         }
 
         boolean ios = sessions.get(deviceId) instanceof IOSDriver;
-        boolean toggleLike = looksLikeIosToggleOrCheckbox(el, selector, elementKey);
+        boolean customOffset = ClickTapPoint.isCustom(offsetXPercent, offsetYPercent);
+        boolean toggleLike = !customOffset && looksLikeIosToggleOrCheckbox(el, selector, elementKey);
         // 勾选框若误选「补点」仍会连点两次 → 降级为 AUTO 单次路径
         if (toggleLike && "ELEMENT_THEN_COORD".equals(method)) {
             log.warn("勾选/开关勿用 ELEMENT_THEN_COORD，已降级为单次: elementKey={} selector={}",
@@ -1277,6 +1290,17 @@ public class AppiumDriverAdapter implements PlatformDriver {
             method = "AUTO";
         }
         boolean ok;
+        if (customOffset) {
+            // element.click 永远打中心；偏移必须走坐标/ADB
+            ok = switch (method) {
+                case "ADB" -> adbInputTap(deviceId, x, y);
+                default -> clickWithMethod(deviceId, x, y, "COORDINATE")
+                        || adbInputTap(deviceId, x, y);
+            };
+            log.info("clickElementPreferCoordinates: offset tap ({},{}) x%={} y%={} method={} elementKey={} selector={} ok={}",
+                    x, y, offsetXPercent, offsetYPercent, method, elementKey, selector, ok);
+            return ok;
+        }
         switch (method) {
             case "ADB" -> ok = adbInputTap(deviceId, x, y);
             case "COORDINATE" -> ok = clickWithMethod(deviceId, x, y, "COORDINATE");
@@ -1456,13 +1480,11 @@ public class AppiumDriverAdapter implements PlatformDriver {
     @Override
     public boolean swipe(String deviceId, int x1, int y1, int x2, int y2, int duration) {
         AppiumDriver driver = sessions.get(deviceId);
-        if (driver == null) return false;
         int durMs = Math.max(100, duration);
+        int travel = Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1));
 
-        // iOS XCUITest 不支持 Android 的 mobile: swipeGesture
         if (driver instanceof IOSDriver) {
             try {
-                // duration 单位：秒
                 double durSec = Math.max(0.15, Math.min(3.0, durMs / 1000.0));
                 driver.executeScript("mobile: dragFromToForDuration", Map.of(
                         "duration", durSec,
@@ -1478,6 +1500,22 @@ public class AppiumDriverAdapter implements PlatformDriver {
                 log.warn("iOS dragFromToForDuration 失败，回退 W3C: {}", e.getMessage());
             }
             return swipeViaW3c(driver, x1, y1, x2, y2, durMs);
+        }
+
+        if (driver == null) {
+            log.warn("无 Appium 会话，小幅滑动走 ADB: ({},{})->({},{})", x1, y1, x2, y2);
+            return swipeViaAdb(deviceId, x1, y1, x2, y2, shortTravelDur(travel, durMs));
+        }
+
+        // 短距离：swipeGesture 常空滑成功；W3C 在会话抖时会抛，必须再回退 ADB，
+        // 否则关键字只报「滑动失败: up #1」，页面上也看不见原因。
+        if (travel < 180) {
+            int flickMs = shortTravelDur(travel, durMs);
+            if (swipeViaW3c(driver, x1, y1, x2, y2, flickMs)) {
+                return true;
+            }
+            log.warn("W3C 短滑失败，回退 ADB: ({},{})->({},{})", x1, y1, x2, y2);
+            return swipeViaAdb(deviceId, x1, y1, x2, y2, flickMs);
         }
 
         try {
@@ -1524,7 +1562,42 @@ public class AppiumDriverAdapter implements PlatformDriver {
             return true;
         } catch (Exception e) {
             log.warn("Android swipeGesture 失败，回退 W3C: {}", e.getMessage());
-            return swipeViaW3c(driver, x1, y1, x2, y2, durMs);
+            if (swipeViaW3c(driver, x1, y1, x2, y2, durMs)) {
+                return true;
+            }
+            return swipeViaAdb(deviceId, x1, y1, x2, y2, durMs);
+        }
+    }
+
+    private static int shortTravelDur(int travel, int durationMs) {
+        return travel < 180 ? Math.min(Math.max(80, durationMs), 220) : durationMs;
+    }
+
+    /** 不依赖 Appium 会话，设备还在就能滑 */
+    private boolean swipeViaAdb(String deviceId, int x1, int y1, int x2, int y2, int durationMs) {
+        try {
+            Process p = new ProcessBuilder(
+                    "adb", "-s", deviceId, "shell", "input", "swipe",
+                    String.valueOf(x1), String.valueOf(y1),
+                    String.valueOf(x2), String.valueOf(y2),
+                    String.valueOf(Math.max(80, durationMs)))
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = p.waitFor(8, TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                log.warn("ADB input swipe 超时: ({},{})->({},{})", x1, y1, x2, y2);
+                return false;
+            }
+            if (p.exitValue() != 0) {
+                log.warn("ADB input swipe 退出码 {}: ({},{})->({},{})", p.exitValue(), x1, y1, x2, y2);
+                return false;
+            }
+            log.info("ADB input swipe 成功: ({},{})->({},{})", x1, y1, x2, y2);
+            return true;
+        } catch (Exception e) {
+            log.warn("ADB input swipe 失败 ({},{})->({},{}): {}", x1, y1, x2, y2, e.getMessage());
+            return false;
         }
     }
 
@@ -1535,9 +1608,10 @@ public class AppiumDriverAdapter implements PlatformDriver {
             Sequence seq = new Sequence(finger, 0)
                     .addAction(finger.createPointerMove(Duration.ZERO, PointerInput.Origin.viewport(), x1, y1))
                     .addAction(finger.createPointerDown(PointerInput.MouseButton.LEFT.asArg()))
-                    .addAction(new Pause(finger, Duration.ofMillis(80)))
+                    .addAction(new Pause(finger, Duration.ofMillis(
+                            Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1)) < 180 ? 20 : 80)))
                     .addAction(finger.createPointerMove(
-                            Duration.ofMillis(Math.max(120, durationMs)),
+                            Duration.ofMillis(Math.max(80, durationMs)),
                             PointerInput.Origin.viewport(), x2, y2))
                     .addAction(finger.createPointerUp(PointerInput.MouseButton.LEFT.asArg()));
             driver.perform(Collections.singletonList(seq));
@@ -1566,39 +1640,143 @@ public class AppiumDriverAdapter implements PlatformDriver {
     public boolean inputTextToElement(String deviceId, String selector, String text) {
         WebElement el = findElement(deviceId, selector);
         if (el == null) return false;
+        String raw = text != null ? text : "";
         try {
             try {
                 el.click();
             } catch (Exception ignored) {
             }
+            // 评论入口经常是 TextView 占位（「友好评论，友善社区」）。
+            // sendKeys 打在 TextView 上不抛异常、也不进输入框，流程会绿、字却没打上去。
+            WebElement target = isEditable(el) ? el : findFocusedEditText(deviceId);
+            if (target == null) {
+                log.warn("输入目标不可编辑且找不到 EditText: selector={}", selector);
+                return typeViaMobileType(deviceId, raw);
+            }
+            if (target != el) {
+                try {
+                    target.click();
+                } catch (Exception ignored) {
+                }
+            }
             try {
-                el.clear();
+                target.clear();
             } catch (Exception ignored) {
             }
-            el.sendKeys(text != null ? text : "");
+            target.sendKeys(raw);
+            if (!raw.isEmpty() && !textLanded(target, raw)) {
+                log.warn("sendKeys 后输入框仍空，改走 mobile: type: selector={}", selector);
+                return typeViaMobileType(deviceId, raw);
+            }
             return true;
         } catch (Exception e) {
             log.warn("Appium 元素输入失败，尝试焦点 EditText: selector={} {}", selector, e.getMessage());
+            return typeIntoFocusedEditText(deviceId, raw);
+        }
+    }
+
+    /** TextView / StaticText 占位不算可输入，真正能打字的是 EditText / TextField */
+    static boolean isEditable(WebElement el) {
+        if (el == null) {
+            return false;
+        }
+        String cls = firstAttr(el, "class", "className");
+        if (cls.isEmpty()) {
+            return false;
+        }
+        String lower = cls.toLowerCase(Locale.ROOT);
+        return lower.contains("edittext")
+                || lower.contains("textfield")
+                || lower.contains("xcuielementtypetextview");
+    }
+
+    private WebElement findFocusedEditText(String deviceId) {
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) {
+            return null;
+        }
+        try {
+            Thread.sleep(400);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+        try {
+            return driver.findElement(AppiumBy.xpath("//android.widget.EditText[@focused='true']"));
+        } catch (Exception ignored) {
+        }
+        try {
+            return driver.findElement(AppiumBy.className("android.widget.EditText"));
+        } catch (Exception ignored) {
+        }
+        try {
+            return driver.findElement(AppiumBy.className("XCUIElementTypeTextField"));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean typeIntoFocusedEditText(String deviceId, String text) {
+        try {
+            WebElement focused = findFocusedEditText(deviceId);
+            if (focused == null) {
+                return typeViaMobileType(deviceId, text);
+            }
+            focused.click();
             try {
-                AppiumDriver driver = sessions.get(deviceId);
-                if (driver == null) return false;
-                // TextView 占位点开后，真正可输入的是 focused EditText
-                WebElement focused = driver.findElement(AppiumBy.xpath("//android.widget.EditText[@focused='true']"));
-                if (focused == null) {
-                    focused = driver.findElement(AppiumBy.className("android.widget.EditText"));
-                }
-                focused.click();
-                try {
-                    focused.clear();
-                } catch (Exception ignored) {
-                }
-                focused.sendKeys(text != null ? text : "");
-                return true;
-            } catch (Exception e2) {
-                log.warn("Appium 焦点 EditText 输入仍失败: {}", e2.getMessage());
+                focused.clear();
+            } catch (Exception ignored) {
+            }
+            focused.sendKeys(text);
+            if (!text.isEmpty() && !textLanded(focused, text)) {
+                return typeViaMobileType(deviceId, text);
+            }
+            return true;
+        } catch (Exception e2) {
+            log.warn("Appium 焦点 EditText 输入仍失败: {}", e2.getMessage());
+            return typeViaMobileType(deviceId, text);
+        }
+    }
+
+    private boolean typeViaMobileType(String deviceId, String text) {
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) {
+            return false;
+        }
+        try {
+            driver.executeScript("mobile: type", Map.of("text", text != null ? text : ""));
+            return true;
+        } catch (Exception e) {
+            log.warn("mobile: type 输入失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    static boolean textLanded(WebElement el, String expected) {
+        if (el == null || expected == null || expected.isEmpty()) {
+            return true;
+        }
+        String got = firstAttr(el, "text", "value");
+        if (got.isEmpty()) {
+            try {
+                got = el.getText() != null ? el.getText() : "";
+            } catch (Exception ignored) {
                 return false;
             }
         }
+        return got.contains(expected);
+    }
+
+    private static String firstAttr(WebElement el, String... names) {
+        for (String name : names) {
+            try {
+                String v = el.getAttribute(name);
+                if (v != null && !v.isBlank()) {
+                    return v;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return "";
     }
 
     @Override

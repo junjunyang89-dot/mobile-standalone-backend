@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
 public final class LocatorTemplate {
 
     private static final Pattern RAND_INDEX = Pattern.compile(
-            "\\[(X|x|RAND|rand)(?::(\\d+)\\s*-\\s*(\\d+))?]");
+            "\\[(X|x|RAND|rand)(?:[:：](\\d+)\\s*-\\s*(\\d+))?]");
 
     /** ${变量名}：字母数字下划线，不含花括号 */
     private static final Pattern NAMED_VAR = Pattern.compile("\\$\\{([A-Za-z0-9_]+)}");
@@ -152,6 +152,69 @@ public final class LocatorTemplate {
             } else {
                 picked = Math.min(max, Math.max(min, shared));
             }
+            out.append('[').append(picked).append(']');
+            last = m.end();
+        }
+        out.append(selector.substring(last));
+        return out.toString();
+    }
+
+    /**
+     * 把 [X:1-10] 展开成范围内每条定位，而不是随机抽一个。
+     * 列表里「滑到谁露出来点谁」用这个：不知道会命中哪一张，范围内任一可见即可。
+     * 无占位符时原样一条。
+     */
+    public static java.util.List<String> expandAllIndexes(String selector) {
+        if (selector == null || selector.isEmpty()) {
+            return java.util.List.of();
+        }
+        Matcher probe = RAND_INDEX.matcher(selector);
+        if (!probe.find()) {
+            return java.util.List.of(selector);
+        }
+        int min = 1;
+        int max = 3;
+        if (probe.group(2) != null && probe.group(3) != null) {
+            min = parseBound(probe.group(2), 1);
+            max = parseBound(probe.group(3), 3);
+        }
+        if (min > max) {
+            int t = min;
+            min = max;
+            max = t;
+        }
+        min = Math.max(1, Math.min(100, min));
+        max = Math.max(1, Math.min(100, max));
+        if (min > max) {
+            int t = min;
+            min = max;
+            max = t;
+        }
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (int i = min; i <= max; i++) {
+            out.add(replaceAllRandWith(selector, i));
+        }
+        return out;
+    }
+
+    private static String replaceAllRandWith(String selector, int index) {
+        Matcher m = RAND_INDEX.matcher(selector);
+        StringBuilder out = new StringBuilder();
+        int last = 0;
+        while (m.find()) {
+            out.append(selector, last, m.start());
+            int min = 1;
+            int max = 100;
+            if (m.group(2) != null && m.group(3) != null) {
+                min = parseBound(m.group(2), 1);
+                max = parseBound(m.group(3), 100);
+                if (min > max) {
+                    int t = min;
+                    min = max;
+                    max = t;
+                }
+            }
+            int picked = Math.min(max, Math.max(min, index));
             out.append('[').append(picked).append(']');
             last = m.end();
         }

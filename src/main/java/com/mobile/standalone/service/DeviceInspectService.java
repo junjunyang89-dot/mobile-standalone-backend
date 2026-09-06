@@ -4,6 +4,7 @@ import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.entity.UiElement;
 import com.mobile.standalone.mapper.DeviceMapper;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
+import com.mobile.standalone.service.driver.ClickTapPoint;
 import com.mobile.standalone.service.driver.PlatformRouter;
 import com.mobile.standalone.service.harmony.HarmonyHierarchyXml;
 import com.mobile.standalone.service.inspect.LocatorMatcher;
@@ -133,7 +134,54 @@ public class DeviceInspectService {
             r.setWidth(size[0]);
             r.setHeight(size[1]);
         }
+        r.setFilterBar(detectFilterBarOverlay(lastPageSourceByDevice.get(id)));
         return r;
+    }
+
+    /**
+     * 评论筛选栏在原生树里常是一整段 text。截图上直接画出「热门/最早/最新」芯片，
+     * 点芯片回填相对整条栏的百分比，不再走 H5 屏幕坐标。
+     */
+    private FilterBarOverlay detectFilterBarOverlay(String xml) {
+        if (!usableHierarchy(xml)) {
+            return null;
+        }
+        try {
+            org.w3c.dom.Document doc = UiHierarchyBuilder.parseDocument(xml);
+            List<HitNode> nodes = new ArrayList<>();
+            walk(doc.getDocumentElement(), nodes, null, new int[]{0}, null, null);
+            HitNode best = findMergedFilterBar(nodes, null, null);
+            if (best == null) {
+                return null;
+            }
+            String merged = firstNonBlank(best.text, best.contentDesc);
+            List<String> labels = orderedMergedFilterHits(merged);
+            FilterBarOverlay overlay = new FilterBarOverlay();
+            overlay.setBarBounds(Map.of(
+                    "left", best.left, "top", best.top, "right", best.right, "bottom", best.bottom));
+            List<FilterChip> chips = new ArrayList<>();
+            for (String lab : labels) {
+                Map<String, Integer> seg = segmentBoundsForMergedFilter(best, merged, lab, best.left);
+                int sl = seg.getOrDefault("left", best.left);
+                int sr = seg.getOrDefault("right", best.right);
+                int st = seg.getOrDefault("top", best.top);
+                int sb = seg.getOrDefault("bottom", best.bottom);
+                int[] p = ClickTapPoint.percentOf(
+                        best.left, best.top, best.right - best.left, best.bottom - best.top,
+                        (sl + sr) / 2, (st + sb) / 2);
+                FilterChip chip = new FilterChip();
+                chip.setLabel(lab);
+                chip.setOffsetXPercent(p[0]);
+                chip.setOffsetYPercent(p[1]);
+                chip.setBounds(seg);
+                chips.add(chip);
+            }
+            overlay.setChips(chips);
+            return overlay;
+        } catch (Exception e) {
+            log.debug("识别 H5 筛选栏芯片失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     /** iOS 截图失败时给出可操作提示；Android 保持简短。 */
@@ -197,6 +245,11 @@ public class DeviceInspectService {
 
     public HitTestResult hitTest(String deviceId, Double xRatio, Double yRatio, Integer x, Integer y,
                                  String appId) {
+        return hitTest(deviceId, xRatio, yRatio, x, y, appId, null);
+    }
+
+    public HitTestResult hitTest(String deviceId, Double xRatio, Double yRatio, Integer x, Integer y,
+                                 String appId, String elementKey) {
         Device device = requireConnected(deviceId);
         String id = deviceId.trim();
         int[] shotSize = resolveShotSize(deviceId, device);
@@ -304,9 +357,10 @@ public class DeviceInspectService {
             result.setHierarchyWidth(hierSize[0]);
             result.setHierarchyHeight(hierSize[1]);
         }
+        org.w3c.dom.Document doc = null;
         // 不替人拍板：把 locator 唯一性和「命中的是树上哪个节点」一起给出，选错了前端能往上跳一级
         try {
-            org.w3c.dom.Document doc = UiHierarchyBuilder.parseDocument(xml);
+            doc = UiHierarchyBuilder.parseDocument(xml);
             enrichMatchCounts(doc, hits);
             String selected = firstNodePath(hits);
             result.setSelectedNodePath(selected);
@@ -316,7 +370,134 @@ public class DeviceInspectService {
         }
         result.setCandidates(hits);
         result.setWarnings(warnings);
+        fillTapOffset(result, px, py, hits, doc, appId, platform, elementKey);
         return result;
+    }
+
+    /**
+     * 百分比必须相对「执行时要点的那个元素」的整框：
+     * 优先步骤已绑的 elementKey（如 COMMENT_FILTER_BAR），再找 H5 合并筛选栏，
+     * 绝不拿屏幕坐标小方块或「最新」那一小段来算。
+     */
+    private void fillTapOffset(HitTestResult result, int px, int py, List<HitCandidate> hits,
+                               org.w3c.dom.Document doc, String appId, String platform, String elementKey) {
+        Map<String, Integer> box = resolveTapOffsetBox(doc, px, py, hits, appId, platform, elementKey);
+        if (box == null) {
+            return;
+        }
+        int left = box.getOrDefault("left", 0);
+        int top = box.getOrDefault("top", 0);
+        int right = box.getOrDefault("right", left);
+        int bottom = box.getOrDefault("bottom", top);
+        int[] p = ClickTapPoint.percentOf(left, top, right - left, bottom - top, px, py);
+        result.setTapOffsetXPercent(p[0]);
+        result.setTapOffsetYPercent(p[1]);
+        result.setTapOffsetBounds(box);
+        result.setTapOffsetHint("相对已绑元素/整条筛选栏，不是屏幕坐标");
+    }
+
+    private Map<String, Integer> resolveTapOffsetBox(org.w3c.dom.Document doc, int px, int py,
+                                                     List<HitCandidate> hits, String appId,
+                                                     String platform, String elementKey) {
+        Map<String, Integer> bound = boundsOfBoundElement(doc, appId, platform, elementKey);
+        if (boundsContain(bound, px, py)) {
+            return bound;
+        }
+        Map<String, Integer> merged = boundsOfMergedFilterBar(doc, px, py);
+        if (merged != null) {
+            return merged;
+        }
+        if (bound != null) {
+            return bound;
+        }
+        return pickOffsetContainer(hits, px, py);
+    }
+
+    private Map<String, Integer> boundsOfBoundElement(org.w3c.dom.Document doc, String appId,
+                                                      String platform, String elementKey) {
+        if (doc == null || appId == null || appId.isBlank() || elementKey == null || elementKey.isBlank()) {
+            return null;
+        }
+        try {
+            UiElement el = uiElementService.findActiveByKey(appId, platform, elementKey.trim());
+            if (el == null) {
+                el = uiElementService.findByKey(appId, platform, elementKey.trim());
+            }
+            if (el == null || el.getLocatorValue() == null || el.getLocatorValue().isBlank()) {
+                return null;
+            }
+            List<LocatorMatcher.Hit> found = LocatorMatcher.matches(doc, el.getLocatorType(), el.getLocatorValue());
+            if (found == null || found.isEmpty()) {
+                return null;
+            }
+            LocatorMatcher.Hit first = found.get(0);
+            if (!first.hasBounds()) {
+                return null;
+            }
+            return Map.of("left", first.left(), "top", first.top(), "right", first.right(), "bottom", first.bottom());
+        } catch (Exception e) {
+            log.debug("按 elementKey 取点击参照框失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private Map<String, Integer> boundsOfMergedFilterBar(org.w3c.dom.Document doc, int px, int py) {
+        if (doc == null) {
+            return null;
+        }
+        try {
+            List<HitNode> nodes = new ArrayList<>();
+            walk(doc.getDocumentElement(), nodes, null, new int[]{0}, null, null);
+            HitNode best = null;
+            for (HitNode n : nodes) {
+                String label = firstNonBlank(n.text, n.contentDesc);
+                if (orderedMergedFilterHits(label).size() < 2) {
+                    continue;
+                }
+                if (n.left <= px && px < n.right && n.top <= py && py < n.bottom) {
+                    if (best == null || n.area() < best.area()) {
+                        best = n;
+                    }
+                }
+            }
+            if (best == null) {
+                return null;
+            }
+            return Map.of("left", best.left, "top", best.top, "right", best.right, "bottom", best.bottom);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Map<String, Integer> pickOffsetContainer(List<HitCandidate> hits, int px, int py) {
+        if (hits == null) {
+            return null;
+        }
+        for (HitCandidate c : hits) {
+            if (c == null || "coordinate".equalsIgnoreCase(c.getLocatorType())) {
+                continue;
+            }
+            String cls = c.getClassName() != null ? c.getClassName() : "";
+            if (cls.contains("WebView") || cls.contains("pwX5")) {
+                continue;
+            }
+            Map<String, Integer> box = c.getContainerBounds() != null ? c.getContainerBounds() : c.getBounds();
+            if (boundsContain(box, px, py)) {
+                return box;
+            }
+        }
+        return null;
+    }
+
+    private static boolean boundsContain(Map<String, Integer> box, int px, int py) {
+        if (box == null || box.isEmpty()) {
+            return false;
+        }
+        int left = box.getOrDefault("left", 0);
+        int top = box.getOrDefault("top", 0);
+        int right = box.getOrDefault("right", left);
+        int bottom = box.getOrDefault("bottom", top);
+        return px >= left && px < right && py >= top && py < bottom;
     }
 
     /** 坐标方案追加到末尾，不抢默认首选 */
@@ -391,6 +572,14 @@ public class DeviceInspectService {
             }
         }
         if (!onlyShell) return hits;
+        for (HitCandidate c : others) {
+            String blob = (c.getText() == null ? "" : c.getText())
+                    + (c.getSuggestedNameZh() == null ? "" : c.getSuggestedNameZh())
+                    + (c.getLocatorValue() == null ? "" : c.getLocatorValue());
+            if (orderedMergedFilterHits(blob).size() >= 2 || blob.contains("COMMENT_FILTER")) {
+                return hits;
+            }
+        }
         coord.setSuggestedNameZh("H5坐标点选");
         coord.setVisualHint("动态/社区列表在 WebView 内，原生树看不到帖子卡片；请用坐标，或点原生 Tab/评论框。"
                 + " 坐标 " + coord.getLocatorValue());
@@ -483,9 +672,13 @@ public class DeviceInspectService {
             // 用节点数而不是只看文案：多窗口带来的弹层里常常是图标按钮，没有 text，
             // 只比文案会把这类差异整个漏掉。bounds= 在两种 XML 里都是每节点一个，
             // 而 dump 用 <node>、Appium 用类名做标签，只能靠属性来数
+            if (hasMergedFilterText(dump) && !hasMergedFilterText(appium)) {
+                log.info("点选 pageSource 选用 dump（含评论筛选栏文案，Appium 树没有）");
+                return dump;
+            }
             int dumpNodes = countAttr(dump, "bounds=\"");
             int appiumNodes = countAttr(appium, "bounds=\"");
-            if (appiumNodes > dumpNodes) {
+            if (appiumNodes > dumpNodes && hasMergedFilterText(appium) == hasMergedFilterText(dump)) {
                 log.info("点选 pageSource 选用 Appium multiWindows（节点 {} vs dump {}）",
                         appiumNodes, dumpNodes);
                 return appium;
@@ -874,6 +1067,10 @@ public class DeviceInspectService {
                 }
             }
         }
+        HitNode filterBar = findMergedFilterBar(nodes, px, py);
+        if (filterBar != null && !containing.contains(filterBar)) {
+            containing.add(filterBar);
+        }
         if (containing.isEmpty()) {
             return List.of();
         }
@@ -981,6 +1178,7 @@ public class DeviceInspectService {
 
         HitZone zone = detectHitZone(scoped, labelPool, px, py);
         log.info("点选分区 zone={} @({},{})", zone, px, py);
+        prependMergedFilterBar(out, seen, labelPool, px, py);
 
         // 现用现选：点上自带文案的节点优先（避免父壳套用「退出登录」等远处文案）
         if (zone == HitZone.DEFAULT || zone == HitZone.LIST_CARD || zone == HitZone.H5_FILTER) {
@@ -1082,7 +1280,8 @@ public class DeviceInspectService {
             if (!(n.left <= px && px < n.right && n.top <= py && py < n.bottom)) continue;
             if (isGenericContainer(n) || isWebViewShell(n) || isScrollShell(n)) continue;
             String t = firstNonBlank(n.text, n.contentDesc);
-            if (t == null || t.isBlank() || t.length() > 40 || isNoiseLabel(t) || isAppChromeLabel(t)) continue;
+            if (t == null || t.isBlank() || isNoiseLabel(t) || isAppChromeLabel(t)) continue;
+            if (t.length() > 40 && orderedMergedFilterHits(t).size() < 2) continue;
             texts.add(n);
         }
         texts.sort(Comparator.comparingInt(HitNode::area));
@@ -1832,6 +2031,79 @@ public class DeviceInspectService {
             hits.add(MERGED_H5_FILTER_LABELS.get(p[1]));
         }
         return hits;
+    }
+
+    private static boolean hasMergedFilterText(String xml) {
+        return xml != null && xml.contains("只看楼主")
+                && (xml.contains("热门") || xml.contains("最新"));
+    }
+
+    /**
+     * 像 Appium Inspector 一样找出「全部评论只看楼主热门最早最新」那一个节点。
+     * 点在栏中间时 Y 常因截图/dump 差几十字而脱靶，允许横向命中 + 纵向放宽。
+     */
+    private static HitNode findMergedFilterBar(List<HitNode> nodes, Integer px, Integer py) {
+        if (nodes == null) {
+            return null;
+        }
+        HitNode best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (HitNode n : nodes) {
+            if (n == null || !n.displayed) {
+                continue;
+            }
+            List<String> labels = orderedMergedFilterHits(firstNonBlank(n.text, n.contentDesc));
+            if (labels.size() < 2) {
+                continue;
+            }
+            int w = n.right - n.left;
+            int h = n.bottom - n.top;
+            if (w < 80 || h < 6 || h > 420) {
+                continue;
+            }
+            int score = labels.size() * 100_000 - w * h;
+            if (px != null && py != null) {
+                if (!(n.left <= px && px < n.right)) {
+                    continue;
+                }
+                boolean inside = n.top <= py && py < n.bottom;
+                int yDist = Math.abs((n.top + n.bottom) / 2 - py);
+                if (!inside && yDist > 160) {
+                    continue;
+                }
+                score += (200 - Math.min(200, yDist)) * 800;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = n;
+            }
+        }
+        return best;
+    }
+
+    private void prependMergedFilterBar(List<HitCandidate> out, java.util.LinkedHashSet<String> seen,
+                                        List<HitNode> labelPool, int px, int py) {
+        HitNode bar = findMergedFilterBar(labelPool, px, py);
+        if (bar == null) {
+            return;
+        }
+        String merged = firstNonBlank(bar.text, bar.contentDesc);
+        String left = merged != null && merged.contains("全部评论") ? "全部评论" : "只看楼主";
+        String right = merged != null && merged.contains("最新") ? "最新" : "热门";
+        HitCandidate whole = baseCandidate(bar, "评论筛选栏");
+        whole.setLocatorType("xpath");
+        whole.setLocatorValue("//*[contains(@text," + xpathLiteral(left)
+                + ") and contains(@text," + xpathLiteral(right) + ")]");
+        whole.setSuggestedNameZh("评论筛选栏");
+        whole.setSuggestedNameEn("COMMENT_FILTER_BAR");
+        whole.setText(merged);
+        whole.setVisualHint("整条栏（与 Inspector 同一节点）：" + merged
+                + "。点子项用横向百分比，不要存屏幕坐标。");
+        String key = whole.getLocatorType() + "|" + whole.getLocatorValue();
+        if (seen.add(key)) {
+            whole.setRank(out.size());
+            out.add(whole);
+        }
     }
 
     /** 按各段字数占比切条带，比均分更贴近「全部评论」宽、「最新」窄 */
@@ -2778,7 +3050,9 @@ public class DeviceInspectService {
         c.setResourceId(n.resourceId);
         c.setClickable(n.clickable);
         c.setEnabled(n.enabled);
-        c.setBounds(Map.of("left", n.left, "top", n.top, "right", n.right, "bottom", n.bottom));
+        Map<String, Integer> box = Map.of("left", n.left, "top", n.top, "right", n.right, "bottom", n.bottom);
+        c.setBounds(box);
+        c.setContainerBounds(box);
         c.setNodePath(n.nodePath);
         return c;
     }
@@ -3456,6 +3730,22 @@ public class DeviceInspectService {
         private String screenshotPath;
         private Integer width;
         private Integer height;
+        /** 本屏若有「热门/最早/最新」合并栏，截图上直接画芯片 */
+        private FilterBarOverlay filterBar;
+    }
+
+    @Data
+    public static class FilterBarOverlay {
+        private Map<String, Integer> barBounds;
+        private List<FilterChip> chips;
+    }
+
+    @Data
+    public static class FilterChip {
+        private String label;
+        private int offsetXPercent;
+        private int offsetYPercent;
+        private Map<String, Integer> bounds;
     }
 
     @Data
@@ -3482,6 +3772,11 @@ public class DeviceInspectService {
          * 而它要说的是「库里那条元素坏了」，是另一个话题。
          */
         private List<String> warnings;
+        /** 相对命中控件（整条栏）的横向百分比，供点击步骤回填 */
+        private Integer tapOffsetXPercent;
+        private Integer tapOffsetYPercent;
+        private Map<String, Integer> tapOffsetBounds;
+        private String tapOffsetHint;
     }
 
     /** 树上一个节点的轻量引用，够前端展示和再取 locator */
@@ -3543,6 +3838,8 @@ public class DeviceInspectService {
         private Boolean clickable;
         private Boolean enabled;
         private Map<String, Integer> bounds;
+        /** 拆段候选的 bounds 可能只罩「最新」；算百分比必须用整条栏 */
+        private Map<String, Integer> containerBounds;
         private String locatorType;
         private String locatorValue;
         private String suggestedNameEn;

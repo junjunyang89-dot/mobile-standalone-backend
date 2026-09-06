@@ -90,4 +90,68 @@ public final class ScreenVisibility {
             return true;
         }
     }
+
+    /**
+     * 区域内滑到为止：人已经看见这张卡，就该停。
+     * 只认中心点在屏内会漏——横滑卡很宽，露出来一大块时中心还在屏外，下一步就把卡滑走了。
+     */
+    public static boolean anyVisibleInRegion(KeywordContext ctx, List<String> selectors,
+                                            int left, int top, int right, int bottom, int[] screen) {
+        if (selectors == null) {
+            return false;
+        }
+        for (String selector : selectors) {
+            if (isVisibleInRegion(ctx, selector, left, top, right, bottom, screen)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isVisibleInRegion(KeywordContext ctx, String selector,
+                                           int left, int top, int right, int bottom, int[] screen) {
+        try {
+            if (!ctx.getDriver().isElementPresent(ctx.getDeviceId(), selector)) {
+                return false;
+            }
+            int[] box = ctx.getDriver().getElementBounds(ctx.getDeviceId(), selector);
+            if (box == null || box.length < 4) {
+                return true;
+            }
+            int clipL = left;
+            int clipT = top;
+            int clipR = right;
+            int clipB = bottom;
+            if (screen != null && screen.length >= 2) {
+                clipL = Math.max(clipL, 0);
+                clipT = Math.max(clipT, 0);
+                clipR = Math.min(clipR, screen[0]);
+                clipB = Math.min(clipB, screen[1]);
+            }
+            return boxVisibleInRegion(box, clipL, clipT, clipR, clipB);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 露出的宽、高够一块，就算到了。纯几何，方便单测。 */
+    public static boolean boxVisibleInRegion(int[] box, int left, int top, int right, int bottom) {
+        if (box == null || box.length < 4) {
+            return false;
+        }
+        int bl = Math.min(box[0], box[2]);
+        int bt = Math.min(box[1], box[3]);
+        int br = Math.max(box[0], box[2]);
+        int bb = Math.max(box[1], box[3]);
+        int ew = br - bl;
+        int eh = bb - bt;
+        if (ew <= 0 || eh <= 0) {
+            return false;
+        }
+        int iw = Math.max(0, Math.min(br, right) - Math.max(bl, left));
+        int ih = Math.max(0, Math.min(bb, bottom) - Math.max(bt, top));
+        int needW = Math.min(80, Math.max(24, ew / 3));
+        int needH = Math.min(40, Math.max(16, eh / 3));
+        return iw >= needW && ih >= needH;
+    }
 }

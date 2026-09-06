@@ -25,6 +25,17 @@ public interface FlowRuntime {
                                   List<ExecutionLogEntryDto> logs, String stepName)
             throws UiFlowExecutionException;
 
+    /**
+     * 同 {@link #requireSelectors}，但保留 [X:1-10] 不随机展开。
+     * 「范围内谁露出来点谁」要把区间展开成一组候选，而不是先抽死一个下标。
+     */
+    default List<String> requireSelectorTemplates(String platform, String uiAppId, String elementKey,
+                                                  Map<String, String> execParams,
+                                                  List<ExecutionLogEntryDto> logs, String stepName)
+            throws UiFlowExecutionException {
+        return requireSelectors(platform, uiAppId, elementKey, execParams, logs, stepName);
+    }
+
     /** 执行嵌套步骤（IF 分支、组件调用） */
     void runNestedSteps(List<Map<String, Object>> steps, KeywordContext ctx, int depth) throws Exception;
 
@@ -56,8 +67,21 @@ public interface FlowRuntime {
     String resolvePackage(String uiAppId, String platform, Map<String, Object> stepParams,
                           Map<String, String> execParams);
 
-    /** 按方向滑动（屏幕比例计算） */
+    /** 按方向滑动（默认大约半屏，容易把目标划过去） */
     boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction, int durationMs);
+
+    /**
+     * @param distancePercent 手指走过的屏幕比例；{@code <=0} 表示用默认大半屏
+     */
+    default boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction,
+                                     int durationMs, int distancePercent) {
+        return directionalSwipe(driver, deviceId, direction, durationMs);
+    }
+
+    default boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction,
+                                     int durationMs, double distancePercent) {
+        return directionalSwipe(driver, deviceId, direction, durationMs, (int) Math.round(distancePercent));
+    }
 
     /** ADB 直启，Appium 不可用时的 Android 回退 */
     boolean adbLaunchAndroid(String deviceId, String packageName, String activity);

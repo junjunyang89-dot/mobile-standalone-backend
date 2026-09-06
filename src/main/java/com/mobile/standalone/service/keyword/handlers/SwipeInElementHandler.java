@@ -37,6 +37,9 @@ public class SwipeInElementHandler implements KeywordHandler {
     /** 滑动距离小于这个值就没意义了，与其假装成功不如直接说清楚 */
     private static final int MIN_SPAN_PX = 60;
 
+    /** 区域内单次滑动默认只走区域跨度的一小段；拉满宽容易被外层页签抢走并切页 */
+    static final double DEFAULT_DISTANCE_PERCENT = 28;
+
     /** 滑固定次数 */
     private static final String STOP_FIXED = "fixed";
     /** 滑到指定元素出现为止 */
@@ -110,17 +113,20 @@ public class SwipeInElementHandler implements KeywordHandler {
                 ParamDef.number("durationMs", "单次滑动毫秒", 500)
                         .withHelp("太快会被识别成快速甩动直接滑过头，太慢会被当成长按，500 上下比较稳"),
                 ParamDef.number("intervalMs", "滑动间隔毫秒", 300),
-                ParamDef.number("marginPercent", "两端留白百分比", 10)
-                        .withHelp("从区域最边上起手容易被系统边缘手势吃掉，默认两端各留 10%"),
+                ParamDef.number("marginPercent", "两端留白百分比", 12)
+                        .withHelp("从区域最边上起手容易被系统边缘手势吃掉，默认两端各留 12%"),
+                ParamDef.number("distancePercent", "滑动幅度(%)", DEFAULT_DISTANCE_PERCENT)
+                        .withHelp("相对这一条区域宽/高的百分比，不是整屏。默认 28，不要拉满，"
+                                + "拉满容易被外层页签当成切页"),
                 ParamDef.bool("verifyChanged", "校验内容是否真的变了", true)
                         .withHelp("读这块区域的文案做前后对比，没变就告警并说明可能原因。"
                                 + "固定次数模式下只在开始前、结束后各读一次；"
                                 + "「滑到出现为止」模式下每轮读一次，用来判断是不是已经滑到头了——"
                                 + "关掉它，滑到头之后还会继续空滑到次数用完"),
                 ParamDef.bool("requireScrollable", "要求元素可滚动", true)
-                        .withHelp("元素 scrollable=false 时直接失败。这种元素吃不下横滑，"
-                                + "手势会穿透给父容器（首页那种外层是页签 ViewPager 的，结果就是切页签）。"
-                                + "个别自绘轮播不上报 scrollable 但确实能滑，那种情况才关掉它")
+                        .withHelp("绑的外壳不可滑时，会先在区域内找真正可滑的子节点再用它。"
+                                + "区域内也没有可滑层才失败，避免手势穿透到外层页签。"
+                                + "自绘轮播不上报 scrollable 时再关掉")
         );
     }
 
@@ -131,7 +137,8 @@ public class SwipeInElementHandler implements KeywordHandler {
         int duration = (int) Math.max(100, ctx.longParam("durationMs", 500));
         int times = (int) Math.min(30, Math.max(1, ctx.longParam("times", 1)));
         int intervalMs = (int) Math.max(0, ctx.longParam("intervalMs", 300));
-        int marginPercent = (int) Math.min(45, Math.max(0, ctx.longParam("marginPercent", 10)));
+        int marginPercent = (int) Math.min(45, Math.max(0, ctx.longParam("marginPercent", 12)));
+        double distancePercent = Math.min(70, Math.max(8, ctx.doubleParam("distancePercent", DEFAULT_DISTANCE_PERCENT)));
 
         // 只取一次范围：滑动的是区域里的内容，容器本身不动。
         // 每次循环重取的话，中途布局一抖就会「元素找不到」，把一次本来能跑完的滑动搞挂
@@ -169,15 +176,30 @@ public class SwipeInElementHandler implements KeywordHandler {
         log.info("[区域内滑动] element={} bounds=[{},{}][{},{}] {}×{} scrollable={} direction={}",
                 ctx.getElementKey(), left, top, right, bottom, width, height, scrollable, direction);
         if (ctx.boolParam("requireScrollable", true) && "false".equalsIgnoreCase(scrollable)) {
-            throw ctx.fail("区域内滑动",
-                    "元素 " + ctx.getElementKey() + " 的 scrollable=false，它吃不下横向滑动。"
-                            + "手势会穿透给父容器——外层是页签 ViewPager 的话，结果就是切到了别的页签，"
-                            + "而不是滚动这一条。"
-                            + "用 scripts/find_scroll_container.py --text <这一条上的某个文字> "
-                            + "找出真正可滑的那一层再绑。"
-                            + "（当前区域 [" + left + "," + top + "][" + right + "," + bottom + "]，"
-                            + width + "×" + height + "）",
-                    selector, "元素不可滚动: " + ctx.getElementKey());
+            // 专栏 vgList 这类外壳自己不上报可滑，真正吃手势的是里面的 RecyclerView。
+            // 只在绑定框里找，不往上爬，免得拿到外层 ViewPager 去切页签。
+            int[] inner = findScrollableInside(ctx, left, top, right, bottom, horizontal);
+            if (inner == null) {
+                throw ctx.fail("区域内滑动",
+                        "元素 " + ctx.getElementKey() + " 的 scrollable=false，它吃不下横向滑动。"
+                                + "区域内也没有可滑的子节点。"
+                                + "手势会穿透给父容器——外层是页签 ViewPager 的话，结果就是切到了别的页签。"
+                                + "把滑动区域改绑真正 scrollable=true 的那一层，或关掉「要求元素可滚动」。"
+                                + "（当前区域 [" + left + "," + top + "][" + right + "," + bottom + "]，"
+                                + width + "×" + height + "）",
+                        selector, "元素不可滚动: " + ctx.getElementKey());
+            }
+            left = inner[0];
+            top = inner[1];
+            right = inner[2];
+            bottom = inner[3];
+            width = right - left;
+            height = bottom - top;
+            span = horizontal ? width : height;
+            ctx.ok("区域内滑动",
+                    "绑的 " + ctx.getElementKey() + " 本身不可滑，已改用区域内可滑层 "
+                            + "[" + left + "," + top + "][" + right + "," + bottom + "] "
+                            + width + "×" + height);
         }
 
         // 绑到整屏容器时告警。这是这个关键字最容易踩的坑：
@@ -186,41 +208,11 @@ public class SwipeInElementHandler implements KeywordHandler {
         // 不失败只告警——确实有「就是要在一个占满屏的区域里滑」的正当场景
         warnIfWholeScreen(ctx, left, top, right, bottom, width, height);
 
-        int margin = span * marginPercent / 100;
-        // 横滑锁 Y、纵滑锁 X：偏一点就滑到隔壁控件上，而现象是「滑了但没反应」
-        int centerX = left + width / 2;
-        int centerY = top + height / 2;
-        int x1;
-        int y1;
-        int x2;
-        int y2;
-        switch (direction) {
-            case "right" -> {
-                x1 = left + margin;
-                x2 = right - margin;
-                y1 = centerY;
-                y2 = centerY;
-            }
-            case "up" -> {
-                x1 = centerX;
-                x2 = centerX;
-                y1 = bottom - margin;
-                y2 = top + margin;
-            }
-            case "down" -> {
-                x1 = centerX;
-                x2 = centerX;
-                y1 = top + margin;
-                y2 = bottom - margin;
-            }
-            // left：内容往左走，手指从右往左
-            default -> {
-                x1 = right - margin;
-                x2 = left + margin;
-                y1 = centerY;
-                y2 = centerY;
-            }
-        }
+        int[] ep = inRegionEndpoints(left, top, right, bottom, direction, marginPercent, distancePercent);
+        int x1 = ep[0];
+        int y1 = ep[1];
+        int x2 = ep[2];
+        int y2 = ep[3];
 
         // 「滑了但没动」是这个关键字最容易掉进去的坑，而它<b>不会报错</b>：
         // Appium 的手势发出去了就算成功，至于列表有没有滚，它不关心。
@@ -296,13 +288,17 @@ public class SwipeInElementHandler implements KeywordHandler {
 
         // 目标元素的定位先解析出来：定位没维护好要现在就报，
         // 而不是滑满 10 次之后说「没出现」——那会把配置问题伪装成产品问题
-        List<String> targetSelectors = ctx.getRuntime().requireSelectors(
-                ctx.getPlatform(), ctx.getUiAppId(), targetKey, ctx.getExecParams(), ctx.getLogs(),
-                ctx.sn("区域内滑动·目标元素"));
+        List<String> targetSelectors = untilSelectorsFromParams(ctx);
+        if (targetSelectors == null || targetSelectors.isEmpty()) {
+            targetSelectors = ctx.getRuntime().requireSelectors(
+                    ctx.getPlatform(), ctx.getUiAppId(), targetKey, ctx.getExecParams(), ctx.getLogs(),
+                    ctx.sn("区域内滑动·目标元素"));
+        }
         int[] screen = ScreenVisibility.screenSize(ctx);
 
-        if (ScreenVisibility.anyOnScreen(ctx, targetSelectors, screen)) {
-            ctx.ok("区域内滑动", targetKey + " 已经在屏上，无需滑动");
+        if (ScreenVisibility.anyVisibleInRegion(ctx, targetSelectors,
+                region.left(), region.top(), region.right(), region.bottom(), screen)) {
+            ctx.ok("区域内滑动", targetKey + " 已经在区域内，无需滑动");
             return;
         }
 
@@ -313,9 +309,17 @@ public class SwipeInElementHandler implements KeywordHandler {
             if (intervalMs > 0) {
                 ctx.sleep(intervalMs);
             }
-            if (ScreenVisibility.anyOnScreen(ctx, targetSelectors, screen)) {
+            if (containerGone(ctx, selector)) {
+                throw ctx.fail("区域内滑动",
+                        "滑第 " + i + " 次后原来的区域已经不在了——"
+                                + "多半是幅度太大，手势被外层页签抢走，切到了别的页面。"
+                                + "把「滑动幅度」再调小（现在是区域内百分比）。",
+                        selector, "滑动后离开当前区域: " + ctx.getElementKey());
+            }
+            if (ScreenVisibility.anyVisibleInRegion(ctx, targetSelectors,
+                    region.left(), region.top(), region.right(), region.bottom(), screen)) {
                 ctx.ok("区域内滑动",
-                        "滑 " + i + " 次后 " + targetKey + " 出现在屏幕内（"
+                        "滑 " + i + " 次后 " + targetKey + " 已出现在区域内（"
                                 + ctx.getElementKey() + " 内 " + direction + coords(gesture) + "）");
                 return;
             }
@@ -471,6 +475,142 @@ public class SwipeInElementHandler implements KeywordHandler {
         }
     }
 
+    /**
+     * 在绑定框里挑真正能吃手势的那一层。
+     * 全屏高的 ViewPager 即使和条带相交也丢掉——那是切页签的。
+     */
+    static int[] pickScrollableBounds(UiHierarchyBuilder.HierarchyNode root,
+                                      int left, int top, int right, int bottom,
+                                      boolean horizontal) {
+        if (root == null) {
+            return null;
+        }
+        int regionW = Math.max(0, right - left);
+        int regionH = Math.max(0, bottom - top);
+        if (regionW <= 0 || regionH <= 0) {
+            return null;
+        }
+        UiHierarchyBuilder.HierarchyNode best = null;
+        int bestArea = Integer.MAX_VALUE;
+        java.util.ArrayDeque<UiHierarchyBuilder.HierarchyNode> q = new java.util.ArrayDeque<>();
+        q.add(root);
+        while (!q.isEmpty()) {
+            UiHierarchyBuilder.HierarchyNode node = q.removeFirst();
+            if (node.getChildren() != null) {
+                q.addAll(node.getChildren());
+            }
+            if (!Boolean.TRUE.equals(node.getScrollable())) {
+                continue;
+            }
+            int[] nb = nodeBox(node);
+            if (nb == null) {
+                continue;
+            }
+            int nw = nb[2] - nb[0];
+            int nh = nb[3] - nb[1];
+            int candArea = nw * nh;
+            if (candArea <= 0) {
+                continue;
+            }
+            int inter = intersectionArea(left, top, right, bottom, nb[0], nb[1], nb[2], nb[3]);
+            // 资讯大列表 / 页签会和条带相交，但大部分面积在框外——那种不能用
+            if (inter < candArea * 0.6) {
+                continue;
+            }
+            if (horizontal) {
+                if (nh > regionH * 1.8) {
+                    continue;
+                }
+            } else if (nw > regionW * 1.8) {
+                continue;
+            }
+            if (candArea < bestArea) {
+                bestArea = candArea;
+                best = node;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        return nodeBox(best);
+    }
+
+    private static int[] findScrollableInside(KeywordContext ctx, int left, int top, int right, int bottom,
+                                              boolean horizontal) {
+        try {
+            String xml = ctx.getDriver().getPageSource(ctx.getDeviceId());
+            if (xml == null || xml.isBlank()) {
+                return null;
+            }
+            UiHierarchyBuilder.HierarchyNode root =
+                    UiHierarchyBuilder.build(UiHierarchyBuilder.parseDocument(xml), 1.0, 1.0);
+            return pickScrollableBounds(root, left, top, right, bottom, horizontal);
+        } catch (Exception e) {
+            log.debug("找区域内可滑层失败: {}", e.toString());
+            return null;
+        }
+    }
+
+    private static int[] nodeBox(UiHierarchyBuilder.HierarchyNode node) {
+        java.util.Map<String, Integer> b = node.getBounds();
+        if (b == null || b.get("left") == null || b.get("top") == null
+                || b.get("right") == null || b.get("bottom") == null) {
+            return null;
+        }
+        int l = b.get("left");
+        int t = b.get("top");
+        int r = b.get("right");
+        int bot = b.get("bottom");
+        if (r <= l || bot <= t) {
+            return null;
+        }
+        return new int[]{l, t, r, bot};
+    }
+
+    /**
+     * 区域内短滑：从靠一侧的位置走一段，不拉到对边。
+     * 返回 x1,y1,x2,y2。
+     */
+    static int[] inRegionEndpoints(int left, int top, int right, int bottom,
+                                   String direction, int marginPercent, double distancePercent) {
+        int width = Math.max(0, right - left);
+        int height = Math.max(0, bottom - top);
+        boolean horizontal = "left".equals(direction) || "right".equals(direction);
+        int span = horizontal ? width : height;
+        int pad = Math.max(8, span * Math.min(45, Math.max(0, marginPercent)) / 100);
+        int travel = Math.max(24, (int) Math.round(span * Math.min(70, Math.max(8, distancePercent)) / 100.0));
+        int maxTravel = Math.max(24, span - pad * 2);
+        travel = Math.min(travel, maxTravel);
+        int centerX = left + width / 2;
+        int centerY = top + height / 2;
+        return switch (direction == null ? "" : direction) {
+            case "right" -> new int[]{left + pad, centerY, left + pad + travel, centerY};
+            case "up" -> new int[]{centerX, bottom - pad, centerX, bottom - pad - travel};
+            case "down" -> new int[]{centerX, top + pad, centerX, top + pad + travel};
+            default -> new int[]{right - pad, centerY, right - pad - travel, centerY};
+        };
+    }
+
+    private static boolean containerGone(KeywordContext ctx, String selector) {
+        try {
+            int[] box = ctx.getDriver().getElementBounds(ctx.getDeviceId(), selector);
+            return box == null || box.length < 4;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private static int intersectionArea(int l1, int t1, int r1, int b1, int l2, int t2, int r2, int b2) {
+        int l = Math.max(l1, l2);
+        int t = Math.max(t1, t2);
+        int r = Math.min(r1, r2);
+        int b = Math.min(b1, b2);
+        if (r <= l || b <= t) {
+            return 0;
+        }
+        return (r - l) * (b - t);
+    }
+
     /** 取属性，取不到就返回 null——属性读不到不该让滑动跑不了 */
     private static String safeAttr(KeywordContext ctx, String selector, String name) {
         try {
@@ -478,6 +618,21 @@ public class SwipeInElementHandler implements KeywordHandler {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> untilSelectorsFromParams(KeywordContext ctx) {
+        Object raw = ctx.rawParam("untilSelectors");
+        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+            return null;
+        }
+        List<String> out = new java.util.ArrayList<>();
+        for (Object item : list) {
+            if (item != null && !item.toString().isBlank()) {
+                out.add(item.toString());
+            }
+        }
+        return out.isEmpty() ? null : out;
     }
 
     private static String normalize(String raw) {

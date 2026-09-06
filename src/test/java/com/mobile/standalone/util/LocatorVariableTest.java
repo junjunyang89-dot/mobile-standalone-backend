@@ -96,4 +96,25 @@ class LocatorVariableTest {
         assertEquals("(//*[contains(@name,\"赛事\")])[2]",
                 LocatorTemplate.expandRandomIndexes(withVar));
     }
+
+    @Test
+    void 范围内下标全部展开而不是随机抽一个() {
+        String tpl = "//android.widget.LinearLayout[@resource-id=\"vgList\"]"
+                + "/android.widget.RelativeLayout[X:1-3]/android.widget.ImageView[1]";
+
+        assertEquals(List.of(
+                "//android.widget.LinearLayout[@resource-id=\"vgList\"]"
+                        + "/android.widget.RelativeLayout[1]/android.widget.ImageView[1]",
+                "//android.widget.LinearLayout[@resource-id=\"vgList\"]"
+                        + "/android.widget.RelativeLayout[2]/android.widget.ImageView[1]",
+                "//android.widget.LinearLayout[@resource-id=\"vgList\"]"
+                        + "/android.widget.RelativeLayout[3]/android.widget.ImageView[1]"
+        ), LocatorTemplate.expandAllIndexes(tpl));
+    }
+
+    @Test
+    void 全角冒号的范围也认() {
+        assertEquals(List.of("card[1]", "card[2]"),
+                LocatorTemplate.expandAllIndexes("card[X：1-2]"));
+    }
 }

@@ -3,6 +3,7 @@ package com.mobile.standalone.service;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 元素库 locator → 驱动 selector 的转换。这是纯函数，却直接决定每一次点击能不能命中，
@@ -109,5 +110,34 @@ class UiFlowExecutorSelectorTest {
         assertEquals("up", UiFlowExecutor.normalizeSwipeDirection(null));
         assertEquals("up", UiFlowExecutor.normalizeSwipeDirection(""));
         assertEquals("up", UiFlowExecutor.normalizeSwipeDirection("斜着滑"));
+    }
+
+    @Test
+    void 默认滑动大约半屏() {
+        int[] p = UiFlowExecutor.swipeEndpoints(1000, 2000, "up", 0);
+        assertEquals(500, p[0]);
+        assertEquals(1440, p[1]);
+        assertEquals(500, p[2]);
+        assertEquals(560, p[3]);
+    }
+
+    @Test
+    void 小幅上滑从内容区起手() {
+        int[] p = UiFlowExecutor.swipeEndpoints(1000, 2000, "up", 4);
+        assertEquals(500, p[0]);
+        assertEquals(500, p[2]);
+        assertEquals(1240, p[1]);
+        assertEquals(1160, p[3]);
+        assertTrue(p[1] > p[3]);
+    }
+
+    @Test
+    void 小数幅度介于整数之间() {
+        int[] a = UiFlowExecutor.swipeEndpoints(1000, 2000, "up", 7);
+        int[] b = UiFlowExecutor.swipeEndpoints(1000, 2000, "up", 7.5);
+        int[] c = UiFlowExecutor.swipeEndpoints(1000, 2000, "up", 8);
+        assertEquals(140, a[1] - a[3]);
+        assertEquals(150, b[1] - b[3]);
+        assertEquals(160, c[1] - c[3]);
     }
 }
