@@ -20,6 +20,8 @@ public interface TaskExecutionMapper {
     int insert(TaskExecution execution);
     
     int update(TaskExecution execution);
+
+    int updateExecutionLog(@Param("id") String id, @Param("executionLog") String executionLog);
     
     int deleteById(@Param("id") String id);
 }

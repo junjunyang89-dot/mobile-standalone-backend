@@ -63,6 +63,10 @@ class PermissionRulesTest {
     @Test
     void 截图和登录接口公开() {
         assertThat(PermissionRules.isPublic("/tmp/screenshots/task-1/1.png")).isTrue();
+        assertThat(PermissionRules.isPublic("/functional-test/tasks/abc/screenshots/3")).isTrue();
+        assertThat(PermissionRules.isPublic("/functional-test/tasks/abc/screenshot")).isTrue();
+        assertThat(PermissionRules.isPublic("/functional-test/tasks/abc/screenshot-list")).isFalse();
+        assertThat(PermissionRules.isPublic("/functional-test/tasks/abc/execution-log")).isFalse();
         assertThat(PermissionRules.isPublic("/ui-element-previews/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/bug-images/2026-09-04/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/issue-images/2026-09-04/a.png")).isTrue();

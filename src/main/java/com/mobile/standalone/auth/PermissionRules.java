@@ -38,6 +38,34 @@ public final class PermissionRules {
             "/handbook-images", "/agent-uploads", "/bug-images", "/issue-images");
 
     /**
+     * 任务步骤截图也是写进 &lt;img src&gt; 的，带不上 Authorization。
+     * 只放行具体的 PNG 地址，不放行 execution-log / screenshot-list。
+     */
+    private static boolean isPublicTaskScreenshot(String path) {
+        if (!path.startsWith("/functional-test/tasks/")) {
+            return false;
+        }
+        String rest = path.substring("/functional-test/tasks/".length());
+        int slash = rest.indexOf('/');
+        if (slash <= 0) {
+            return false;
+        }
+        String tail = rest.substring(slash + 1);
+        if ("screenshot".equals(tail)) {
+            return true;
+        }
+        if (tail.startsWith("screenshots/")) {
+            String idx = tail.substring("screenshots/".length());
+            return !idx.isEmpty() && idx.chars().allMatch(Character::isDigit);
+        }
+        if (tail.startsWith("performance-screenshots/")) {
+            String idx = tail.substring("performance-screenshots/".length());
+            return !idx.isEmpty() && idx.chars().allMatch(Character::isDigit);
+        }
+        return false;
+    }
+
+    /**
      * 长得像写、其实是查的 POST。
      * <p>
      * 不放行的话只读用户点不开「接口对比分析」——而那恰恰是只读这一档最该看的东西。
@@ -111,7 +139,8 @@ public final class PermissionRules {
 
     public static boolean isPublic(String path) {
         String p = normalize(path);
-        return PUBLIC_PREFIXES.stream().anyMatch(pre -> matchesPrefix(p, pre));
+        return PUBLIC_PREFIXES.stream().anyMatch(pre -> matchesPrefix(p, pre))
+                || isPublicTaskScreenshot(p);
     }
 
     /**

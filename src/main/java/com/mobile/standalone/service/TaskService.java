@@ -450,7 +450,8 @@ public class TaskService {
                 log.debug("任务 taskId={} 的 taskType 为空，按 UI_FLOW_TEST 执行", task.getId());
             }
             if (taskType == Task.TaskType.UI_FLOW_TEST) {
-                FunctionalTestExecutionResult result = uiFlowExecutor.execute(task, device);
+                FunctionalTestExecutionResult result = uiFlowExecutor.execute(task, device,
+                        logs -> persistRunningLog(execution, logs));
                 reportPath = result != null ? result.getReportPath() : null;
                 earlyReturn = result != null ? result.getEarlyReturnOutcome() : null;
                 earlyReturnMessage = result != null ? result.getEarlyReturnMessage() : null;
@@ -649,6 +650,23 @@ public class TaskService {
             case "SKIP" -> Task.TaskStatus.SKIPPED;
             default -> Task.TaskStatus.FAILED;
         };
+    }
+
+    /**
+     * 流程还在跑就把已有步骤写进 execution_log。
+     * 试跑弹窗靠轮询这份日志显示「正在第几步」；等整条跑完再写，界面会一直停在第 0 步。
+     */
+    private void persistRunningLog(TaskExecution execution, List<ExecutionLogEntryDto> logs) {
+        if (execution == null || execution.getId() == null || logs == null) {
+            return;
+        }
+        try {
+            String json = JSON.writeValueAsString(logs);
+            execution.setExecutionLog(json);
+            executionMapper.updateExecutionLog(execution.getId(), json);
+        } catch (Exception e) {
+            log.debug("中途写执行日志跳过: taskId={}, err={}", execution.getTaskId(), e.getMessage());
+        }
     }
 
     /** 日志过大无法入库时：去掉截图绝对路径（磁盘仍可按 taskId 扫描），尽量保住步骤文案 */

@@ -38,6 +38,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * 按 ui_flows.steps（keywordCode + elementKey）执行流程。元素只认 ui_elements 中 status=ACTIVE 的记录。
@@ -92,6 +93,12 @@ public class UiFlowExecutor implements FlowRuntime {
     @Value("${app.screenshot-dir:${user.home}/.mobile-standalone/screenshots}")
     private String screenshotDir;
 
+    /**
+     * 当前线程的进度回写。试跑弹窗每 2 秒拉一次 execution-log，
+     * 日志若只在整条流程结束时入库，界面会一直停在「第 0 步」。
+     */
+    private static final ThreadLocal<Consumer<List<ExecutionLogEntryDto>>> PROGRESS = new ThreadLocal<>();
+
     /** 一条流程执行期间不变的环境（包级可见：重试等分支需要在单测里直接驱动） */
     record FlowEnv(
             PlatformDriver driver,
@@ -108,6 +115,22 @@ public class UiFlowExecutor implements FlowRuntime {
     }
 
     public FunctionalTestExecutionResult execute(Task task, Device device) throws Exception {
+        return execute(task, device, null);
+    }
+
+    public FunctionalTestExecutionResult execute(Task task, Device device,
+                                                 Consumer<List<ExecutionLogEntryDto>> progress) throws Exception {
+        if (progress != null) {
+            PROGRESS.set(progress);
+        }
+        try {
+            return executeInner(task, device);
+        } finally {
+            PROGRESS.remove();
+        }
+    }
+
+    private FunctionalTestExecutionResult executeInner(Task task, Device device) throws Exception {
         List<ExecutionLogEntryDto> logs = new ArrayList<>();
         Map<String, String> vars = new HashMap<>();
 
@@ -187,6 +210,7 @@ public class UiFlowExecutor implements FlowRuntime {
                 performanceMode
                         ? "性能采样模式：跳过逐步截图；断言失败不中断（与功能测试互斥，勿并行同设备）"
                         : "功能验证模式：完整断言与步骤截图"));
+        publishProgress(logs);
 
         KeywordContext.RunState state = new KeywordContext.RunState(false, null);
         FlowEnv env = new FlowEnv(driver, device, device.getId(), platform, uiAppId,
@@ -198,6 +222,7 @@ public class UiFlowExecutor implements FlowRuntime {
             throw e;
         } catch (Exception e) {
             logs.add(ExecutionLogEntryDto.fail("流程中断", e.getMessage(), null));
+            publishProgress(logs);
             throw new UiFlowExecutionException(e.getMessage(), logs);
         } finally {
             // 「不保留活动」这类设备级开关必须还原，而且不能只靠流程末尾那一步——
@@ -316,6 +341,7 @@ public class UiFlowExecutor implements FlowRuntime {
 
             if (policy.capturesBefore()) {
                 captureScreenshot(env.driver(), env.deviceId(), env.task(), env.logs(), "开始 · " + numberedLabel);
+                publishProgress(env.logs());
             }
             String usedElement = ctx.getElementKey();
             try {
@@ -327,6 +353,7 @@ public class UiFlowExecutor implements FlowRuntime {
                 if (!"ASSERT".equalsIgnoreCase(handler.category())) {
                     recordElementUsage(env, usedElement, false, numberedLabel + " · " + shortMessage(e));
                 }
+                publishProgress(env.logs());
                 throw e;
             }
             // 已请求停止：不再为这一步补拍收尾图。留一张「动作做了一半」的证据只会误导复核，
@@ -342,6 +369,19 @@ public class UiFlowExecutor implements FlowRuntime {
                             "结束 · " + numberedLabel);
                 }
             }
+            publishProgress(env.logs());
+        }
+    }
+
+    private static void publishProgress(List<ExecutionLogEntryDto> logs) {
+        Consumer<List<ExecutionLogEntryDto>> cb = PROGRESS.get();
+        if (cb == null || logs == null) {
+            return;
+        }
+        try {
+            cb.accept(logs);
+        } catch (Exception e) {
+            // 中途落库失败不能打断真机步骤，下一轮轮询再试
         }
     }
 

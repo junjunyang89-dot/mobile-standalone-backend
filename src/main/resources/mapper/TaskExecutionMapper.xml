@@ -50,6 +50,12 @@
             execution_variables = #{executionVariables}
         WHERE id = #{id}
     </update>
+
+    <update id="updateExecutionLog">
+        UPDATE task_executions
+        SET execution_log = #{executionLog}
+        WHERE id = #{id}
+    </update>
     
     <delete id="deleteById">
         DELETE FROM task_executions WHERE id = #{id}
