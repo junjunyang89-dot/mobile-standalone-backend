@@ -133,6 +133,7 @@ public class WebTestService {
             m.put("authToken", c.getToken());
             m.put("authQueryKey", blank(c.getAuthQueryKey(), "token"));
             m.put("cookieDomain", c.getCookieDomain());
+            m.put("authCookies", parseCookies(c.getAuthCookies()));
             m.put("steps", List.of(
                     Map.of("keywordCode", "OPEN_URL", "params", Map.of()),
                     Map.of("keywordCode", "ASSERT_HTML_MIN", "params", Map.of("minLength", 200))
@@ -238,6 +239,31 @@ public class WebTestService {
         out.setOk(out.getFailed() == 0 && out.getPassed() > 0);
     }
 
+    /**
+     * 把 JSON 形式的 cookie 配置解析成对象再下发。
+     * <p>
+     * 传字符串下去的话 Playwright 那边拿到的是一坨文本，得再解析一次；
+     * 而且解析失败要在这里就报出来——等到浏览器里才发现，看到的只是「未登录」。
+     */
+    private Map<String, Object> parseCookies(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode n = JSON.readTree(json);
+            if (!n.isObject()) {
+                throw new IllegalArgumentException("authCookies 要是 JSON 对象「名→值」，实际是: " + json);
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            n.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+            return out;
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("authCookies 不是合法 JSON: " + e.getMessage());
+        }
+    }
+
     private void enrichFromH5Page(CaseSpec c) {
         if (c.getH5PageId() == null || c.getH5PageId().isBlank()) return;
         UiH5Page page = uiH5PageService.get(c.getH5PageId().trim());
@@ -246,8 +272,22 @@ public class WebTestService {
         if (c.getUrl() == null || c.getUrl().isBlank()) c.setUrl(UiH5PageService.resolveOpenUrl(page));
         if ((c.getToken() == null || c.getToken().isBlank()) && page.getAuthToken() != null) {
             c.setToken(page.getAuthToken());
-            if (c.getAuthMode() == null || c.getAuthMode().isBlank() || "none".equalsIgnoreCase(c.getAuthMode())) {
-                c.setAuthMode("TOKEN_QUERY".equalsIgnoreCase(page.getAuthType()) ? "query" : "none");
+        }
+        // Cookie 模式要单独判：这类页面的登录态整个在 cookie 里，auth_token 可能是空的。
+        // 挂在「token 非空」这个条件下面的话，配了 cookie 也永远进不来，
+        // 页面照样停在「去登录」——而且不报任何错
+        if (c.getAuthCookies() == null || c.getAuthCookies().isBlank()) {
+            c.setAuthCookies(page.getAuthCookies());
+        }
+        if (c.getCookieDomain() == null || c.getCookieDomain().isBlank()) {
+            c.setCookieDomain(page.getCookieDomain());
+        }
+        if (c.getAuthMode() == null || c.getAuthMode().isBlank() || "none".equalsIgnoreCase(c.getAuthMode())) {
+            String t = page.getAuthType() == null ? "" : page.getAuthType().trim();
+            if ("TOKEN_COOKIE".equalsIgnoreCase(t)) {
+                c.setAuthMode("cookie");
+            } else if ("TOKEN_QUERY".equalsIgnoreCase(t) && c.getToken() != null && !c.getToken().isBlank()) {
+                c.setAuthMode("query");
             }
         }
         if (page.getAuthKey() != null && !page.getAuthKey().isBlank()) c.setAuthQueryKey(page.getAuthKey());

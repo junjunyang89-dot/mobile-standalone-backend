@@ -17,6 +17,7 @@
         <result property="fieldsSnapshot" column="fields_snapshot"/>
         <result property="captureMeta" column="capture_meta"/>
         <result property="docMeta" column="doc_meta"/>
+        <result property="tablesJson" column="tables_json"/>
         <result property="lastSyncedAt" column="last_synced_at"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
@@ -28,7 +29,7 @@
     <sql id="cols">
         e.id, e.project, e.http_method, e.path, e.handler, e.source_file, e.summary,
         e.status, e.change_flag, e.source_branch, e.change_note, e.fields_snapshot,
-        e.capture_meta, e.doc_meta, e.last_synced_at, e.created_at, e.updated_at
+        e.capture_meta, e.doc_meta, e.tables_json, e.last_synced_at, e.created_at, e.updated_at
     </sql>
 
     <select id="search" resultMap="endpointMap">
@@ -92,12 +93,12 @@
     <insert id="insert" parameterType="com.mobile.standalone.entity.ApiEndpoint">
         INSERT INTO api_endpoints
             (id, project, http_method, path, handler, source_file, summary, status,
-             change_flag, source_branch, change_note, fields_snapshot, capture_meta, doc_meta,
+             change_flag, source_branch, change_note, fields_snapshot, capture_meta, doc_meta, tables_json,
              last_synced_at, created_at, updated_at)
         VALUES
             (#{id}, #{project}, #{httpMethod}, #{path}, #{handler}, #{sourceFile}, #{summary},
              #{status}, #{changeFlag}, #{sourceBranch}, #{changeNote}, #{fieldsSnapshot},
-             #{captureMeta}, #{docMeta}, #{lastSyncedAt}, NOW(), NOW())
+             #{captureMeta}, #{docMeta}, #{tablesJson}, #{lastSyncedAt}, NOW(), NOW())
     </insert>
 
     <update id="update" parameterType="com.mobile.standalone.entity.ApiEndpoint">
@@ -113,6 +114,7 @@
             <if test="fieldsSnapshot != null">fields_snapshot = #{fieldsSnapshot},</if>
             <if test="captureMeta != null">capture_meta = #{captureMeta},</if>
             <if test="docMeta != null">doc_meta = #{docMeta},</if>
+            <if test="tablesJson != null">tables_json = #{tablesJson},</if>
             <if test="lastSyncedAt != null">last_synced_at = #{lastSyncedAt},</if>
             updated_at = NOW()
         </set>

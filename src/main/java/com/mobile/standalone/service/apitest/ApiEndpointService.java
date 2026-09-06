@@ -67,6 +67,11 @@ public class ApiEndpointService {
                     "MEDIUMTEXT NULL COMMENT '抓包解析：字段样本、请求预览' AFTER fields_snapshot");
             ensureColumn("api_endpoints", "doc_meta",
                     "MEDIUMTEXT NULL COMMENT '接口文档：说明、依赖、关联接口' AFTER capture_meta");
+            // 接口涉及的表：对比分析顺着 Controller→Service→Mapper 算出来后存在这。
+            // 存下来才能做「表结构变了→反查哪些接口→再反查哪些用例」，也让接口清单
+            // 能直接展开看「这个接口动哪些表 + DDL 测试点」，不用每次重算
+            ensureColumn("api_endpoints", "tables_json",
+                    "VARCHAR(2048) NULL COMMENT '涉及的表（JSON 数组），来自对比分析的依赖解析' AFTER doc_meta");
             migrateExistingCases();
             log.info("[api-endpoints] 表已就绪");
         } catch (Exception e) {
@@ -172,6 +177,18 @@ public class ApiEndpointService {
      * @param branch  引入这次变更的分支
      * @param changes 报告里的接口变更
      */
+    /** 表名列表 → JSON 数组字符串；空列表存 null，别存个 "[]" 占位 */
+    static String tablesJson(List<String> tables) {
+        if (tables == null || tables.isEmpty()) {
+            return null;
+        }
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(tables);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     @Transactional
     public SyncResult syncFromChangeReport(String project, String branch, List<EndpointChange> changes) {
         if (project == null || project.isBlank()) {
@@ -211,6 +228,7 @@ public class ApiEndpointService {
                 row.setChangeNote(ch.changeNote());
                 row.setSourceBranch(branch);
                 row.setFieldsSnapshot(fieldsJson(ch.responseFields()));
+                row.setTablesJson(tablesJson(ch.tables()));
                 row.setLastSyncedAt(now);
                 endpointMapper.insert(row);
                 created++;
@@ -226,6 +244,10 @@ public class ApiEndpointService {
             patch.setChangeNote(ch.changeNote());
             patch.setSourceBranch(branch);
             patch.setFieldsSnapshot(fieldsJson(ch.responseFields()));
+            // tables 为空时不写：目录对比等场景解析不出依赖，传空会把上次分析存下的表抹掉
+            if (ch.tables() != null && !ch.tables().isEmpty()) {
+                patch.setTablesJson(tablesJson(ch.tables()));
+            }
             patch.setLastSyncedAt(now);
             // 不删，只标废弃：删掉的话挂在它下面的用例会变成孤儿，
             // 而「这个接口被删了」本身就是要确认的事——可能是有意下线，也可能是分支合错了
@@ -622,7 +644,7 @@ public class ApiEndpointService {
     /** 同步进来的一条接口变化 */
     public record EndpointChange(String httpMethod, String path, String handler, String summary,
                                  String file, String changeType, String changeFlag, String changeNote,
-                                 List<String> responseFields) {
+                                 List<String> responseFields, List<String> tables) {
     }
 
     public record SyncResult(int created, int updated, int deprecated) {

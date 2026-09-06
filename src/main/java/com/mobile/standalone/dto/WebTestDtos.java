@@ -28,6 +28,8 @@ public final class WebTestDtos {
         private String token;
         private String authQueryKey = "token";
         private String cookieDomain;
+        /** Cookie 登录态，JSON 对象「名→值」。有些活动页要好几个 cookie 都在才认 */
+        private String authCookies;
         private String h5PageId;
     }
 

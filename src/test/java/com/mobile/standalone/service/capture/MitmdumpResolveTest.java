@@ -67,6 +67,10 @@ class MitmdumpResolveTest {
      * 找不到时给的必须是能照着做的话。
      * 原来抛的是 ProcessBuilder 的「Cannot run program ... error=2」，
      * 那句话到了页面上没人知道该干什么。
+     * <p>
+     * 用一个自定义名字而不是默认的 mitmdump：内置候选路径只对默认名生效，
+     * 这样断言就不受本机装没装 mitmproxy 影响。这条测试原先正是因为
+     * 本机后来装上了 mitmproxy 而挂掉的。
      */
     @Test
     void failureMessageTellsHowToInstall() {
@@ -76,5 +80,20 @@ class MitmdumpResolveTest {
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("brew install mitmproxy")
                 .hasMessageContaining("app.capture.mitmdump");
+    }
+
+    /**
+     * 配了自定义名字就不该被内置候选顶替。
+     * <p>
+     * 原实现只要配的不是绝对路径就直接去查候选路径，于是本机装了 mitmproxy 之后，
+     * 无论配什么名字都会解析成 /opt/homebrew/bin/mitmdump——人配的东西被无声忽略了。
+     */
+    @Test
+    void customBinaryNameIsNotSilentlyReplacedByBundledCandidates() {
+        ReflectionTestUtils.setField(service, "mitmdumpBin", "my-custom-dump-xyz");
+
+        assertThatThrownBy(this::resolve)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("没找到 mitmdump");
     }
 }

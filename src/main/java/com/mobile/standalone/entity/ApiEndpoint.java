@@ -59,6 +59,12 @@ public class ApiEndpoint {
     /** 接口文档导入的说明、依赖等——仅参考，不参与断言 */
     private String docMeta;
 
+    /**
+     * 涉及的表，JSON 数组。来自对比分析的依赖解析（Controller→Service→Mapper）。
+     * 存下来才能做「表变→反查接口→反查用例」，也让清单能展开看接口动了哪些表。
+     */
+    private String tablesJson;
+
     private LocalDateTime lastSyncedAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
