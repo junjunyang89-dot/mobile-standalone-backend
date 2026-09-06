@@ -332,6 +332,7 @@ public class ApiChangeController {
             markCoverage(report, p.getCode());
             attachTableSchemas(report, p.getCode());
             attachConcurrencyRisks(report);
+            report.setMustTest(com.mobile.standalone.service.apichange.MustTestGuide.of(report));
             apiChangeReportService.saveSnapshot(p.getCode(), report);
             Map<String, Object> sync = syncToEndpointCatalog(report, p.getCode());
             if (sync != null) {
@@ -372,6 +373,7 @@ public class ApiChangeController {
             markCoverage(report, body.getProject());
             attachTableSchemas(report, body.getProject());
             attachConcurrencyRisks(report);
+            report.setMustTest(com.mobile.standalone.service.apichange.MustTestGuide.of(report));
             apiChangeReportService.saveSnapshot(body.getProject(), report);
             Map<String, Object> sync = syncToEndpointCatalog(report, body.getProject());
             if (sync != null) {

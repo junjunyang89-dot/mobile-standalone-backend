@@ -160,7 +160,7 @@ public class ApiTestCollectionService {
 
             List<Map<String, Object>> groups = new ArrayList<>();
             if (!branchItems.isEmpty()) {
-                groups.add(treeGroup("branch-group", code, "分支对比分析", branchItems));
+                groups.add(treeGroup("branch-group", code, "分支涉及的接口用例", branchItems));
             }
             if (!reqItems.isEmpty()) {
                 groups.add(treeGroup("req-group", code, "需求单接口", reqItems));
@@ -1046,11 +1046,15 @@ public class ApiTestCollectionService {
 
         int cols = mapper.archiveByRequirement(no);
         int eps = requirementEndpointService.archiveByRequirement(no);
+        int promoted = 0;
+        if (branch != null && !branch.isBlank()) {
+            promoted = endpointService.promoteBranchToMaster(branch);
+        }
         int blackBox = aiTestCaseService.archiveByRequirement(no);
         boolean marked = requirementService.markShipped(no, branch);
 
-        log.info("[api-test] 需求 {} 已标记上线：归档 {} 个集合、{} 条涉及接口、{} 条黑盒用例；登记状态更新={} 分支={}",
-                no, cols, eps, blackBox, marked, branch == null ? "(未记录)" : branch);
+        log.info("[api-test] 需求 {} 已标记上线：归档 {} 个集合、{} 条涉及接口、{} 条黑盒用例、并入 master {} 条；登记状态更新={} 分支={}",
+                no, cols, eps, blackBox, promoted, marked, branch == null ? "(未记录)" : branch);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("requirementNo", no);
@@ -1059,6 +1063,7 @@ public class ApiTestCollectionService {
         out.put("blackBoxCasesArchived", blackBox);
         out.put("requirementMarked", marked);
         out.put("sourceBranch", branch);
+        out.put("endpointsPromotedToMaster", promoted);
         return out;
     }
 

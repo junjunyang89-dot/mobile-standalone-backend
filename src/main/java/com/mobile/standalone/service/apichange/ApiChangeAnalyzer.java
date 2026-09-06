@@ -80,6 +80,11 @@ public class ApiChangeAnalyzer {
          * 分支名里带单号时自动产生，{@code {requirements:[APP-8928], linked:7}}
          */
         private Map<String, Object> requirementLink;
+        /**
+         * 必测清单：先测谁、为什么、这一条要注意什么。
+         * 从 endpoints / tables / concurrency / otherChanges 收束，不另跑 git。
+         */
+        private MustTestGuide.Guide mustTest;
     }
 
     @Data

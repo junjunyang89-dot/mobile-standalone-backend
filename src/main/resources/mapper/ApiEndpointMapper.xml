@@ -135,6 +135,15 @@
         WHERE project = #{project} AND change_flag IS NOT NULL
     </update>
 
+    <update id="promoteBranchToMaster">
+        UPDATE api_endpoints
+           SET source_branch = NULL,
+               change_flag = NULL,
+               change_note = NULL,
+               updated_at = NOW()
+         WHERE source_branch = #{branch}
+    </update>
+
     <delete id="deleteById">
         DELETE FROM api_endpoints WHERE id = #{id}
     </delete>

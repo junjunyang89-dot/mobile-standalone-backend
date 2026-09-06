@@ -575,6 +575,7 @@ public class ApiProjectService {
      */
     public Map<String, Object> buildEndpointInventoryTree(List<ApiEndpoint> allEndpoints) {
         Map<String, int[]> stats = aggregateEndpointStats(allEndpoints);
+        Map<String, List<ApiEndpoint>> byProject = groupEndpointsByProject(allEndpoints);
         Map<String, ApiProject> projectsByCode = new LinkedHashMap<>();
         for (ApiProject p : list(null)) {
             if (!isBackendKind(p)) {
@@ -593,7 +594,7 @@ public class ApiProjectService {
             String catKey = String.valueOf(def.get("key"));
             String label = labels.getOrDefault(catKey, String.valueOf(def.get("label")));
             List<Map<String, Object>> children = buildEndpointCategoryChildren(
-                    catKey, stats, projectsByCode, assigned);
+                    catKey, stats, byProject, projectsByCode, assigned);
             if (ApiProjectCatalog.APP.key().equals(catKey) || !children.isEmpty()) {
                 categories.add(endpointCategoryNode(catKey, label, children));
             }
@@ -632,8 +633,24 @@ public class ApiProjectService {
         return stats;
     }
 
+    private static Map<String, List<ApiEndpoint>> groupEndpointsByProject(List<ApiEndpoint> all) {
+        Map<String, List<ApiEndpoint>> out = new LinkedHashMap<>();
+        if (all == null) {
+            return out;
+        }
+        for (ApiEndpoint e : all) {
+            String key = inventoryProjectKey(e.getProject());
+            if (key.isBlank()) {
+                continue;
+            }
+            out.computeIfAbsent(key, k -> new ArrayList<>()).add(e);
+        }
+        return out;
+    }
+
     private static Map<String, Object> endpointProjectNode(
-            String code, Map<String, int[]> stats, Map<String, ApiProject> projectsByCode) {
+            String code, Map<String, int[]> stats, Map<String, ApiProject> projectsByCode,
+            Map<String, List<ApiEndpoint>> byProject) {
         int[] c = stats.getOrDefault(code, new int[]{0, 0});
         ApiProject p = projectsByCode.get(code);
         Map<String, Object> node = new LinkedHashMap<>();
@@ -643,12 +660,94 @@ public class ApiProjectService {
         node.put("pending", c[1]);
         node.put("configured", p != null);
         node.put("missing", p == null);
+        node.put("rails", buildEndpointRails(byProject.getOrDefault(code, List.of())));
         return node;
+    }
+
+    /**
+     * 项目下两层：本分支必测（对比分析来的）/ master，再按 Controller 归堆。
+     * 上线后 source_branch 被清掉，接口就从「本分支」落到 master。
+     */
+    static List<Map<String, Object>> buildEndpointRails(List<ApiEndpoint> endpoints) {
+        Map<String, List<ApiEndpoint>> byBranch = new LinkedHashMap<>();
+        List<ApiEndpoint> master = new ArrayList<>();
+        for (ApiEndpoint e : endpoints == null ? List.<ApiEndpoint>of() : endpoints) {
+            String b = e.getSourceBranch();
+            if (b != null && !b.isBlank()) {
+                byBranch.computeIfAbsent(b.trim(), k -> new ArrayList<>()).add(e);
+            } else {
+                master.add(e);
+            }
+        }
+        List<Map<String, Object>> rails = new ArrayList<>();
+        for (Map.Entry<String, List<ApiEndpoint>> e : byBranch.entrySet()) {
+            rails.add(railNode("branch", "本分支必测", e.getKey(), e.getValue()));
+        }
+        rails.add(railNode("master", "master", null, master));
+        return rails;
+    }
+
+    private static Map<String, Object> railNode(String type, String label, String branch, List<ApiEndpoint> eps) {
+        Map<String, Object> rail = new LinkedHashMap<>();
+        rail.put("type", type);
+        rail.put("label", branch == null || branch.isBlank() ? label : label + " · " + shortBranch(branch));
+        rail.put("branch", branch);
+        rail.put("total", eps.size());
+        rail.put("controllers", groupByController(eps));
+        return rail;
+    }
+
+    private static String shortBranch(String branch) {
+        int i = branch.lastIndexOf('/');
+        return i >= 0 && i < branch.length() - 1 ? branch.substring(i + 1) : branch;
+    }
+
+    static String controllerName(String handler) {
+        if (handler == null || handler.isBlank()) {
+            return "未标注 Controller";
+        }
+        String h = handler.trim();
+        int slash = h.lastIndexOf('/');
+        if (slash >= 0) {
+            h = h.substring(slash + 1);
+        }
+        int dot = h.indexOf('.');
+        return dot > 0 ? h.substring(0, dot) : h;
+    }
+
+    private static List<Map<String, Object>> groupByController(List<ApiEndpoint> eps) {
+        Map<String, List<ApiEndpoint>> by = new LinkedHashMap<>();
+        for (ApiEndpoint e : eps) {
+            by.computeIfAbsent(controllerName(e.getHandler()), k -> new ArrayList<>()).add(e);
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<String, List<ApiEndpoint>> e : by.entrySet()) {
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("name", e.getKey());
+            c.put("total", e.getValue().size());
+            List<Map<String, Object>> items = new ArrayList<>();
+            for (ApiEndpoint ep : e.getValue()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", ep.getId());
+                row.put("httpMethod", ep.getHttpMethod());
+                row.put("path", ep.getPath());
+                row.put("handler", ep.getHandler());
+                row.put("changeFlag", ep.getChangeFlag());
+                row.put("sourceBranch", ep.getSourceBranch());
+                items.add(row);
+            }
+            c.put("endpoints", items);
+            out.add(c);
+        }
+        out.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(
+                String.valueOf(a.get("name")), String.valueOf(b.get("name"))));
+        return out;
     }
 
     private List<Map<String, Object>> buildEndpointCategoryChildren(
             String catKey,
             Map<String, int[]> stats,
+            Map<String, List<ApiEndpoint>> byProject,
             Map<String, ApiProject> projectsByCode,
             Set<String> assigned) {
         List<Map<String, Object>> children = new ArrayList<>();
@@ -660,7 +759,7 @@ public class ApiProjectService {
                 // ApiEndpointInventoryTreeTest。
                 // 注意这跟下面 PVP/WEB 的「库里存在才渲染」不一致——那两处的 javadoc
                 // 写的是「树里固定展示」，与代码相反。要统一的话是个产品决定，别顺手改。
-                children.add(endpointProjectNode(slot, stats, projectsByCode));
+                children.add(endpointProjectNode(slot, stats, projectsByCode, byProject));
                 assigned.add(slot);
                 assigned.add(inventoryProjectKey(slot));
             }
@@ -671,7 +770,7 @@ public class ApiProjectService {
                 if (!ApiProjectCatalog.APP.key().equals(ApiProjectCatalog.categoryKeyOf(code))) {
                     continue;
                 }
-                children.add(endpointProjectNode(code, stats, projectsByCode));
+                children.add(endpointProjectNode(code, stats, projectsByCode, byProject));
                 assigned.add(code);
             }
             return children;
@@ -681,7 +780,7 @@ public class ApiProjectService {
             if (!stats.containsKey(slot) && !projectsByCode.containsKey(slot)) {
                 continue;
             }
-            children.add(endpointProjectNode(slot, stats, projectsByCode));
+            children.add(endpointProjectNode(slot, stats, projectsByCode, byProject));
             assigned.add(slot);
         }
         for (String code : stats.keySet()) {
@@ -691,7 +790,7 @@ public class ApiProjectService {
             if (!catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
                 continue;
             }
-            children.add(endpointProjectNode(code, stats, projectsByCode));
+            children.add(endpointProjectNode(code, stats, projectsByCode, byProject));
             assigned.add(code);
         }
         for (ApiProject p : projectsByCode.values()) {
@@ -700,7 +799,7 @@ public class ApiProjectService {
                 continue;
             }
             if (catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
-                children.add(endpointProjectNode(code, stats, projectsByCode));
+                children.add(endpointProjectNode(code, stats, projectsByCode, byProject));
                 assigned.add(code);
             }
         }

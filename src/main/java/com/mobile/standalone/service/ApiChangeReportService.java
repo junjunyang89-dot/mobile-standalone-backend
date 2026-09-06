@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mobile.standalone.entity.ApiChangeReport;
 import com.mobile.standalone.mapper.ApiChangeReportMapper;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer;
+import com.mobile.standalone.service.apichange.MustTestGuide;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -102,10 +103,17 @@ public class ApiChangeReportService {
         out.put("summary", row.getSummary());
         out.put("createdAt", row.getCreatedAt());
         try {
-            Object report = JSON.readValue(row.getReportJson(), Object.class);
+            ApiChangeAnalyzer.Report report = JSON.readValue(row.getReportJson(), ApiChangeAnalyzer.Report.class);
+            if (report.getMustTest() == null) {
+                report.setMustTest(MustTestGuide.of(report));
+            }
             out.put("report", report);
-        } catch (Exception e) {
-            throw new IllegalStateException("报告 JSON 解析失败: " + e.getMessage());
+        } catch (Exception typed) {
+            try {
+                out.put("report", JSON.readValue(row.getReportJson(), Object.class));
+            } catch (Exception e) {
+                throw new IllegalStateException("报告 JSON 解析失败: " + e.getMessage());
+            }
         }
         return out;
     }

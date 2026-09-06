@@ -301,6 +301,20 @@ public class ApiEndpointService {
     }
 
     /**
+     * 分支合上线：这一批接口并进 master。
+     * 原来就有的覆盖更新，这次新增的挂到 master 下面；变更标记清掉，不再算「本分支必测」。
+     */
+    @Transactional
+    public int promoteBranchToMaster(String branch) {
+        if (branch == null || branch.isBlank()) {
+            return 0;
+        }
+        int n = endpointMapper.promoteBranchToMaster(branch.trim());
+        log.info("[api-endpoints] 分支 {} 已并入 master，{} 条", branch.trim(), n);
+        return n;
+    }
+
+    /**
      * 同项目下、路径尾部相同、但<b>还没有文档</b>的接口。
      * <p>
      * 同一个契约常常有两条路径：GLD 直连的 {@code /gld/deadlock/friend/list}

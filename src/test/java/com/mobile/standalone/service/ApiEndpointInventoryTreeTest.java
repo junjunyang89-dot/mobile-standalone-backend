@@ -46,6 +46,10 @@ class ApiEndpointInventoryTreeTest {
         ApiEndpoint ep = new ApiEndpoint();
         ep.setProject("data-center");
         ep.setEnabledCaseCount(0);
+        ep.setHandler("AiController.aiTranslate");
+        ep.setSourceBranch("fch/20260804/APP-8928");
+        ep.setHttpMethod("POST");
+        ep.setPath("/appdatacenter/ai/aiTranslate");
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> categories =
@@ -68,6 +72,14 @@ class ApiEndpointInventoryTreeTest {
                 .findFirst()
                 .orElseThrow();
         assertThat(dc.get("total")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rails = (List<Map<String, Object>>) dc.get("rails");
+        assertThat(rails).isNotEmpty();
+        assertThat(rails.get(0).get("type")).isEqualTo("branch");
+        assertThat(String.valueOf(rails.get(0).get("label"))).contains("本分支必测");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> controllers = (List<Map<String, Object>>) rails.get(0).get("controllers");
+        assertThat(controllers.get(0).get("name")).isEqualTo("AiController");
     }
 
     @SuppressWarnings("unchecked")

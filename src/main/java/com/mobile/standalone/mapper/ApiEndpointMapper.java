@@ -33,6 +33,9 @@ public interface ApiEndpointMapper {
     /** 同步开始前清掉上一轮的变更标记，否则「上次新增」会一直显示成新增 */
     int clearChangeFlags(@Param("project") String project);
 
+    /** 分支上线：该分支接口并入 master（更新覆盖、新增挂上，变更标记清掉） */
+    int promoteBranchToMaster(@Param("branch") String branch);
+
     int deleteById(@Param("id") String id);
 
     /** 迁移用：现有用例里所有不重复的 项目+方法+路径 */
