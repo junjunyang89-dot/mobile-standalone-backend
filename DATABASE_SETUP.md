@@ -1,5 +1,55 @@
 # MySQL 数据库配置指南
 
+## 在家 / 在公司两套库
+
+公司共享库用 SSH 隧道转到本机 **3307**，Java 只连 `127.0.0.1:3307`，不要写 Mini 内网或公网 IP。家里本机库仍是 `127.0.0.1:3306`。**改表结构时两边都要打同一份 SQL。**
+
+```bash
+# 1) 本机开隧道（窗口别关，或用 start 挂后台）
+ssh -N -L 3307:127.0.0.1:3306 yangjun@192.168.10.5
+# 或：./scripts/db-tunnel.sh
+
+# 2) 另一个窗口确认 3307 已通，看到 succeeded 再启 Java
+nc -zv 127.0.0.1 3307
+
+./scripts/use-db.sh office
+# 终端启动（会先检查 3307，并关掉 SOCKS 代理）
+./scripts/run-backend.sh
+```
+
+IDEA Run Configuration → VM options：
+
+```
+-Djava.net.useSystemProxies=false
+-DsocksProxyHost=
+-Dhttp.nonProxyHosts=localhost|127.*|[::1]
+```
+
+环境变量里把 `ALL_PROXY`、`all_proxy`、`SOCKS_PROXY` 留空。项目里已有运行配置 `.run/BackendApplication.run.xml`。
+
+`application.yml` 只写 `127.0.0.1:3307`。隧道没开就点 Run，会 Connection refused。
+
+# 在家用本机库
+./scripts/use-db.sh home
+# 第一次：本机先装好 MySQL 8，再初始化
+./scripts/apply-sql.sh init-home
+# 然后重启后端
+
+# 新增/改了 src/main/resources/db/migration_*.sql 之后，两边都执行未跑过的文件
+./scripts/apply-sql.sh both
+# 只打某一个文件
+./scripts/apply-sql.sh both src/main/resources/db/migration_xxx.sql
+```
+
+当前连的是哪套：`./scripts/use-db.sh`
+
+密码写在本机 `application.yml`（公司库）和可选的 `scripts/db-secrets.local`（家里库），都不会进 git。
+
+家里库只同步**表结构**，不同步公司库里的流程/用例数据。若要把公司数据拷一份到家里，自行 `mysqldump` 再导入本机。
+
+---
+
+
 ## 📋 前置要求
 
 - MySQL 8.0 或更高版本

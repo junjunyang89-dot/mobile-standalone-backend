@@ -468,46 +468,54 @@ public class DeviceService {
             }
             lastDevicePersistMs = now;
 
-            TransactionTemplate tx = new TransactionTemplate(transactionManager);
-            tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-            tx.setTimeout(8);
-            tx.executeWithoutResult(status -> {
-                updateDevicesInDatabase(scanned);
-                markDisconnectedDevices();
-            });
+            // 一台一短事务：整批包在一个事务里时，慢链路（隧道）会长时间锁住 devices，
+            // 建任务 INSERT tasks 外键等锁，页面「开始执行」就会一直转圈。
+            for (Device scannedDevice : scanned) {
+                try {
+                    shortTx(3).executeWithoutResult(status -> persistScannedDevice(scannedDevice));
+                } catch (Exception e) {
+                    log.warn("落库设备失败 {}: {}", scannedDevice.getId(), e.getMessage());
+                }
+            }
+            try {
+                shortTx(3).executeWithoutResult(status -> markDisconnectedDevices());
+            } catch (Exception e) {
+                log.warn("标记离线设备失败: {}", e.getMessage());
+            }
         } catch (Exception e) {
             log.error("设备扫描失败", e);
         }
     }
-    
-    /**
-     * 更新数据库中的设备信息（仅短事务内调用）
-     */
-    private void updateDevicesInDatabase(List<Device> scannedDevices) {
-        LocalDateTime now = LocalDateTime.now();
-        for (Device scannedDevice : scannedDevices) {
-            Device existingDevice = deviceMapper.findById(scannedDevice.getId());
-            Device.DeviceStatus status = scannedDevice.getStatus() != null
-                    ? scannedDevice.getStatus()
-                    : Device.DeviceStatus.CONNECTED;
 
-            if (existingDevice != null) {
-                existingDevice.setName(scannedDevice.getName());
-                existingDevice.setVersion(scannedDevice.getVersion());
-                existingDevice.setPlatform(scannedDevice.getPlatform());
-                existingDevice.setStatus(status);
-                // 未授权/离线也更新 lastSeen，避免被误判成「彻底消失」
-                existingDevice.setLastSeen(now);
-                existingDevice.setWorkerId(nodeIdentity.id());
-                deviceMapper.update(existingDevice);
-            } else {
-                scannedDevice.setStatus(status);
-                scannedDevice.setLastSeen(now);
-                scannedDevice.setWorkerId(nodeIdentity.id());
-                deviceMapper.insert(scannedDevice);
-                log.info("发现新设备: {} ({}) status={}", scannedDevice.getName(), scannedDevice.getId(), status);
-            }
+    private TransactionTemplate shortTx(int timeoutSec) {
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        tx.setTimeout(timeoutSec);
+        return tx;
+    }
+
+    private void persistScannedDevice(Device scannedDevice) {
+        LocalDateTime now = LocalDateTime.now();
+        Device existingDevice = deviceMapper.findById(scannedDevice.getId());
+        Device.DeviceStatus status = scannedDevice.getStatus() != null
+                ? scannedDevice.getStatus()
+                : Device.DeviceStatus.CONNECTED;
+
+        if (existingDevice != null) {
+            existingDevice.setName(scannedDevice.getName());
+            existingDevice.setVersion(scannedDevice.getVersion());
+            existingDevice.setPlatform(scannedDevice.getPlatform());
+            existingDevice.setStatus(status);
+            existingDevice.setLastSeen(now);
+            existingDevice.setWorkerId(nodeIdentity.id());
+            deviceMapper.update(existingDevice);
+            return;
         }
+        scannedDevice.setStatus(status);
+        scannedDevice.setLastSeen(now);
+        scannedDevice.setWorkerId(nodeIdentity.id());
+        deviceMapper.insert(scannedDevice);
+        log.info("发现新设备: {} ({}) status={}", scannedDevice.getName(), scannedDevice.getId(), status);
     }
     
     /**

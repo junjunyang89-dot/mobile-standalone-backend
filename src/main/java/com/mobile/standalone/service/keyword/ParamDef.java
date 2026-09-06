@@ -39,6 +39,13 @@ public record ParamDef(
         ENUM,
         /** 元素库选择器，前端渲染成元素下拉 */
         ELEMENT,
+        /**
+         * 一批元素，前端渲染成可多选的元素下拉，值是 element key 数组。
+         * <p>
+         * 与 {@link #ELEMENT} 的区别不只是「能多选」：它表达的是<b>一组一起判定</b>的元素，
+         * 判定方式（都要在 / 有一个就行 / 都不能在）由关键字自己的参数决定。
+         */
+        ELEMENTS,
         /** 嵌套步骤列表，前端用专用编辑器，不做通用渲染 */
         STEPS;
 
@@ -73,6 +80,14 @@ public record ParamDef(
 
     public static ParamDef element(String name, String label) {
         return new ParamDef(name, label, Type.ELEMENT, true, null, null, null, null);
+    }
+
+    /**
+     * 一批元素。默认必填——「批量断言但一个元素都没选」是纯粹的配置事故，
+     * 让它跑到执行时才报，不如建流程的时候就拦住。
+     */
+    public static ParamDef elements(String name, String label) {
+        return new ParamDef(name, label, Type.ELEMENTS, true, null, null, null, null);
     }
 
     public static ParamDef steps(String name, String label) {

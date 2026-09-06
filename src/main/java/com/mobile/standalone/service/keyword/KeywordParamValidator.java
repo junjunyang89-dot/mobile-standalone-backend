@@ -25,8 +25,11 @@ public final class KeywordParamValidator {
         }
 
         for (ParamDef def : handler.params()) {
-            if (def.type() == ParamDef.Type.ELEMENT || def.type() == ParamDef.Type.STEPS) {
-                // 元素由 elementKey 承载，嵌套步骤结构由关键字自己解析
+            if (def.type() == ParamDef.Type.ELEMENT
+                    || def.type() == ParamDef.Type.ELEMENTS
+                    || def.type() == ParamDef.Type.STEPS) {
+                // 元素由 elementKey 承载，元素组与嵌套步骤是结构化的值，
+                // 在这里按字符串校验只会得到 "[a, b]" 这种没意义的判断，交给关键字自己解析
                 continue;
             }
             Object raw = ctx.rawParam(def.name());

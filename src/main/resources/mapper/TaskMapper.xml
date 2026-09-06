@@ -34,9 +34,26 @@
       过滤掉了，能跑到的流程一定是「这个包里有这个功能」——那就是一次有效执行。
       继续只认一条轨的话，SHARED 流程只在回归里跑过就会显示「已覆盖但从没跑过」。
     -->
+    <!-- 排除试跑：你在编辑器里调三次挂两次，那两次不该被当成这条流程的「最近结果」，
+         否则列表上一片红，而红的原因是你自己在调试。走 idx_flow_track(flow_id, run_track) -->
     <select id="findLatestByFlowId" resultMap="TaskResultMap">
         SELECT * FROM tasks
         WHERE flow_id = #{flowId}
+          AND (run_track IS NULL OR run_track &lt;&gt; 'DEBUG')
+        ORDER BY COALESCE(updated_at, created_at) DESC
+        LIMIT 1
+    </select>
+
+    <!--
+        试跑轨的最近一次。
+        和上面那条是刻意分开的两个问题：上面回答「这条流程的质量结论」，所以必须排除试跑；
+        这条回答「我刚才那次跑成啥样了」，只有试跑才算数。
+        合成一个查询的话，两个问题必然有一个答错。
+    -->
+    <select id="findLatestDebugByFlowId" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        WHERE flow_id = #{flowId}
+          AND run_track = 'DEBUG'
         ORDER BY COALESCE(updated_at, created_at) DESC
         LIMIT 1
     </select>

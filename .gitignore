@@ -40,6 +40,9 @@ wmpay_plus.yml
 *.local.yml
 .env
 .env.*
+.db-profile.properties
+.db-tunnel.pid
+scripts/db-secrets.local
 
 # ========== Maven ==========
 target/

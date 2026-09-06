@@ -99,6 +99,20 @@ public class FailureDiagnosisRunner {
     }
 
     /**
+     * 归因链路开着没有。
+     * <p>
+     * 给 {@link ExecutionAlertService} 用：归因是异步的，告警要稍等一会儿才能带上结论；
+     * 但归因整个没开时白等 60 秒毫无意义，只会让告警晚一分钟到。
+     */
+    public boolean isEnabled() {
+        if (!enabled) {
+            return false;
+        }
+        DiagnosisModelClient client = modelClientProvider.getIfAvailable();
+        return client != null && client.isConfigured();
+    }
+
+    /**
      * 任务执行线程收尾时调用。
      *
      * @param standalone 是否为独立运行的任务。线上回归编排驱动的任务不自动重跑——

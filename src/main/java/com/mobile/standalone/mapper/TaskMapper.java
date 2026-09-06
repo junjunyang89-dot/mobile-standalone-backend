@@ -22,6 +22,9 @@ public interface TaskMapper {
      * 查这一张就能覆盖两种入口，不用分别去查回归批次表。
      */
     Task findLatestByFlowId(@Param("flowId") String flowId);
+
+    /** 试跑轨的最近一次；「我刚跑的那次怎么样了」只能问它 */
+    Task findLatestDebugByFlowId(@Param("flowId") String flowId);
     
     List<Task> findByPlatform(@Param("platform") String platform);
 

@@ -1,0 +1,15 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="BackendApplication" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="mobile-standalone-backend" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.mobile.standalone.BackendApplication" />
+    <option name="VM_PARAMETERS" value="-Djava.net.useSystemProxies=false -DsocksProxyHost= -Dhttp.nonProxyHosts=localhost|127.*|192.168.*|[::1]" />
+    <envs>
+      <env name="ALL_PROXY" value="" />
+      <env name="all_proxy" value="" />
+      <env name="SOCKS_PROXY" value="" />
+    </envs>
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

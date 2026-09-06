@@ -139,6 +139,57 @@ public class KeywordContext {
         return stepParams.get(key);
     }
 
+    /**
+     * 读一个「字符串列表」参数（元素组、标签组这类）。
+     * <p>
+     * 前端存进来的是数组，但同一个字段有太多别的来路：导入的流程 JSON、别人手改的库里的记录、
+     * 复制粘贴出来的一行逗号分隔。收窄成「只认数组」的话，这些都会变成一句
+     * 「参数格式错误」，而人看着界面上明明填着东西，根本不知道错在哪。
+     * 所以数组、单个字符串、换行/逗号/顿号/分号分隔的一行，全都收。
+     * <p>
+     * 顺带做变量替换与去重，保持顺序——顺序是人填的判定优先级，不能打乱。
+     */
+    public List<String> strList(String key) {
+        Object raw = stepParams.get(key);
+        List<String> out = new java.util.ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        collectStrings(raw, out);
+        List<String> result = new java.util.ArrayList<>();
+        for (String item : out) {
+            String v = substitute(item);
+            if (v == null) continue;
+            v = v.trim();
+            if (!v.isEmpty() && seen.add(v)) {
+                result.add(v);
+            }
+        }
+        return result;
+    }
+
+    /** 数组套数组也认：嵌套只是数据来路不同，不该让人去猜格式 */
+    private static void collectStrings(Object raw, List<String> out) {
+        if (raw == null) {
+            return;
+        }
+        if (raw instanceof Iterable<?> it) {
+            for (Object o : it) {
+                collectStrings(o, out);
+            }
+            return;
+        }
+        if (raw instanceof Object[] arr) {
+            for (Object o : arr) {
+                collectStrings(o, out);
+            }
+            return;
+        }
+        for (String piece : String.valueOf(raw).split("[\\n\\r,;，、；]+")) {
+            if (!piece.isBlank()) {
+                out.add(piece);
+            }
+        }
+    }
+
     /** 变量替换 + 内置变量展开（${date}、${timestamp} 等） */
     public String substituted(String key) {
         return substitute(str(key));

@@ -113,6 +113,17 @@ public interface PlatformDriver {
     }
 
     /**
+     * 获取元素矩形范围 {@code [left, top, right, bottom]}。不支持或元素不存在时返回 null。
+     * <p>
+     * 和 {@link #getElementCenter} 的区别不只是多两个数：<b>中心点只能告诉你从哪按下去，
+     * 范围才能告诉你能在里面滑多远</b>。金刚位这类横向条，整屏左右滑会被识别成切页签，
+     * 必须把起止点都限制在这条的范围内。
+     */
+    default int[] getElementBounds(String deviceId, String selector) {
+        return null;
+    }
+
+    /**
      * 获取所有匹配选择器的元素的文本列表，用于提取列表数据（如参赛队伍等）。
      * 不支持时返回空列表。
      */

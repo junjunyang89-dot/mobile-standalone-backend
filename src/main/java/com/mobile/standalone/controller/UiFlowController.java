@@ -13,6 +13,7 @@ import com.mobile.standalone.service.TaskService;
 import com.mobile.standalone.service.UiFlowService;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +23,7 @@ import java.util.Map;
 /**
  * 拖拽流程/组件 CRUD + 执行（创建 UI_FLOW_TEST 任务并可立即 run）。
  */
+@Slf4j
 @RestController
 @RequestMapping("/ui-flows")
 @RequiredArgsConstructor
@@ -145,6 +147,12 @@ public class UiFlowController {
             m.put("lastRunStatus", t == null || t.getStatus() == null ? null : t.getStatus().name());
             m.put("lastRunAt", t == null ? null : (t.getUpdatedAt() != null ? t.getUpdatedAt() : t.getCreatedAt()));
             m.put("lastRunTaskId", t == null ? null : t.getId());
+            // 试跑单独一份。把试跑从质量数据里摘出去是对的，但顺手也把它从「我刚跑的那次呢」
+            // 里摘没了——人在编辑器里点了试跑，界面毫无反应，等于这个功能不存在
+            Task d = taskService.findLatestDebugByFlowId(id);
+            m.put("lastDebugStatus", d == null || d.getStatus() == null ? null : d.getStatus().name());
+            m.put("lastDebugAt", d == null ? null : (d.getUpdatedAt() != null ? d.getUpdatedAt() : d.getCreatedAt()));
+            m.put("lastDebugTaskId", d == null ? null : d.getId());
             out.put(id, m);
         }
         return ResponseEntity.ok(out);
@@ -255,9 +263,11 @@ public class UiFlowController {
 
             ObjectNode config = JSON.createObjectNode();
             config.put("flowId", id);
-            // 本页单跑＝自动化编排轨。用例的「最近执行状态」只认这条轨，
-            // 回归批次跑的是生产包，结果不能贴给提测用例
-            config.put("runTrack", RunTrack.AUTOMATION);
+            // 轨道由调用方声明：编辑器里的「试跑」传 DEBUG，正式单跑不传（默认自动化编排轨）。
+            // 试跑的结果不进「最近结果」、不算通过率、不告警——调试的失败不是质量数据。
+            // 用例的「最近执行状态」只认自动化轨，回归批次跑的是生产包，结果不能贴给提测用例
+            config.put("runTrack", RunTrack.isDebug(body.getTrack())
+                    ? RunTrack.DEBUG : RunTrack.AUTOMATION);
             if (uiAppId != null) {
                 config.put("uiAppId", uiAppId);
             }
@@ -290,17 +300,18 @@ public class UiFlowController {
             task.setScenarioKey("ui_flow");
             task.setStatus(Task.TaskStatus.PENDING);
 
+            long t0 = System.currentTimeMillis();
             Task created = taskService.createTask(task);
             boolean runNow = body.getRunNow() == null || Boolean.TRUE.equals(body.getRunNow());
-            boolean started = false;
             if (runNow) {
-                started = taskService.runTask(created.getId());
+                taskService.enqueueRun(created.getId());
             }
+            log.info("执行流程已受理: flowId={}, taskId={}, runNow={}, {}ms",
+                    id, created.getId(), runNow, System.currentTimeMillis() - t0);
             return ResponseEntity.ok(Map.of(
                     "taskId", created.getId(),
-                    "task", created,
-                    "started", started,
-                    "message", started ? "已创建任务并开始执行" : "已创建任务（未自动执行）"
+                    "started", runNow,
+                    "message", runNow ? "已创建任务并开始执行" : "已创建任务（未自动执行）"
             ));
         } catch (IllegalArgumentException ex) {
             return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
@@ -328,6 +339,11 @@ public class UiFlowController {
         private String taskName;
         private Map<String, String> params;
         private Boolean runNow;
+        /**
+         * 传 {@code DEBUG} 表示这是编辑器里的试跑：结果不进「最近结果」、不算通过率、不告警。
+         * 不传＝正式单跑，按自动化编排轨记。
+         */
+        private String track;
         /**
          * 执行环境：TEST / PROD，缺省 PROD。
          * <p>

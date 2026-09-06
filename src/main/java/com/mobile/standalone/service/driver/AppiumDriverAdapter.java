@@ -2633,6 +2633,24 @@ public class AppiumDriverAdapter implements PlatformDriver {
     }
 
     @Override
+    public int[] getElementBounds(String deviceId, String selector) {
+        WebElement el = findElement(deviceId, selector);
+        if (el == null) return null;
+        try {
+            org.openqa.selenium.Point loc = el.getLocation();
+            org.openqa.selenium.Dimension size = el.getSize();
+            return new int[]{
+                    loc.getX(),
+                    loc.getY(),
+                    loc.getX() + size.getWidth(),
+                    loc.getY() + size.getHeight()};
+        } catch (Exception e) {
+            log.warn("获取元素范围失败: selector={}", selector, e);
+            return null;
+        }
+    }
+
+    @Override
     public List<String> getElementsTextList(String deviceId, String selector) {
         AppiumDriver driver = sessions.get(deviceId);
         if (driver == null) return List.of();

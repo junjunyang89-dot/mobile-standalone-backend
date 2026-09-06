@@ -18,6 +18,17 @@ public final class RunTrack {
     public static final String REGRESSION = "REGRESSION";
     public static final String AUTOMATION = "AUTOMATION";
 
+    /**
+     * 试跑：在流程编辑器里改完步骤跑一下看通不通。
+     * <p>
+     * <b>它不是一条批量轨道</b>——{@link #normalize} 刻意不认它，候选筛选和排序都跟它无关。
+     * 它存在的唯一理由是<b>把调试产生的执行从质量数据里摘出去</b>：
+     * 你在编辑器里调三次挂两次，那两次失败不该算进工作台通过率、不该被当成这条流程的
+     * 「最近结果」、更不该触发告警。不区分的话，通过率这个数从第一天起就是不可信的，
+     * 而一个不可信的数会被人一直拿去汇报，直到某天出事。
+     */
+    public static final String DEBUG = "DEBUG";
+
     private RunTrack() {
     }
 
@@ -32,7 +43,20 @@ public final class RunTrack {
         return AUTOMATION.equals(normalize(raw));
     }
 
+    /**
+     * 是不是试跑。
+     * <p>
+     * 刻意不走 {@link #normalize}——那个方法是给批量执行定候选和排序的，
+     * 把 DEBUG 塞进去会让它必须在每个调用点都想一遍「试跑算哪条轨」，而答案是「都不算」。
+     */
+    public static boolean isDebug(String raw) {
+        return raw != null && DEBUG.equalsIgnoreCase(raw.trim());
+    }
+
     public static String label(String raw) {
+        if (isDebug(raw)) {
+            return "试跑";
+        }
         return isAutomation(raw) ? "自动化编排" : "回归";
     }
 

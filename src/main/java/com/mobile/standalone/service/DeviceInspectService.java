@@ -284,7 +284,8 @@ public class DeviceInspectService {
             py = contentBottom - 1;
         }
 
-        List<HitCandidate> hits = parseAndHit(xml, px, py, device.getPlatform(), appId);
+        List<String> warnings = new ArrayList<>();
+        List<HitCandidate> hits = parseAndHit(xml, px, py, device.getPlatform(), appId, warnings);
         hits = dropUselessFullScreenContainers(hits, shotSize[0], shotSize[1]);
         // 坐标始终作为可选方案之一；H5/WebView 无子树时提到最前并写明原因
         hits = appendCoordinateCandidate(hits, px, py, shotSize[0], shotSize[1]);
@@ -314,6 +315,7 @@ public class DeviceInspectService {
             log.debug("补充 nodePath/locator 唯一性失败: {}", e.getMessage());
         }
         result.setCandidates(hits);
+        result.setWarnings(warnings);
         return result;
     }
 
@@ -834,15 +836,19 @@ public class DeviceInspectService {
         }
     }
 
-    private List<HitCandidate> parseAndHit(String xml, int px, int py, Device.Platform platform, String appId) {
+    private List<HitCandidate> parseAndHit(String xml, int px, int py, Device.Platform platform, String appId,
+                                           List<String> warnings) {
         List<HitNode> nodes = new ArrayList<>();
+        // 树留着：验证「库里那条定位在这一屏指向谁」要在同一棵树上跑，
+        // 换一棵（哪怕只差几百毫秒）结论就不作数了
+        Document doc;
         try {
             DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
             f.setNamespaceAware(false);
             f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
             f.setFeature("http://xml.org/sax/features/external-general-entities", false);
             f.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-            Document doc = f.newDocumentBuilder()
+            doc = f.newDocumentBuilder()
                     .parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
             int[] seq = {0};
             walk(doc.getDocumentElement(), nodes, null, seq, null, null);
@@ -904,10 +910,12 @@ public class DeviceInspectService {
         }
 
         String plat = platform != null ? platform.name() : null;
-        List<HitCandidate> out = collectHitCandidates(scoped, labelPool, screenArea, px, py, appId, plat);
+        List<HitCandidate> out = collectHitCandidates(scoped, labelPool, screenArea, px, py, appId, plat,
+                doc, warnings);
         if (out.isEmpty() && scoped != containing) {
             log.info("点选前景裁剪后无候选，回退全量命中集");
-            out = collectHitCandidates(containing, nodes, screenArea, px, py, appId, plat);
+            out = collectHitCandidates(containing, nodes, screenArea, px, py, appId, plat,
+                    doc, warnings);
         }
         return out;
     }
@@ -960,7 +968,8 @@ public class DeviceInspectService {
     }
 
     private List<HitCandidate> collectHitCandidates(List<HitNode> scoped, List<HitNode> labelPool, int screenArea,
-                                                    int px, int py, String appId, String platform) {
+                                                    int px, int py, String appId, String platform,
+                                                    Document doc, List<String> warnings) {
         List<HitNode> ranked = new ArrayList<>(scoped);
         ranked.sort(Comparator
                 .comparingInt((HitNode n) -> hitRankScore(n, screenArea)).reversed()
@@ -979,7 +988,7 @@ public class DeviceInspectService {
         }
 
         // 库内 ACTIVE：仅当与点上控件文案不冲突时才置顶
-        prependActiveLibraryHits(out, seen, scoped, px, py, appId, platform);
+        prependActiveLibraryHits(out, seen, scoped, px, py, appId, platform, doc, warnings);
 
         // 分区专属规则互斥
         switch (zone) {
@@ -1132,10 +1141,17 @@ public class DeviceInspectService {
     /**
      * 点击落点下的小控件，若已有 ACTIVE 元素（同 resource-id），直接置顶推荐。
      * 文案冲突时跳过（点「登录注册」不能推荐「退出登录」）。
+     *
+     * <p><b>推荐之前必须验一次</b>：光看「库里那条定位串里带着这个节点的 resource-id」是不够的。
+     * Android 的 resource-id 在不同页面反复复用，首页金刚位和评论页的某个容器完全可能同 id。
+     * 不验证就置顶，界面会指着评论页的一个容器说「这是金刚位容器」——
+     * 人第一反应是「点选功能坏了」，其实工具说的是实话，只是说法把因果讲反了：
+     * 真正的事实是<b>库里那条定位不唯一</b>。
      */
     private void prependActiveLibraryHits(List<HitCandidate> out, java.util.LinkedHashSet<String> seen,
                                           List<HitNode> scoped, int px, int py,
-                                          String appId, String platform) {
+                                          String appId, String platform,
+                                          Document doc, List<String> warnings) {
         if (scoped == null || scoped.isEmpty() || appId == null || appId.isBlank()) return;
         List<HitNode> under = new ArrayList<>();
         for (HitNode n : scoped) {
@@ -1162,6 +1178,35 @@ public class DeviceInspectService {
                 String val = e.getLocatorValue() != null ? e.getLocatorValue().trim() : n.resourceId.trim();
                 // 仅接受定位值与当前节点 id 一致（或 xpath 含该 id），避免 hint 模糊命中
                 if (!locatorBelongsToNode(e, n)) continue;
+
+                // 真在这棵树上跑一遍，看它到底指向谁
+                LibHit lib = checkLibraryLocator(doc, e, n);
+                if (lib.dead()) {
+                    addWarning(warnings, "元素库里的「" + libLabel(e) + "」，它的定位在这一屏一个节点都没命中，"
+                            + "可你点的就是它该指的那个控件——说明这条定位写得太死（多了 class / index / 层级），"
+                            + "页面稍微一改就会失效。建议改用下面列出的方案之一。");
+                    log.info("点选跳过命中为 0 的库元素: lib={} locator={}", e.getNameEn(), e.getLocatorValue());
+                    continue;
+                }
+                if (lib.misses()) {
+                    addWarning(warnings, "元素库里的「" + libLabel(e) + "」，它的定位在这一屏命中 "
+                            + lib.total() + " 个节点，但没有一个是你点的这个。"
+                            + "执行时它会操作 " + lib.firstDesc() + "。这条元素的定位需要收紧。");
+                    log.info("点选跳过定位指向别处的库元素: lib={} total={} clicked=[{},{}][{},{}]",
+                            e.getNameEn(), lib.total(), n.left, n.top, n.right, n.bottom);
+                    continue;
+                }
+                if (lib.notFirst()) {
+                    addWarning(warnings, "元素库里的「" + libLabel(e) + "」，它的定位在这一屏命中 "
+                            + lib.total() + " 个节点，你点的这个排在第 " + (lib.index() + 1) + " 位。"
+                            + "Appium 只取第 1 个（" + lib.firstDesc() + "），"
+                            + "所以执行时它操作的并不是这里——「元素找得到、点击也成功、界面没反应」就是这么来的。"
+                            + "这条元素的定位需要收紧。");
+                    log.info("点选跳过定位排序靠后的库元素: lib={} total={} index={}",
+                            e.getNameEn(), lib.total(), lib.index());
+                    continue;
+                }
+
                 String key = type + "|" + val;
                 if (!seen.add(key)) continue;
                 HitCandidate c = baseCandidate(n, e.getNameZh());
@@ -1169,7 +1214,15 @@ public class DeviceInspectService {
                 c.setLocatorValue(val);
                 c.setSuggestedNameZh(e.getNameZh() != null ? e.getNameZh() : e.getNameEn());
                 c.setSuggestedNameEn(e.getNameEn());
-                c.setVisualHint("库内 ACTIVE · " + e.getNameEn());
+                if (lib.ambiguous()) {
+                    c.setVisualHint("库内 ACTIVE · " + e.getNameEn()
+                            + "（本屏命中 " + lib.total() + " 个，眼下第 1 个正好是它，页面一变就会指向别的）");
+                    addWarning(warnings, "元素库里的「" + libLabel(e) + "」，它的定位在这一屏命中 "
+                            + lib.total() + " 个节点。现在第 1 个恰好是你点的这个，所以还能用，"
+                            + "但这是运气不是设计——建议现在就收紧。");
+                } else {
+                    c.setVisualHint("库内 ACTIVE · " + e.getNameEn());
+                }
                 c.setMatchedElementId(e.getId());
                 c.setMatchedNameEn(e.getNameEn());
                 c.setMatchedNameZh(e.getNameZh());
@@ -1216,6 +1269,82 @@ public class DeviceInspectService {
         boolean bOut = b.contains("退出");
         if (aOut != bOut) return false;
         return a.contains("登录") && b.contains("登录");
+    }
+
+    /**
+     * 库里某条元素的定位，在当前这一屏指向谁。
+     *
+     * @param index 点选的那个节点排在第几个命中（文档序，也就是 Appium 的取用顺序）；-1＝根本不在命中列表里
+     */
+    private record LibHit(int total, int index, String firstDesc, boolean verifiable) {
+        /** 无法校验（定位类型不支持、xpath 语法错、树上没坐标）——此时一律放行，不能反过来当成「坏了」 */
+        boolean unverifiable() {
+            return !verifiable;
+        }
+
+        /** 一个都没命中：定位写得太死（多了 class、index 之类），眼前这个节点它够不着 */
+        boolean dead() {
+            return verifiable && total == 0;
+        }
+
+        /** 命中了几个，但没有一个是点选的这个节点 */
+        boolean misses() {
+            return verifiable && total > 0 && index < 0;
+        }
+
+        /** 命中了，但不是第 1 个：执行时 Appium 会拿走别的那个 */
+        boolean notFirst() {
+            return verifiable && index > 0;
+        }
+
+        /** 第 1 个就是它，但不止一个：眼下能用，纯靠运气 */
+        boolean ambiguous() {
+            return verifiable && index == 0 && total > 1;
+        }
+    }
+
+    private static LibHit checkLibraryLocator(Document doc, UiElement e, HitNode n) {
+        List<LocatorMatcher.Hit> hits = LocatorMatcher.matches(doc, e.getLocatorType(), e.getLocatorValue());
+        if (hits == null) {
+            // 定位类型不支持（坐标）、xpath 语法错——校验不了。
+            // 校验不了就按老样子推荐：把「没法确认」当成「有问题」，
+            // 会把一批本来好用的元素挡在外面，那比不校验更糟
+            return new LibHit(0, -1, null, false);
+        }
+        if (hits.isEmpty()) {
+            // 节点就在鼠标底下、定位串里也确实带着它的 resource-id，却一个都没命中——
+            // 只能是这条定位写得太死（多了 class / index / 层级）。推荐它等于推荐一个用不了的定位
+            return new LibHit(0, -1, "（一个都没命中）", true);
+        }
+        boolean anyBounds = false;
+        int idx = -1;
+        for (int i = 0; i < hits.size(); i++) {
+            LocatorMatcher.Hit h = hits.get(i);
+            if (h.hasBounds()) anyBounds = true;
+            if (idx < 0 && h.isSameNodeAs(n.left, n.top, n.right, n.bottom, n.resourceId)) {
+                idx = i;
+            }
+        }
+        // 树上没有坐标就没法判同一性。判不了就别判——
+        // 硬判的结果是把一批本来好用的元素说成坏的，比不判更糟
+        if (!anyBounds) {
+            return new LibHit(hits.size(), 0, hits.get(0).describe(), false);
+        }
+        return new LibHit(hits.size(), idx, hits.get(0).describe(), true);
+    }
+
+    private static String libLabel(UiElement e) {
+        String zh = e.getNameZh() == null || e.getNameZh().isBlank() ? null : e.getNameZh().trim();
+        String en = e.getNameEn() == null || e.getNameEn().isBlank() ? null : e.getNameEn().trim();
+        if (zh != null && en != null) return zh + "（" + en + "）";
+        return zh != null ? zh : (en != null ? en : "未命名元素");
+    }
+
+    /** 同一条只说一次，最多 4 条：告警刷屏等于没有告警 */
+    private static void addWarning(List<String> warnings, String msg) {
+        if (warnings == null || msg == null || msg.isBlank()) return;
+        if (warnings.size() >= 4 || warnings.contains(msg)) return;
+        warnings.add(msg);
     }
 
     private static boolean locatorBelongsToNode(UiElement e, HitNode n) {
@@ -3345,6 +3474,14 @@ public class DeviceInspectService {
         /** 由近及远的祖先链，支持「选错了往上跳一级」 */
         private List<NodeRef> ancestors;
         private List<HitCandidate> candidates;
+        /**
+         * 这一次点选发现的问题，直接说给人听。
+         * <p>
+         * 目前只有一类，但它足够常见也足够坑：库里某条元素的定位在这一屏指向了别的节点。
+         * 这种问题在候选列表里是表达不出来的——候选列表回答的是「这个节点怎么定位」，
+         * 而它要说的是「库里那条元素坏了」，是另一个话题。
+         */
+        private List<String> warnings;
     }
 
     /** 树上一个节点的轻量引用，够前端展示和再取 locator */

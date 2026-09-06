@@ -55,6 +55,7 @@ public class TaskService {
     private final DeviceLockService deviceLockService;
     private final ExecutionCancelRegistry cancelRegistry;
     private final FailureDiagnosisRunner diagnosisRunner;
+    private final ExecutionAlertService executionAlertService;
     private final NodeIdentity nodeIdentity;
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, Process> runningTasks = new ConcurrentHashMap<>();
@@ -82,6 +83,14 @@ public class TaskService {
             return null;
         }
         return taskMapper.findLatestByFlowId(flowId.trim());
+    }
+
+    /** 试跑轨的最近一次 */
+    public Task findLatestDebugByFlowId(String flowId) {
+        if (flowId == null || flowId.isBlank()) {
+            return null;
+        }
+        return taskMapper.findLatestDebugByFlowId(flowId.trim());
     }
 
     public List<Task> getTasksByType(Task.TaskType taskType) {
@@ -282,6 +291,20 @@ public class TaskService {
     }
 
     /**
+     * 提交执行后马上返回，不在 HTTP 线程里等设备锁 / 建执行记录。
+     * 点「开始执行」如果卡在接口上，按钮会一直转圈。
+     */
+    public void enqueueRun(String taskId) {
+        executorService.submit(() -> {
+            try {
+                self.runTask(taskId);
+            } catch (Exception e) {
+                log.error("异步启动任务失败: taskId={}, error={}", taskId, e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
      * 提交任务执行。
      *
      * @param parentRefId 上级执行链标识（如线上回归的 runId）。父级已持有该设备时子任务可重入，
@@ -351,6 +374,11 @@ public class TaskService {
                     // 放在设备锁释放之后：环境问题判定要自动重跑时，得能立刻拿到这台机。
                     // parentRefId 非空说明是线上回归编排在驱动，那边有自己的状态机，不能背着它重跑。
                     diagnosisRunner.onTaskFinished(taskId, parentRefId == null);
+                    // 告警挂在执行层而不是编排层：原来只有「线上回归批次」失败才有人知道，
+                    // 而生产巡检走的是单条流程执行这条路，跑挂了没有任何人会收到消息——
+                    // 一个没人知道结果的巡检等于没跑。同样用 parentRefId 区分：
+                    // 编排驱动的任务不单独发，否则一批 20 条失败会推 20 条消息，人只会把通知静音。
+                    executionAlertService.onTaskFinished(taskId, parentRefId == null);
                 }
             });
         } catch (RuntimeException e) {
@@ -396,7 +424,9 @@ public class TaskService {
         return true;
     }
     
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    /**
+     * 真机步骤可能跑几分钟，不能包在事务里——会占着连接，下一次点执行 HTTP 就会一直转圈。
+     */
     public void executeTestTask(Task task, TaskExecution execution) throws Exception {
         log.info("Executing task: {}, type: {} (应用将由 PlatformDriver 启动：appium.enabled=true 时使用 Appium WebDriver，否则使用 ADB/idevice)",
                 task.getName(), task.getTaskType());

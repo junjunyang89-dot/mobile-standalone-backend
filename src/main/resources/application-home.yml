@@ -1,0 +1,12 @@
+# 在家：连本机 MySQL，避免每条 SQL 都走公网。
+# 切换：./scripts/use-db.sh home
+spring:
+  datasource:
+    url: jdbc:mysql://${HOME_DB_HOST:127.0.0.1}:${HOME_DB_PORT:3306}/${DB_NAME:mobile_standalone}?useUnicode=true&characterEncoding=UTF-8&sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true&connectionCollation=utf8mb4_unicode_ci
+    username: ${HOME_DB_USERNAME:root}
+    password: ${HOME_DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 3
+      connection-timeout: 5000
+      validation-timeout: 3000

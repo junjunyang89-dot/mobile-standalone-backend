@@ -204,6 +204,15 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
+                    <!-- 127.0.0.1:3307 隧道不要走系统 / SOCKS 代理 -->
+                    <jvmArguments>
+                        -Djava.net.useSystemProxies=false -DsocksProxyHost= -Dhttp.nonProxyHosts=localhost|127.*|192.168.*|[::1]
+                    </jvmArguments>
+                    <environmentVariables>
+                        <ALL_PROXY></ALL_PROXY>
+                        <all_proxy></all_proxy>
+                        <SOCKS_PROXY></SOCKS_PROXY>
+                    </environmentVariables>
                     <excludes>
                         <exclude>
                             <groupId>org.projectlombok</groupId>

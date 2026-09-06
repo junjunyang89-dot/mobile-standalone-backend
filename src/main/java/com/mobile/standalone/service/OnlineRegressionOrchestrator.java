@@ -862,7 +862,7 @@ public class OnlineRegressionOrchestrator {
             jobMapper.update(job);
 
             try {
-                StepExecResult result = executeStep(job, step, account, environment, track);
+                StepExecResult result = executeStep(job, step, account, environment, track, req.getParams());
 
                 // 首次失败就整步重跑一次：真坏的东西重跑还是坏，偶发的重跑就过了。
                 // 这样「红色」才能稳定地代表真问题——否则偶现红会让人先怀疑自动化，
@@ -873,7 +873,7 @@ public class OnlineRegressionOrchestrator {
                     log.info("回归步骤首次失败，重跑一次: job={}, step={}, err={}",
                             job.getJobKey(), step.getStepId(), result.message);
                     String firstError = result.message;
-                    StepExecResult second = executeStep(job, step, account, environment, track);
+                    StepExecResult second = executeStep(job, step, account, environment, track, req.getParams());
                     retried = true;
                     if (second.success) {
                         // 重跑通过：功能是好的，但这条用例不稳定
@@ -1056,7 +1056,8 @@ public class OnlineRegressionOrchestrator {
     }
 
     private StepExecResult executeStep(OnlineRegressionJob job, OnlineRegressionStep step,
-                                       OnlineRegressionAccount account, String environment, String track)
+                                       OnlineRegressionAccount account, String environment, String track,
+                                       Map<String, String> batchParams)
             throws Exception {
         String flowId = step.getStepId();
         Device device = deviceMapper.findById(job.getDeviceId());
@@ -1072,7 +1073,7 @@ public class OnlineRegressionOrchestrator {
                     + RunTrack.label(track) + "（用途、环境、启用、非组件四条要同时满足）: " + flow.getName());
         }
         Task.Platform taskPlatform = resolveTaskPlatform(job.getAppId(), device.getPlatform());
-        return executeStepViaUiFlow(job, step, account, device, taskPlatform, flowId, environment);
+        return executeStepViaUiFlow(job, step, account, device, taskPlatform, flowId, environment, batchParams);
     }
 
     /**
@@ -1081,7 +1082,8 @@ public class OnlineRegressionOrchestrator {
     private StepExecResult executeStepViaUiFlow(OnlineRegressionJob job, OnlineRegressionStep step,
                                                 OnlineRegressionAccount account, Device device,
                                                 Task.Platform taskPlatform, String flowId,
-                                                String environment) throws Exception {
+                                                String environment,
+                                                Map<String, String> batchParams) throws Exception {
         Application app = resolveOrCreateApplication(device, job.getAppId(), taskPlatform);
 
         ObjectNode config = JSON.createObjectNode();
@@ -1090,8 +1092,22 @@ public class OnlineRegressionOrchestrator {
         config.put("uiAppId", job.getAppId());
         // 归因签名与任务总览都按这个字段区分环境，别让两个环境的失败互相「复用」结论
         config.put("environment", environment);
+        // 批次参数垫底，账号参数盖在上面。顺序不能反——账号是编排按设备分配的，
+        // 让批次里手填的 phone 盖掉它，多台机就会用同一个号互相踢下线，
+        // 而现象是「登录成功后莫名其妙退出」，查起来完全想不到是这里
+        ObjectNode params = null;
+        if (batchParams != null && !batchParams.isEmpty()) {
+            params = config.putObject("params");
+            for (Map.Entry<String, String> e : batchParams.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) {
+                    params.put(e.getKey(), e.getValue());
+                }
+            }
+        }
         if (account != null) {
-            ObjectNode params = config.putObject("params");
+            if (params == null) {
+                params = config.putObject("params");
+            }
             if (account.getPhoneNumber() != null) {
                 params.put("phone", account.getPhoneNumber());
                 params.put("phoneNumber", account.getPhoneNumber());
@@ -1589,6 +1605,14 @@ public class OnlineRegressionOrchestrator {
         private String installStrategy;
         /** SPECIFIC 时指定的蒲公英 buildKey */
         private String installBuildKey;
+        /**
+         * 批次级执行参数，透传给这批里每一条流程的 {@code ${变量}}。
+         * <p>
+         * 正规的数据通道是按环境注入的 {@code env_variables}，这里是<b>本次覆盖</b>：
+         * 「同一批用例，这次换个账号/换个版本跑一遍」不该逼人去改环境变量——
+         * 改了就影响所有人，改完还得记得改回来。
+         */
+        private Map<String, String> params;
         /**
          * 轨道：REGRESSION（默认）/ AUTOMATION。
          * <p>
