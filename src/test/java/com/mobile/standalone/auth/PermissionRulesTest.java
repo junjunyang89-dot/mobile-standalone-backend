@@ -63,6 +63,10 @@ class PermissionRulesTest {
         assertThat(PermissionRules.isPublic("/ui-element-previews/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/auth/login")).isTrue();
         assertThat(PermissionRules.isPublic("/health")).isTrue();
+        assertThat(PermissionRules.isPublic("/debug-tests/open")).isTrue();
+        assertThat(PermissionRules.isPublic("/debug-tests")).isFalse();
+        assertThat(PermissionRules.isPublic("/debug-tests/ping")).isFalse();
+        assertThat(PermissionRules.isPublic("/debug-tests/1")).isFalse();
         // 业务接口一律不公开
         assertThat(PermissionRules.isPublic("/ui-flows")).isFalse();
         assertThat(PermissionRules.isPublic("/devices")).isFalse();

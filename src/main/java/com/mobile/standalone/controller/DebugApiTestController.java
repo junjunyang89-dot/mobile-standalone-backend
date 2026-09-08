@@ -32,6 +32,26 @@ public class DebugApiTestController {
     }
 
     /**
+     * 免登录查询，只给本机 curl / 接口对比调试用。
+     * 不要把整段 {@code /debug-tests} 做成公开——增删改仍要登录。
+     */
+    @GetMapping("/open")
+    public ResponseEntity<Map<String, Object>> openQuery(
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false, defaultValue = "10") int limit
+    ) {
+        List<DebugApiTest> items = debugApiTestService.list(status, keyword, limit);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ok", true);
+        body.put("module", "debug-tests");
+        body.put("publicQuery", true);
+        body.put("count", items.size());
+        body.put("items", items);
+        return ResponseEntity.ok(body);
+    }
+
+    /**
      * 固定多层嵌套 JSON，专门测 jsonPath 抽取 / 断言。
      * 路径必须在 {@code /{id}} 之前声明，否则会被当成 id。
      */
