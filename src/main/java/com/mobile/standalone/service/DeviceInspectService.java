@@ -1301,6 +1301,14 @@ public class DeviceInspectService {
             if (w > 0 && h > 0) return new int[]{w, h};
         }
 
+        // 1.5) iOS XCUITest：没有 <hierarchy>、也没有 bounds=，根元素用 x/y/width/height（点坐标）。
+        // 不解析的话 hierSize 会退回截图像素尺寸，hitTest 便不做 retina 缩放——点击被放大 ~3 倍，
+        // 点小控件却命中下面的大容器。这是 iOS 真机点选对不上的根因。
+        if (xml.contains("XCUIElementType")) {
+            int[] iosSize = detectIosRootSize(xml, shotSize);
+            if (iosSize != null) return iosSize;
+        }
+
         // 2) 优先 [0,0][w][h] 且接近截图尺寸的节点（状态栏差常见 100~300px）
         int[] best = null;
         double bestScore = Double.MAX_VALUE;
@@ -1337,6 +1345,53 @@ public class DeviceInspectService {
             return new int[]{shotSize[0], shotSize[1]};
         }
         return null;
+    }
+
+    /**
+     * iOS XCUITest 根尺寸（点坐标）：找 x=0 y=0 的屏幕级元素，取其 width/height。
+     * 属性顺序不固定，逐个属性解析而不是整体正则。
+     */
+    private static int[] detectIosRootSize(String xml, int[] shotSize) {
+        // 优先 Application / Window：它们的 frame 就是屏幕尺寸（点坐标），最可靠
+        for (String rootType : new String[]{"XCUIElementTypeApplication", "XCUIElementTypeWindow"}) {
+            Matcher m = Pattern.compile("<" + rootType + "\\b[^>]*", Pattern.DOTALL).matcher(xml);
+            if (m.find()) {
+                String t = m.group();
+                Integer w = attrInt(t, "width");
+                Integer h = attrInt(t, "height");
+                if (w != null && h != null && w > 200 && h > 400) {
+                    return new int[]{w, h};
+                }
+            }
+        }
+        // 兜底：x=0 y=0 的屏幕级元素里，挑长宽比最接近截图的（避开滚动内容的超高 frame）
+        double shotAspect = (shotSize != null && shotSize[0] > 0)
+                ? (double) shotSize[1] / shotSize[0] : 0;
+        Matcher tag = Pattern.compile("<XCUIElementType\\w+\\b[^>]*", Pattern.DOTALL).matcher(xml);
+        int scanned = 0;
+        int[] best = null;
+        double bestScore = Double.MAX_VALUE;
+        while (tag.find() && scanned < 160) {
+            scanned++;
+            String t = tag.group();
+            Integer x = attrInt(t, "x");
+            Integer y = attrInt(t, "y");
+            Integer w = attrInt(t, "width");
+            Integer h = attrInt(t, "height");
+            if (x == null || y == null || w == null || h == null) continue;
+            if (x != 0 || y != 0 || w < 200 || h < 400) continue;
+            double score = shotAspect > 0 ? Math.abs((double) h / w - shotAspect) : -(double) w * h;
+            if (score < bestScore) {
+                bestScore = score;
+                best = new int[]{w, h};
+            }
+        }
+        return best;
+    }
+
+    private static Integer attrInt(String tag, String name) {
+        Matcher m = Pattern.compile("\\b" + name + "\\s*=\\s*\"(-?\\d+)\"").matcher(tag);
+        return m.find() ? Integer.parseInt(m.group(1)) : null;
     }
 
     /** 控件树中实际出现的最大 bottom，用于夹紧截图底部多出的点击 */
