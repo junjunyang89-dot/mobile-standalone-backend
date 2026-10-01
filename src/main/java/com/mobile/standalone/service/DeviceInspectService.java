@@ -1492,7 +1492,63 @@ public class DeviceInspectService {
             out = collectHitCandidates(containing, nodes, screenArea, px, py, appId, plat,
                     doc, warnings);
         }
+        // iOS 真机：图标/控件常常无 accessibility 标签，isInteresting 判定为"无趣"被跳过，
+        // 于是只能选到带标签的大祖先——红框罩住一大片。像 Appium Inspector 一样补一个
+        // "落点下最深(最小)节点"候选，让红框贴合实际点中的控件（无 id/文案时用绝对 xpath）。
+        if (Device.usesIosAutomation(platform)) {
+            prependTightestNode(out, containing, screenArea);
+        }
         return out;
+    }
+
+    /**
+     * 把落点下面积最小的节点作为候选提到最前——仅当现有首选明显"过大"或压根没有带框候选时。
+     * <p>解决 iOS 点图标红框巨大：无标签控件进不了常规候选，这里兜底给一个紧致框 + 绝对 xpath。
+     * 只在过度覆盖时介入，正常能认到紧致节点的点击不受影响。
+     */
+    private void prependTightestNode(List<HitCandidate> out, List<HitNode> containing, int screenArea) {
+        if (containing == null || containing.isEmpty()) return;
+        HitNode tight = null;
+        for (HitNode n : containing) {
+            if (n == null) continue;
+            int a = n.area();
+            if (a <= 0) continue;
+            if (screenArea > 0 && a > screenArea * 0.5) continue; // 全屏/大壳不算最深节点
+            if (isWebViewShell(n)) continue;
+            if (tight == null || a < tight.area()) tight = n;
+        }
+        if (tight == null) return;
+        // 现有首选的框面积：没有带框候选、或首选远大于最紧节点(>4倍)，才认为"过度覆盖"需要兜底
+        Integer primaryArea = null;
+        for (HitCandidate c : out) {
+            Map<String, Integer> b = c.getBounds();
+            if (b == null) continue;
+            int w = b.getOrDefault("right", 0) - b.getOrDefault("left", 0);
+            int h = b.getOrDefault("bottom", 0) - b.getOrDefault("top", 0);
+            if (w > 0 && h > 0) {
+                primaryArea = w * h;
+                break;
+            }
+        }
+        if (primaryArea != null && primaryArea <= (long) tight.area() * 4) return;
+        String val = tight.xpath != null && !tight.xpath.isBlank()
+                ? tight.xpath
+                : "//*[@bounds='[" + tight.left + "," + tight.top + "][" + tight.right + "," + tight.bottom + "]']";
+        for (HitCandidate e : out) {
+            if (val.equals(e.getLocatorValue())) return; // 已有候选正好指向它
+        }
+        HitCandidate c = baseCandidate(tight, firstNonBlank(tight.text, tight.contentDesc));
+        c.setLocatorType("xpath");
+        c.setLocatorValue(val);
+        c.setVisualHint("最深节点 · 无 id/文案的控件用绝对 xpath 兜底（位置相关，页面结构变会失效）");
+        if (c.getSuggestedNameZh() == null || c.getSuggestedNameZh().isBlank()) {
+            c.setSuggestedNameZh("点选控件");
+        }
+        if (c.getSuggestedNameEn() == null || c.getSuggestedNameEn().isBlank()) {
+            c.setSuggestedNameEn("node_" + tight.left + "_" + tight.top);
+        }
+        out.add(0, c);
+        for (int i = 0; i < out.size(); i++) out.get(i).setRank(i);
     }
 
     /** 点击落点分区：各区规则互斥，避免「修评论又搞坏侧栏」 */
