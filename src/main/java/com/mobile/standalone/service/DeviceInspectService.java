@@ -1496,7 +1496,7 @@ public class DeviceInspectService {
         // 于是只能选到带标签的大祖先——红框罩住一大片。像 Appium Inspector 一样补一个
         // "落点下最深(最小)节点"候选，让红框贴合实际点中的控件（无 id/文案时用绝对 xpath）。
         if (Device.usesIosAutomation(platform)) {
-            prependTightestNode(out, containing, screenArea);
+            prependTightestNode(out, nodes, px, py, screenArea);
         }
         return out;
     }
@@ -1506,11 +1506,14 @@ public class DeviceInspectService {
      * <p>解决 iOS 点图标红框巨大：无标签控件进不了常规候选，这里兜底给一个紧致框 + 绝对 xpath。
      * 只在过度覆盖时介入，正常能认到紧致节点的点击不受影响。
      */
-    private void prependTightestNode(List<HitCandidate> out, List<HitNode> containing, int screenArea) {
-        if (containing == null || containing.isEmpty()) return;
+    private void prependTightestNode(List<HitCandidate> out, List<HitNode> allNodes, int px, int py, int screenArea) {
+        if (allNodes == null || allNodes.isEmpty()) return;
         HitNode tight = null;
-        for (HitNode n : containing) {
+        for (HitNode n : allNodes) {
             if (n == null) continue;
+            // 刻意不看 n.displayed：iOS 图标/子控件常是 visible="false"，但在 Appium Inspector
+            // 里照样选得到、xpath 也准。只要 bounds 真实且罩住落点，就是比大 Cell 更深的候选。
+            if (!(n.left <= px && px < n.right && n.top <= py && py < n.bottom)) continue;
             int a = n.area();
             if (a <= 0) continue;
             if (screenArea > 0 && a > screenArea * 0.5) continue; // 全屏/大壳不算最深节点
