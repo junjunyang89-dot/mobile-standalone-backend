@@ -3258,6 +3258,18 @@ public class DeviceInspectService {
                 + " and @text=" + xpathLiteral(label) + "]";
     }
 
+    /**
+     * iOS 父节点限定的按名 xpath：{@code //父类型/类型[@name=..]}（Appium Inspector 风格）。
+     * 当全树有多个同名元素时，用直接父容器收窄。拿不到父类型时返回 null。
+     */
+    private static String parentScopedNameXpath(HitNode n, String label) {
+        if (n == null || n.parent == null) return null;
+        String parentType = n.parent.className;
+        if (parentType == null || parentType.isBlank()) return null;
+        String type = n.className != null && !n.className.isBlank() ? n.className.trim() : "*";
+        return "//" + parentType.trim() + "/" + type + "[@name=" + xpathLiteral(label) + "]";
+    }
+
     /** 平台正确的「按文案」xpath：iOS 用 {@code //类型[@name=..]}，Android 用 {@code //*[@text=..]}。 */
     private static String labelXpath(HitNode n, String label) {
         if (isIosNode(n)) {
@@ -3399,6 +3411,20 @@ public class DeviceInspectService {
                 applySuggestedNames(xp, ownLabel, n);
                 xp.setVisualHint(strategyHint(ios ? "xpath@name" : "xpath@text", n, ownLabel));
                 list.add(xp);
+
+                // iOS：再给一条父节点限定的 xpath（Inspector 风格 //父类型/类型[@name=..]）。
+                // bare @name 若在全树命中多个，这条用父容器收窄；唯一优先排序会自动挑唯一的那条。
+                if (ios) {
+                    String scoped = parentScopedNameXpath(n, ownLabel);
+                    if (scoped != null && !scoped.equals(xp.getLocatorValue())) {
+                        HitCandidate xpScoped = baseCandidate(n, ownLabel);
+                        xpScoped.setLocatorType("xpath");
+                        xpScoped.setLocatorValue(scoped);
+                        applySuggestedNames(xpScoped, ownLabel, n);
+                        xpScoped.setVisualHint(strategyHint("xpath@name(父节点限定)", n, ownLabel));
+                        list.add(xpScoped);
+                    }
+                }
             }
 
             // @clickable 是 Android 属性；iOS 树没有，跳过这条祖先 xpath

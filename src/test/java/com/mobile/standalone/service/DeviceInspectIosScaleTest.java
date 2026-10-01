@@ -61,7 +61,10 @@ class DeviceInspectIosScaleTest {
                 .filter(c -> "xpath".equals(c.getLocatorType()))
                 .map(DeviceInspectService.HitCandidate::getLocatorValue)
                 .toList();
-        assertThat(xpaths).anyMatch(v -> v.contains("XCUIElementTypeStaticText[@name='周边商城']"));
+        assertThat(xpaths).anyMatch(v -> v.endsWith("//XCUIElementTypeStaticText[@name='周边商城']"));
+        // 也给一条父节点限定的（Inspector 风格 //父类型/类型[@name=..]）
+        assertThat(xpaths).anyMatch(v -> v.contains(
+                "//XCUIElementTypeWindow/XCUIElementTypeStaticText[@name='周边商城']"));
         assertThat(xpaths).noneMatch(v -> v.contains("@text=") || v.contains("@clickable") || v.contains("@bounds="));
         // 也应给出 accessibilityId（iOS 上最稳）
         assertThat(hits).anyMatch(c -> "accessibilityId".equals(c.getLocatorType())
