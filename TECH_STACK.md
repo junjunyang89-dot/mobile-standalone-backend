@@ -176,7 +176,7 @@ backend/
 
 ```yaml
 server:
-  port: 3000                    # 服务端口
+  port: 3080                    # 服务端口
   servlet:
     context-path: /api          # API 基础路径
 

@@ -32,7 +32,7 @@ public class NodeIdentity {
             @Value("${app.node.display-name:}") String displayName,
             @Value("${app.node.control-plane-url:}") String controlPlaneUrl,
             @Value("${app.node.advertise-url:}") String advertiseUrl,
-            @Value("${server.port:3000}") int serverPort
+            @Value("${server.port:3080}") int serverPort
     ) {
         this.role = normalizeRole(role);
         this.hostname = resolveHostname();

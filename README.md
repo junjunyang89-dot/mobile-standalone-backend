@@ -99,7 +99,7 @@ mvn spring-boot:run
 
 ## API 文档
 
-服务启动后，API 基础路径为：`http://localhost:3000/api`
+服务启动后，API 基础路径为：`http://localhost:3080/api`
 
 ### 设备管理
 

@@ -215,7 +215,7 @@ public class Task {
 
 ```yaml
 server:
-  port: 3000
+  port: 3080
   servlet:
     context-path: /api
 

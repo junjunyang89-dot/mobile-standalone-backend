@@ -22,7 +22,7 @@ import java.util.Map;
  * 平台智能存储：知识 / 会话落在本地 MySQL。
  * <p>
  * 架构：前端俊俊页 → 本后端 → CodeWords Agent（理解意图/调工具）
- * Agent 若配置了 STORAGE_API_URL=http://本机:3000，会回调本服务的 /api/knowledge、/api/conversation。
+ * Agent 若配置了 STORAGE_API_URL=http://本机:3080，会回调本服务的 /api/knowledge、/api/conversation。
  * 契约与云端文档一致（POST 返回 status=stored；GET 返回 results/snippet），但实现与数据都在本地。
  */
 @Service

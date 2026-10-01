@@ -10,7 +10,7 @@ import java.util.Map;
 
 /**
  * 本地知识库 API（平台自有库 knowledge）。
- * CodeWords Agent 在配置 STORAGE_API_URL=http://本机:3000 后会回调本接口存/搜知识；
+ * CodeWords Agent 在配置 STORAGE_API_URL=http://本机:3080 后会回调本接口存/搜知识；
  * 前端俊俊页也可直接读本接口展示知识条数。
  */
 @RestController
