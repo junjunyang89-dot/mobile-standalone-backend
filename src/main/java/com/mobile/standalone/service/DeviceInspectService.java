@@ -1144,6 +1144,9 @@ public class DeviceInspectService {
      * dump 控件树。模拟器上 {@code uiautomator dump} 常卡在 waitForIdle，
      * 12 秒还不杀的话录制左边会一直转。先 exec-out，再文件，超时 5 秒并清掉残留进程。
      */
+    // 刻意不加 --compressed：压缩树会丢掉「对无障碍不重要」的大量容器/文本节点，
+    // 这正是我们比 Appium Inspector(uia2 未压缩树)少认出一大截元素的主因。
+    // 未压缩树更大更慢，但对齐 Inspector 的覆盖面值这个代价。
     private String dumpUiAutomatorXml(String deviceId) {
         String viaExec = dumpUiAutomatorExecOut(deviceId);
         if (viaExec != null) return viaExec;
@@ -1153,7 +1156,7 @@ public class DeviceInspectService {
     private String dumpUiAutomatorExecOut(String deviceId) {
         try {
             Process dump = new ProcessBuilder("adb", "-s", deviceId, "exec-out",
-                    "uiautomator", "dump", "--compressed", "/dev/tty")
+                    "uiautomator", "dump", "/dev/tty")
                     .redirectErrorStream(true)
                     .start();
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
@@ -1173,7 +1176,7 @@ public class DeviceInspectService {
         String remote = "/sdcard/ms_inspect_uidump.xml";
         try {
             Process dump = new ProcessBuilder("adb", "-s", deviceId, "shell",
-                    "uiautomator", "dump", "--compressed", remote)
+                    "uiautomator", "dump", remote)
                     .redirectErrorStream(true)
                     .start();
             if (!awaitProcess(dump, 5, null)) {
@@ -3996,6 +3999,9 @@ public class DeviceInspectService {
         }
 
         List<HitCandidate> list = new ArrayList<>(expandLocatorStrategies(target, nodes, -1, -1));
+        // id+text 组合 xpath：属性组合，常常唯一且不随页面结构位置变化，
+        // 是 Inspector 风格里最"准又稳"的一种，优先于绝对 xpath 兜底。
+        addCombinedIdTextXpath(list, target);
         // 容器类节点常常无 id 无文案：绝对 xpath 兜底，保证任何节点都拿得到一个能用的 locator
         if (target.xpath != null && !target.xpath.isBlank()) {
             boolean dup = false;
@@ -4019,13 +4025,14 @@ public class DeviceInspectService {
                 list.add(abs);
             }
         }
-        int rank = 0;
         for (HitCandidate c : list) {
-            c.setRank(rank++);
             if (c.getNodePath() == null) c.setNodePath(target.nodePath);
         }
         enrichMatchedElements(list, appId, platform);
         enrichMatchCounts(doc, list);
+        // 唯一命中的顶上来——这是和 Appium Inspector 对齐的关键：
+        // 推荐首选必须是「在当前树上只匹配到一个」的 locator，而不是生成顺序第一个。
+        promoteUniqueFirst(list);
 
         double[] scale = hierToShotScale(device.getPlatform(), shotSize, detectHierarchySize(xml, shotSize));
         NodeLocatorsResult r = new NodeLocatorsResult();
@@ -4071,13 +4078,12 @@ public class DeviceInspectService {
         addAttrCandidate(list, node, "text", node.getText(), "text");
         addAttrCandidate(list, node, "accessibilityId", node.getContentDesc(), "content-desc / accessibility id");
         addAttrCandidate(list, node, "className", node.getClassName(), "class · 通常不唯一");
-        int rank = 0;
         for (HitCandidate c : list) {
-            c.setRank(rank++);
             c.setNodePath(node.getNodePath());
         }
         enrichMatchedElements(list, appId, platform);
         enrichMatchCounts(doc, list);
+        promoteUniqueFirst(list);
 
         NodeLocatorsResult r = new NodeLocatorsResult();
         r.setDeviceId(deviceId);
@@ -4217,6 +4223,58 @@ public class DeviceInspectService {
                 c.setMatchedStatus(m.getStatus());
             }
         }
+    }
+
+    /**
+     * 把「在当前树上唯一命中」的候选稳定地提到前面，再按新顺序重排 rank。
+     * <p>像 Appium Inspector 一样：推荐首选必须是只匹配到一个元素的 locator。
+     * 分三档——唯一(matchCount==1) → 无法校验(null) → 非唯一(命中多个)；
+     * 每档内部保持原有生成顺序(stable)，所以 id/text 这类语义 locator 仍排在
+     * 绝对 xpath 之前，只是非唯一的会被挤到同类唯一候选之后。
+     */
+    static void promoteUniqueFirst(List<HitCandidate> hits) {
+        if (hits == null || hits.size() < 2) {
+            if (hits != null) {
+                int r = 0;
+                for (HitCandidate c : hits) c.setRank(r++);
+            }
+            return;
+        }
+        hits.sort(Comparator.comparingInt(DeviceInspectService::uniqueTier));
+        int r = 0;
+        for (HitCandidate c : hits) c.setRank(r++);
+    }
+
+    /** 唯一=0，无法校验=1，非唯一=2；配合稳定排序保持档内原序 */
+    private static int uniqueTier(HitCandidate c) {
+        Boolean u = c.getUnique();
+        if (Boolean.TRUE.equals(u)) return 0;
+        if (u == null) return 1;
+        return 2;
+    }
+
+    /**
+     * id + text 组合 xpath：{@code //*[@resource-id=X and @text=Y]}。
+     * 两个属性一起约束，通常唯一，且不像绝对 xpath 那样依赖节点在树里的位置——
+     * 页面结构变了也不受影响。只在两者都在、文案不长时给，避免噪声。
+     */
+    private void addCombinedIdTextXpath(List<HitCandidate> list, HitNode n) {
+        if (list == null || n == null) return;
+        String rid = n.resourceId;
+        String txt = n.text;
+        if (rid == null || rid.isBlank() || "null".equalsIgnoreCase(rid)) return;
+        if (txt == null || txt.isBlank() || txt.length() > 40) return;
+        String xp = "//*[@resource-id=" + xpathLiteral(rid.trim())
+                + " and @text=" + xpathLiteral(txt.trim()) + "]";
+        for (HitCandidate c : list) {
+            if (xp.equals(c.getLocatorValue())) return;
+        }
+        HitCandidate c = baseCandidate(n, txt);
+        c.setLocatorType("xpath");
+        c.setLocatorValue(xp);
+        applySuggestedNames(c, txt, n);
+        c.setVisualHint("xpath(id+text) · 属性组合，页面结构变也不受影响");
+        list.add(c);
     }
 
     /** 每个候选在当前树上跑一次匹配：「这个 xpath 命中 3 个」比任何推荐理由都直接 */
