@@ -52,7 +52,74 @@ public class ApiTestRunnerService {
     private final ApiProjectService projectService;
     private final ApiTestCollectionService collectionService;
     private final com.mobile.standalone.service.apitest.DbAssertRunner dbAssert;
+
+    /**
+     * 被限流时的业务码（逗号分隔）。空＝只按 HTTP 429 / 503+Retry-After 判。
+     * <p>
+     * 不写死在代码里：910001 是被测后端 {@code MessageCodeEnum.FLOW_LIMIT} 的约定，
+     * 换个项目就不是这个数了。平台是通用的，不该带某个项目的常量。
+     */
+    @org.springframework.beans.factory.annotation.Value("${api-test.rate-limit.throttle-codes:}")
+    private String rateLimitThrottleCodesRaw;
+
+    /**
+     * 被限流策略<b>禁止</b>访问的业务码（阈值被配成负数那种）。
+     * 和上面分开是因为下一步动作不同：这类重试多少次都一样，一直撞墙只会撞到超时。
+     */
+    @org.springframework.beans.factory.annotation.Value("${api-test.rate-limit.forbid-codes:}")
+    private String rateLimitForbidCodesRaw;
+
+    private volatile java.util.Set<String> rateLimitThrottleCodes = java.util.Set.of();
+    private volatile java.util.Set<String> rateLimitForbidCodes = java.util.Set.of();
+
+    @jakarta.annotation.PostConstruct
+    void initRateLimitCodes() {
+        rateLimitThrottleCodes = splitCodes(rateLimitThrottleCodesRaw);
+        rateLimitForbidCodes = splitCodes(rateLimitForbidCodesRaw);
+        if (!rateLimitThrottleCodes.isEmpty() || !rateLimitForbidCodes.isEmpty()) {
+            log.info("[api-test] 限流码已配置：限流 {} / 禁止 {}",
+                    rateLimitThrottleCodes, rateLimitForbidCodes);
+        }
+    }
+
+    static java.util.Set<String> splitCodes(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (String one : raw.split(",")) {
+            String t = one.trim();
+            if (!t.isEmpty()) {
+                out.add(t);
+            }
+        }
+        return out;
+    }
     private final com.mobile.standalone.service.apitest.EndpointVerifyService verifyService;
+    private final com.mobile.standalone.service.apitest.ApiAuthService authService;
+
+    /** 一个项目这一轮的登录态：token 塞进哪些头，或者登录为什么失败了 */
+    private record AuthCtx(String token, Map<String, String> headers, String error) {
+        static final AuthCtx NONE = new AuthCtx(null, Map.of(), null);
+    }
+
+    private AuthCtx authFor(String project, String envKey) {
+        var profile = authService.findForCaseProject(project);
+        if (!authService.configured(profile, envKey)) {
+            return AuthCtx.NONE;
+        }
+        try {
+            String token = authService.token(profile, envKey, false).token();
+            Map<String, String> headers = new LinkedHashMap<>();
+            for (String h : authService.headersOf(profile)) {
+                headers.put(h, token);
+            }
+            return new AuthCtx(token, headers, null);
+        } catch (Exception e) {
+            log.warn("[api-test] {} 自动登录失败: {}", project, e.getMessage());
+            return new AuthCtx(null, Map.of(), e.getMessage());
+        }
+    }
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -103,6 +170,7 @@ public class ApiTestRunnerService {
         // 作用域是「一次执行」而不是全局——留到下一轮就成了脏数据，
         // 上一轮的 token 早过期了，却会让这一轮看起来「配好了」，失败原因指向错的地方。
         Map<String, String> runtime = new LinkedHashMap<>();
+        Map<String, AuthCtx> authByProject = new LinkedHashMap<>();
 
         long t0 = System.currentTimeMillis();
         RunResult out = new RunResult();
@@ -113,42 +181,74 @@ public class ApiTestRunnerService {
         }
         int passed = 0;
         int failed = 0;
+        int blocked = 0;
+        int skipped = 0;
+        boolean prod = TestEnvironment.PROD.equals(envKey);
         // 跑完要回写「这个接口验过没有」，得留住每条用例和它的结果
         List<com.mobile.standalone.service.apitest.EndpointVerifyService.CaseOutcome> outcomes =
                 new ArrayList<>();
         for (String id : req.getCaseIds()) {
             ApiTestCase c = caseMapper.findById(id);
             CaseResult cr;
+            if (prod && c != null && Boolean.TRUE.equals(c.getTestOnly())) {
+                skipped++;
+                continue;
+            }
             if (c == null) {
                 cr = new CaseResult();
                 cr.setId(id);
                 cr.setName(id);
-                cr.setStatus("FAILED");
+                // 用例查不到是配置问题，不是被测接口的问题——断言根本没机会跑
+                cr.setStatus("BLOCKED");
                 cr.setError("用例不存在");
-                failed++;
+                blocked++;
             } else {
-                Map<String, String> envVars = varsByProject.computeIfAbsent(
-                        c.getProject() == null ? "" : c.getProject(),
-                        pj -> variableService.resolveValues(envKey, pj));
-                cr = executeOne(c, env, req.getTokenOverride(), req.getUrlIdOverride(), envVars, runtime);
+                String pj0 = c.getProject() == null ? "" : c.getProject();
+                // 登一次管一轮：同项目的用例共用，别每条用例都去登录接口打一次
+                AuthCtx auth = authByProject.computeIfAbsent(pj0, pj -> authFor(pj, envKey));
+                Map<String, String> envVars = varsByProject.computeIfAbsent(pj0, pj -> {
+                    Map<String, String> v = new LinkedHashMap<>(variableService.resolveValues(envKey, pj));
+                    if (auth.token() != null) {
+                        v.put("token", auth.token());
+                    }
+                    return v;
+                });
+                cr = executeOne(c, env, req.getTokenOverride(), req.getUrlIdOverride(), envVars, runtime,
+                        auth.headers());
+                if (auth.error() != null && !"PASSED".equals(cr.getStatus())) {
+                    cr.setError("自动登录失败（" + auth.error() + "）；" + (cr.getError() == null ? "" : cr.getError()));
+                }
                 boolean ok = "PASSED".equals(cr.getStatus());
+                boolean notRun = "BLOCKED".equals(cr.getStatus());
                 if (ok) passed++;
+                else if (notRun) blocked++;
                 else failed++;
-                outcomes.add(new com.mobile.standalone.service.apitest.EndpointVerifyService
-                        .CaseOutcome(c, ok));
+                // 没跑成的不回写「这个接口验过了」——它什么都没验
+                if (!notRun) {
+                    outcomes.add(new com.mobile.standalone.service.apitest.EndpointVerifyService
+                            .CaseOutcome(c, ok));
+                }
             }
             out.getCases().add(cr);
+        }
+        if (out.getCases().isEmpty() && skipped > 0) {
+            throw new IllegalArgumentException("这 " + skipped + " 条都是只在测试跑的用例，线上不执行");
         }
         out.setTotal(out.getCases().size());
         out.setPassed(passed);
         out.setFailed(failed);
-        out.setOk(failed == 0);
+        out.setBlocked(blocked);
+        out.setSkipped(skipped);
+        // 没跑成也不能算 ok。ok 是给上线卡点用的，
+        // 而「没有证据」和「证据说没问题」是两回事
+        out.setOk(failed == 0 && blocked == 0);
         out.setDurationMs(System.currentTimeMillis() - t0);
-        out.setMessage(failed == 0
+        out.setMessage((failed == 0
                 ? "全部通过（" + envKey + "）"
-                : "失败 " + failed + " / " + out.getTotal() + "（" + envKey + "）");
+                : "失败 " + failed + " / " + out.getTotal() + "（" + envKey + "）")
+                + (skipped > 0 ? "，跳过 " + skipped + " 条只在测试跑的" : ""));
         try {
-            runService.save(out, null);
+            runService.save(out, com.mobile.standalone.auth.CurrentUser.nameOrNull(), req.getTrigger());
         } catch (Exception e) {
             log.warn("[api-test] 执行历史落库失败: {}", e.getMessage());
         }
@@ -162,19 +262,49 @@ public class ApiTestRunnerService {
         return out;
     }
 
+    /**
+     * 试跑一条还没入库的用例：带自动登录和项目变量，但不记执行历史、不回写接口验证状态。
+     * 生成用例时拿它看真实返回——那一跑是在「写用例」，不是在「验接口」。
+     */
+    public CaseResult tryRun(ApiTestCase c, String environment) {
+        String envKey = TestEnvironment.normalize(environment);
+        ApiTestEnv env = caseService.getEnv(envKey);
+        if (env == null || Boolean.FALSE.equals(env.getEnabled())
+                || env.getBaseUrl() == null || env.getBaseUrl().isBlank()) {
+            throw new IllegalStateException("环境 " + envKey + " 没配好 baseUrl");
+        }
+        String pj = c.getProject() == null ? "" : c.getProject();
+        AuthCtx auth = authFor(pj, envKey);
+        Map<String, String> envVars = new LinkedHashMap<>(variableService.resolveValues(envKey, pj));
+        if (auth.token() != null) {
+            envVars.put("token", auth.token());
+        }
+        CaseResult cr = executeOne(c, env, null, null, envVars, new LinkedHashMap<>(), auth.headers());
+        if (auth.error() != null && !"PASSED".equals(cr.getStatus())) {
+            cr.setError("自动登录失败（" + auth.error() + "）；" + (cr.getError() == null ? "" : cr.getError()));
+        }
+        return cr;
+    }
+
+    /* caseKind 在这里快照：见 ApiTestRunCase.caseKind 的注释——
+       查询时去 join 用例表的话，用例被升级成回归用例之后，历史运行的分桶会跟着变 */
     private CaseResult executeOne(ApiTestCase c, ApiTestEnv env, String tokenOverride, String urlIdOverride,
-                                  Map<String, String> envVars, Map<String, String> runtime) {
+                                  Map<String, String> envVars, Map<String, String> runtime,
+                                  Map<String, String> authHeaders) {
         CaseResult cr = new CaseResult();
         cr.setId(c.getId());
         cr.setName(c.getName());
         cr.setMethod(c.getMethod());
+        cr.setCaseKind(c.getCaseKind());
         long t0 = System.currentTimeMillis();
         try {
             String baseUrl = resolveBaseUrl(c, env, urlIdOverride);
             String url = VariableResolver.resolve(
-                    buildUrl(baseUrl, c.getPath(), c.getQuery()), runtime, envVars);
+                    buildUrl(baseUrl, c.getPath(), c.getQuery(),
+                            s -> VariableResolver.resolve(s, runtime, envVars)),
+                    runtime, envVars);
             cr.setUrl(url);
-            Map<String, String> headers = mergeHeaders(env, c, tokenOverride);
+            Map<String, String> headers = mergeHeaders(env, c, tokenOverride, authHeaders);
             headers.replaceAll((k, v) -> VariableResolver.resolve(v, runtime, envVars));
             HttpRequest.Builder b = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -203,6 +333,7 @@ public class ApiTestRunnerService {
             HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             cr.setHttpStatus(resp.statusCode());
             cr.setBodyPreview(truncate(resp.body(), BODY_PREVIEW_MAX));
+            cr.setRawBody(resp.body());
             // 把实际发出去的和实际收到的都带回去。
             // 只给一句「断言失败」，人还得自己猜发了什么、收到了什么，
             // 于是拿 Postman 再手工重放一遍——那一步正是这套东西本该省掉的
@@ -215,6 +346,28 @@ public class ApiTestRunnerService {
             List<String> assertMsgs = new ArrayList<>();
             String assertions = resolvedAssertions;
             long elapsed = System.currentTimeMillis() - t0;
+
+            // 限流要在<b>断言之前</b>判。
+            //
+            // 被限流的响应是一个正常的 HTTP 200，body 里是「系统繁忙，请稍后再试」——
+            // 放到断言里跑的话，它会以「业务码不等于 0」被判成 FAILED，
+            // 而那条用例<b>一条断言都没真正跑到被测逻辑上</b>。
+            //
+            // 后果是：跑太快 → 通过率下降 → 人去查用例、查断言、查环境变量，
+            // 而真实原因是频率。响应看起来完全正常，这个误导极难查。
+            //
+            // 被测后端的限流是全局的（EntryInterceptor 挂在所有接口上，没有 addPathPatterns），
+            // 所以这条路径每个接口都可能走到。
+            RateLimitVerdict rl = detectRateLimit(c, resp);
+            if (rl.limited()) {
+                cr.setStatus("BLOCKED");
+                cr.setError(rl.describe());
+                cr.setAssertionResults(List.of("BLOCKED " + rl.describe()));
+                log.warn("[api-test] 被限流（{}）caseId={}: {}",
+                        rl.worthRetrying() ? "可降速重试" : "重试无意义", c.getId(), cr.getError());
+                // 提前返回也会走 finally，durationMs 照样会被设上
+                return cr;
+            }
             DbContext dbCtx = queryDbAfter(assertions, env, dbBefore, assertMsgs);
             boolean ok = evaluateAssertions(assertions, resp.statusCode(), resp.body(),
                     resp.headers().map(), elapsed, dbCtx, assertMsgs);
@@ -235,16 +388,20 @@ public class ApiTestRunnerService {
                 }
             }
         } catch (Exception e) {
-            cr.setStatus("FAILED");
+            // 连不上 / 超时 / DNS / 证书：请求就没发出去或没收回来，断言一条都没跑。
+            // 这类记 BLOCKED——服务挂了的时候，整批用例不该看起来像整批 bug
+            boolean transportFailure = com.mobile.standalone.service.ExecutionBlockers.isTransportFailure(e);
+            cr.setStatus(transportFailure ? "BLOCKED" : "FAILED");
             cr.setError(e.getMessage() != null ? e.getMessage() : e.toString());
-            log.warn("[api-test] 执行失败 caseId={}: {}", c.getId(), cr.getError());
+            log.warn("[api-test] {} caseId={}: {}",
+                    transportFailure ? "没跑成（环境/网络）" : "执行失败", c.getId(), cr.getError());
         } finally {
             cr.setDurationMs(System.currentTimeMillis() - t0);
         }
         return cr;
     }
 
-    /** 优先级：本次 urlIdOverride → 用例 urlId → 环境 baseUrl */
+    /** 优先级：本次 urlIdOverride → 用例 urlId → 项目在该环境的地址 → 环境 baseUrl */
     private String resolveBaseUrl(ApiTestCase c, ApiTestEnv env, String urlIdOverride) {
         String id = urlIdOverride != null && !urlIdOverride.isBlank()
                 ? urlIdOverride.trim()
@@ -262,10 +419,26 @@ public class ApiTestRunnerService {
             }
             return u.getBaseUrl();
         }
+        // 全局环境 baseUrl 只有一个网关，国内项目（gwapi.pwesports.cn）和海外项目（gateway.arca42.com）
+        // 不在同一个网关上；不先看项目自己的地址，国内用例会被发到海外网关上 404
+        ApiUrlEntry projectUrl = apiUrlService.autoPick(c.getProject(), env.getEnvironment());
+        if (projectUrl != null) {
+            return projectUrl.getBaseUrl();
+        }
         return env.getBaseUrl();
     }
 
     static String buildUrl(String baseUrl, String path, String queryJson) throws Exception {
+        return buildUrl(baseUrl, path, queryJson, s -> s);
+    }
+
+    /**
+     * @param resolveQuery query 的键和值在<b>编码之前</b>先过一遍变量替换：
+     *                     先编码的话 {@code {{steamId}}} 会变成 {@code %7B%7BsteamId%7D%7D}，
+     *                     后面整条 URL 再替换时就认不出来了，变量原样发给接口
+     */
+    static String buildUrl(String baseUrl, String path, String queryJson,
+                           java.util.function.UnaryOperator<String> resolveQuery) throws Exception {
         String p = path == null ? "" : path.trim();
         String url;
         if (p.startsWith("http://") || p.startsWith("https://")) {
@@ -283,18 +456,24 @@ public class ApiTestRunnerService {
         for (Map.Entry<String, String> e : q.entrySet()) {
             if (!first) sb.append('&');
             first = false;
-            sb.append(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8));
+            sb.append(URLEncoder.encode(resolveQuery.apply(e.getKey()), StandardCharsets.UTF_8));
             sb.append('=');
-            sb.append(URLEncoder.encode(e.getValue() == null ? "" : e.getValue(), StandardCharsets.UTF_8));
+            String v = e.getValue() == null ? "" : resolveQuery.apply(e.getValue());
+            sb.append(URLEncoder.encode(v == null ? "" : v, StandardCharsets.UTF_8));
         }
         return sb.toString();
     }
 
-    private static Map<String, String> mergeHeaders(ApiTestEnv env, ApiTestCase c, String tokenOverride)
-            throws Exception {
+    private static Map<String, String> mergeHeaders(ApiTestEnv env, ApiTestCase c, String tokenOverride,
+                                                    Map<String, String> authHeaders) throws Exception {
         Map<String, String> out = new LinkedHashMap<>();
         out.putAll(readStringMap(env.getDefaultHeaders()));
         out.putAll(readStringMap(c.getHeaders()));
+        // 自动登录拿到的比环境里存的默认 token 新；这一轮手动指定的 token 仍然优先
+        if ((tokenOverride == null || tokenOverride.isBlank()) && authHeaders != null && !authHeaders.isEmpty()) {
+            authHeaders.forEach(out::putIfAbsent);
+            return out;
+        }
         String token = tokenOverride != null && !tokenOverride.isBlank()
                 ? tokenOverride.trim()
                 : (env.getDefaultToken() != null ? env.getDefaultToken().trim() : "");
@@ -361,6 +540,32 @@ public class ApiTestRunnerService {
      * 配在项目上而不是逐条用例上：换项目 wrapper 可能不同，改一行配置即可，已有用例一条不用动。
      * 用例自己已经断言了同一个路径时不重复补——那多半是刻意在测某个错误码。
      */
+    /**
+     * 这次响应是不是被限流拦掉的。
+     * <p>
+     * 业务码路径复用项目上已经配好的 {@code successCodePath}——限流码和业务成功码
+     * 本来就在同一个位置，没必要让人再配一遍。
+     * <p>
+     * 限流码本身配在平台级（{@code api-test.rate-limit.*}），不硬编码在代码里：
+     * 910001/920001 是被测后端的约定，换个项目就不是这两个数了。
+     */
+    RateLimitVerdict detectRateLimit(ApiTestCase c, HttpResponse<String> resp) {
+        if (resp == null) {
+            return RateLimitVerdict.NOT_LIMITED;
+        }
+        String path = null;
+        try {
+            ApiProject p = c == null || c.getProject() == null ? null : projectService.get(c.getProject());
+            if (p != null && p.getSuccessCodePath() != null && !p.getSuccessCodePath().isBlank()) {
+                path = p.getSuccessCodePath().trim();
+            }
+        } catch (Exception ignored) {
+            // 查不到项目就只按 HTTP 层判（429 / 503+Retry-After），不影响主流程
+        }
+        return RateLimitVerdict.detect(resp.statusCode(), resp.headers().map(), resp.body(),
+                path, rateLimitThrottleCodes, rateLimitForbidCodes);
+    }
+
     String withBizCodeAssertion(ApiTestCase c, String assertionsJson) {
         ApiProject p = c.getProject() == null ? null : projectService.get(c.getProject());
         if (p == null || p.getSuccessCodePath() == null || p.getSuccessCodePath().isBlank()) {

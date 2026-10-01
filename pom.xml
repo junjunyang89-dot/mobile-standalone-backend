@@ -204,14 +204,18 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
-                    <!-- 127.0.0.1:3307 隧道不要走系统 / SOCKS 代理 -->
+                    <!-- 连公网库 / 隧道都不要走系统 SOCKS；切勿写 -DsocksProxyHost=（空值也会进 SocksSocketImpl） -->
                     <jvmArguments>
-                        -Djava.net.useSystemProxies=false -DsocksProxyHost= -Dhttp.nonProxyHosts=localhost|127.*|192.168.*|[::1]
+                        -Djava.net.useSystemProxies=false -Dhttp.nonProxyHosts=localhost|127.*|192.168.*|[::1]|118.25.144.133 -Dhttps.proxyHost= -Dhttp.proxyHost=
                     </jvmArguments>
                     <environmentVariables>
                         <ALL_PROXY></ALL_PROXY>
                         <all_proxy></all_proxy>
                         <SOCKS_PROXY></SOCKS_PROXY>
+                        <HTTPS_PROXY></HTTPS_PROXY>
+                        <HTTP_PROXY></HTTP_PROXY>
+                        <https_proxy></https_proxy>
+                        <http_proxy></http_proxy>
                     </environmentVariables>
                     <excludes>
                         <exclude>

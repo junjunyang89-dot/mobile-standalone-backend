@@ -28,7 +28,16 @@ public class ApplicationController {
     private final com.mobile.standalone.service.DeviceManager deviceManager;
     private final com.mobile.standalone.mapper.DeviceMapper deviceMapper;
     
-    @Value("${app.upload-dir:uploads/applications}")
+    /**
+     * 上传落盘目录。
+     * <p>
+     * 默认值必须和读取侧一致（{@code AppPackageInstallService} / {@code PgyerAppService}
+     * 用的都是 {@code ${user.home}/.mobile-standalone/uploads/applications}）。
+     * 这里原先是相对路径 {@code uploads/applications}，于是 {@code app.upload-dir} 没配时：
+     * 上传写到「项目根/uploads/applications」，安装却去「~/.mobile-standalone/...」读——
+     * <b>上传返回 200 成功，安装时说找不到文件</b>，而且换个目录部署或 git clean 之后传过的包全没了。
+     */
+    @Value("${app.upload-dir:${user.home}/.mobile-standalone/uploads/applications}")
     private String uploadDir;
     
     @GetMapping

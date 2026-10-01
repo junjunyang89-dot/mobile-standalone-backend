@@ -7,6 +7,7 @@ import com.mobile.standalone.entity.ApiTestRunCase;
 import com.mobile.standalone.mapper.ApiTestRunMapper;
 import com.mobile.standalone.service.apitest.ApiAppCatalog;
 import com.mobile.standalone.service.apitest.RequirementEndpointProjectResolver;
+import com.mobile.standalone.service.apitest.RunPassRateBuckets;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -71,6 +72,8 @@ public class ApiTestRunService {
                     """);
             // 集合执行要能在报告里认出来（「XX 集合 · 第 12 次」），否则历史就是一串没有上下文的记录
             ensureColumn("api_test_runs", "collection_id", "VARCHAR(64) NULL COMMENT '按集合执行时记下是哪个集合'");
+            ensureColumn("api_test_runs", "blocked",
+                    "INT NOT NULL DEFAULT 0 COMMENT '没跑成的条数：连不上/超时/用例不存在，不进通过率分母'");
             // 断言明细和实际收发的内容。不存的话，报告页只能给一句「失败」，
             // 人还得拿 Postman 再手工重放一遍才知道发生了什么
             ensureColumn("api_test_run_cases", "assertion_results", "TEXT NULL COMMENT '每条断言的 OK/FAIL'");
@@ -78,6 +81,18 @@ public class ApiTestRunService {
             ensureColumn("api_test_run_cases", "req_headers", "TEXT NULL");
             ensureColumn("api_test_run_cases", "req_body", "TEXT NULL");
             ensureColumn("api_test_run_cases", "resp_headers", "TEXT NULL");
+            // 这里允许 NULL，和 api_test_cases.case_kind 的 NOT NULL 不一样，是有理由的：
+            // 那张表每行都【确实有】一个种类（哪怕是「没人分过类」）；
+            // 这张表的历史行【确实不知道】当时是什么 —— 加字段之前就跑完了，
+            // 填一个值进去等于编造。空值在这里是「没记录」，不是「未分类」，
+            // 折叠分桶时单独成一组（RunPassRateBuckets.UNRECORDED）。
+            // NULL 在这里也不踩 <> 的坑：分桶走 GROUP BY，NULL 自己成一组，看得见。
+            ensureColumn("api_test_run_cases", "case_kind",
+                    "VARCHAR(16) NULL COMMENT '运行时这条用例的种类；"
+                            + "空＝没记录（历史运行，或用例查不到的 BLOCKED）'");
+            ensureColumn("api_test_runs", "skipped",
+                    "INT NOT NULL DEFAULT 0 COMMENT '线上执行跳过的只在测试跑用例数'");
+            ensureColumn("api_test_runs", "trigger_type", "VARCHAR(16) NULL COMMENT 'MANUAL | SCHEDULE'");
             log.info("[api-test-runs] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test-runs] 建表失败: {}", e.getMessage());
@@ -108,11 +123,16 @@ public class ApiTestRunService {
             String caseProject = blankToNull(String.valueOf(row.getOrDefault("caseProject", "")));
             String collectionProject = blankToNull(String.valueOf(row.getOrDefault("collectionProject", "")));
             String project = resolveReportProject(caseProject, collectionProject, path);
-            byRun.computeIfAbsent(runId, k -> new java.util.ArrayList<>()).add(Map.of(
-                    "project", project,
-                    "method", String.valueOf(row.getOrDefault("method", "GET")),
-                    "path", path
-            ));
+            Map<String, Object> iface = new LinkedHashMap<>();
+            iface.put("project", project);
+            iface.put("method", String.valueOf(row.getOrDefault("method", "GET")));
+            iface.put("path", path);
+            iface.put("caseCount", toInt(row.get("caseCount")));
+            iface.put("failedCount", toInt(row.get("failedCount")));
+            iface.put("blockedCount", toInt(row.get("blockedCount")));
+            iface.put("error", row.get("error"));
+            iface.put("httpStatus", row.get("httpStatus"));
+            byRun.computeIfAbsent(runId, k -> new java.util.ArrayList<>()).add(iface);
         }
         for (Map<String, Object> run : runs) {
             String id = String.valueOf(run.get("id"));
@@ -132,15 +152,33 @@ public class ApiTestRunService {
         return "未分组";
     }
 
-    private static List<Map<String, Object>> dedupeInterfaces(List<Map<String, Object>> raw) {
+    static List<Map<String, Object>> dedupeInterfaces(List<Map<String, Object>> raw) {
         Map<String, Map<String, Object>> uniq = new LinkedHashMap<>();
         for (Map<String, Object> it : raw) {
             String key = String.valueOf(it.get("project")) + "\0"
                     + String.valueOf(it.get("method")) + "\0"
                     + String.valueOf(it.get("path"));
-            uniq.putIfAbsent(key, it);
+            Map<String, Object> seen = uniq.get(key);
+            if (seen == null) {
+                uniq.put(key, new LinkedHashMap<>(it));
+                continue;
+            }
+            // 同一接口按用例归属拆成了多行，条数要合起来，否则红点和失败原因会丢
+            seen.put("caseCount", toInt(seen.get("caseCount")) + toInt(it.get("caseCount")));
+            seen.put("failedCount", toInt(seen.get("failedCount")) + toInt(it.get("failedCount")));
+            seen.put("blockedCount", toInt(seen.get("blockedCount")) + toInt(it.get("blockedCount")));
+            if (seen.get("error") == null && it.get("error") != null) {
+                seen.put("error", it.get("error"));
+                seen.put("httpStatus", it.get("httpStatus"));
+            } else if (seen.get("httpStatus") == null) {
+                seen.put("httpStatus", it.get("httpStatus"));
+            }
         }
         return List.copyOf(uniq.values());
+    }
+
+    private static int toInt(Object v) {
+        return v instanceof Number n ? n.intValue() : 0;
     }
 
     private static String stripQuery(String path) {
@@ -187,6 +225,10 @@ public class ApiTestRunService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("run", run);
         out.put("cases", runMapper.findCasesByRun(runId));
+        // 按桶分开的通过率。run 上那一组 total/passed/failed 是【混在一起】的，
+        // 保留它是为了不动现有界面，但它回答不了「挂的那些该找谁」——
+        // 分支用例挂了是这次改动有问题，回归用例挂了是回归了。
+        out.put("passRateBuckets", RunPassRateBuckets.fold(runMapper.countByCaseKind(runId)));
         return out;
     }
 
@@ -224,6 +266,11 @@ public class ApiTestRunService {
      */
     @Transactional
     public String save(RunResult result, String createdBy) {
+        return save(result, createdBy, null);
+    }
+
+    @Transactional
+    public String save(RunResult result, String createdBy, String triggerType) {
         if (result == null || result.getCases() == null || result.getCases().isEmpty()) {
             return null;
         }
@@ -237,9 +284,12 @@ public class ApiTestRunService {
             run.setTotal(result.getTotal());
             run.setPassed(result.getPassed());
             run.setFailed(result.getFailed());
+            run.setBlocked(result.getBlocked());
+            run.setSkipped(result.getSkipped());
             run.setDurationMs(result.getDurationMs());
             run.setOk(result.isOk());
             run.setMessage(truncate(result.getMessage(), 512));
+            run.setTriggerType(triggerType == null || triggerType.isBlank() ? "MANUAL" : triggerType);
             run.setCreatedBy(blankToNull(createdBy));
             run.setCreatedAt(now);
             runMapper.insertRun(run);
@@ -260,6 +310,8 @@ public class ApiTestRunService {
                 row.setHttpStatus(cr.getHttpStatus());
                 row.setDurationMs(cr.getDurationMs());
                 row.setError(truncate(cr.getError(), 1024));
+                // 快照，不是引用：用例以后被分诊、改种类，这次运行的分桶也不该变
+                row.setCaseKind(cr.getCaseKind());
                 // 断言逐条存下来。只存一句 error 的话，四条断言挂了三条也只看得到一条
                 row.setAssertionResults(truncate(
                         cr.getAssertionResults() == null ? null
@@ -272,8 +324,8 @@ public class ApiTestRunService {
                 runMapper.insertRunCase(row);
             }
             result.setRunId(runId);
-            log.info("[api-test-runs] 已保存 runId={} total={} failed={}",
-                    runId, result.getTotal(), result.getFailed());
+            log.info("[api-test-runs] 已保存 runId={} total={} failed={} blocked={}",
+                    runId, result.getTotal(), result.getFailed(), result.getBlocked());
             return runId;
         } catch (Exception e) {
             log.warn("[api-test-runs] 保存失败（不影响本次结果）: {}", e.getMessage());

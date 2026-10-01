@@ -61,5 +61,23 @@ class RunTrackTest {
     void 标签给人看() {
         assertEquals("回归", RunTrack.label(null));
         assertEquals("自动化编排", RunTrack.label(RunTrack.AUTOMATION));
+        assertEquals("兼容性测试", RunTrack.label("compatibility"));
+    }
+
+    /** 核心流程不分回归/自动化用途，兼容性测试两边都要收；装包类仍然不进 */
+    @Test
+    void 兼容性测试收回归和自动化两种用途的流程() {
+        List<String> c = RunTrack.catalogs(RunTrack.COMPATIBILITY);
+        assertTrue(c.containsAll(List.of("ONLINE", "AUTOMATION", "SHARED")));
+        assertFalse(c.contains(RunTrack.INSTALL));
+        assertFalse(RunTrack.isAutomation(RunTrack.COMPATIBILITY));
+    }
+
+    @Test
+    void 兼容性测试按依赖排序且失败不中断整批() {
+        assertTrue(RunTrack.ordersByDependency(RunTrack.COMPATIBILITY));
+        assertTrue(RunTrack.continuesOnFailure(RunTrack.COMPATIBILITY));
+        assertFalse(RunTrack.ordersByDependency(RunTrack.REGRESSION));
+        assertFalse(RunTrack.continuesOnFailure(null));
     }
 }

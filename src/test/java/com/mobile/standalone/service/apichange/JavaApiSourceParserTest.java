@@ -298,4 +298,137 @@ class JavaApiSourceParserTest {
         assertFalse(JavaApiSourceParser.looksLikeDto(
                 "src/main/java/com/x/util/StringUtils.java", "public static String trim(String s){return s;}"));
     }
+
+    // ================= Lombok 构造器注入 =================
+
+    /**
+     * 认不出这种注入的后果:usedServices 恒为空 → 依赖解析返回空 Deps →
+     * 读写表、Redis key、并发风险、IMPL 档全部归零,而报告上看着「这个接口很干净」。
+     * 实测 app-engine 75 个 Controller 里有 7 个是这种写法。
+     */
+    @Test
+    void Lombok构造器注入要能认出来() {
+        String src = """
+                @RestController
+                @RequiredArgsConstructor
+                public class OrderController {
+                    private final OrderService orderService;
+                    private final UserMapper userMapper;
+                }
+                """;
+        var fields = JavaApiSourceParser.injectedFields(src);
+        assertEquals("OrderService", fields.get("orderService"));
+        assertEquals("UserMapper", fields.get("userMapper"),
+                "Mapper 也是依赖，不能只认名字带 Service 的");
+    }
+
+    @Test
+    void AllArgsConstructor也算() {
+        String src = """
+                @RestController
+                @AllArgsConstructor
+                public class X { private final PayService payService; }
+                """;
+        assertEquals("PayService", JavaApiSourceParser.injectedFields(src).get("payService"));
+    }
+
+    /** 没有 Lombok 注解时不能把 final 字段当注入,否则每个类都会多出一堆假依赖 */
+    @Test
+    void 没有Lombok注解时final字段不算注入() {
+        String src = """
+                @RestController
+                public class X { private final OrderService orderService; }
+                """;
+        assertTrue(JavaApiSourceParser.injectedFields(src).isEmpty());
+    }
+
+    /** 带初始值的是常量,不是注入 */
+    @Test
+    void 带初始值的final字段不算注入() {
+        String src = """
+                @RestController
+                @RequiredArgsConstructor
+                public class X {
+                    private final String PREFIX = "abc";
+                    private final Integer MAX = 10;
+                    private final OrderService orderService;
+                }
+                """;
+        var fields = JavaApiSourceParser.injectedFields(src);
+        assertEquals(1, fields.size(), "常量被当成了依赖：" + fields);
+        assertEquals("OrderService", fields.get("orderService"));
+    }
+
+    /**
+     * 带初始值、而且<b>不是</b>常见值类型的 final 字段,也不能算注入。
+     * <p>
+     * 上一条用的是 String / Integer,那种会被「值类型排除」那道防线挡住,
+     * 所以测不出「等号排除」这道。这一条专门隔离它:
+     * AtomicInteger 不在值类型清单里,只有 {@code [^;=]} + {@code ;} 那个约束能挡住它。
+     */
+    @Test
+    void 带初始值的非值类型也不算注入() {
+        String src = """
+                @RestController
+                @RequiredArgsConstructor
+                public class X {
+                    private final AtomicInteger counter = new AtomicInteger();
+                    private final OrderService orderService;
+                }
+                """;
+        var fields = JavaApiSourceParser.injectedFields(src);
+        assertEquals(1, fields.size(), "带初始值的字段被当成了依赖：" + fields);
+        assertEquals("OrderService", fields.get("orderService"));
+    }
+
+    /** 常见值类型不算依赖 —— 噪音会一路脏到读写表和并发分析 */
+    @Test
+    void 值类型不算依赖() {
+        String src = """
+                @RestController
+                @RequiredArgsConstructor
+                public class X {
+                    private final String name;
+                    private final List<String> items;
+                    private final Map<String, Object> conf;
+                    private final OrderService orderService;
+                }
+                """;
+        var fields = JavaApiSourceParser.injectedFields(src);
+        assertEquals(1, fields.size(), "值类型被当成了依赖：" + fields);
+    }
+
+    /** 两种写法混用时,注解式的结果不能被覆盖 */
+    @Test
+    void 注解式和Lombok混用() {
+        String src = """
+                @RestController
+                @RequiredArgsConstructor
+                public class X {
+                    @Resource
+                    private UserService userService;
+                    private final OrderService orderService;
+                }
+                """;
+        var fields = JavaApiSourceParser.injectedFields(src);
+        assertEquals("UserService", fields.get("userService"));
+        assertEquals("OrderService", fields.get("orderService"));
+    }
+
+    /** 原来的注解式注入不能因为这次改动而失效 */
+    @Test
+    void 注解式注入仍然可用() {
+        String src = """
+                @RestController
+                public class X {
+                    @Autowired
+                    private UserService userService;
+                    @Resource
+                    private OrderService orderService;
+                }
+                """;
+        var fields = JavaApiSourceParser.injectedFields(src);
+        assertEquals(2, fields.size());
+        assertEquals("UserService", fields.get("userService"));
+    }
 }

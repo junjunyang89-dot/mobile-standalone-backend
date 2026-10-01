@@ -22,6 +22,13 @@ public class TaskExecution {
     public enum ExecutionStatus {
         RUNNING, COMPLETED, FAILED, STOPPED,
         /** 流程判定为「本次不适用」而提前结束：不算通过也不算失败 */
-        SKIPPED
+        SKIPPED,
+        /**
+         * 没跑成——设备连不上、会话没了、控件树抓不到、应用拉不起来。
+         * <p><b>不进通过率的分母。</b> 把它算成失败的话，模拟器卡一晚上，
+         * 早上看到的是「通过率 40%」，人会去查用例、查定位、查应用，
+         * 而那 60% 压根没跑到断言那一步。
+         */
+        BLOCKED
     }
 }

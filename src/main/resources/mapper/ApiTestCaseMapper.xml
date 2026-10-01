@@ -10,6 +10,8 @@
         <result property="name" column="name"/>
         <result property="description" column="description"/>
         <result property="requirementRef" column="requirement_ref"/>
+        <result property="caseKind" column="case_kind"/>
+        <result property="sourceBranch" column="source_branch"/>
         <result property="method" column="method"/>
         <result property="path" column="path"/>
         <result property="urlId" column="url_id"/>
@@ -22,6 +24,7 @@
         <result property="endpointId" column="endpoint_id"/>
         <result property="fieldNotes" column="field_notes"/>
         <result property="enabled" column="enabled"/>
+        <result property="testOnly" column="test_only"/>
         <result property="sortOrder" column="sort_order"/>
         <result property="createdBy" column="created_by"/>
         <result property="createdAt" column="created_at"/>
@@ -42,6 +45,12 @@
                 AND (environment = #{environment} OR environment = 'ANY' OR environment IS NULL OR environment = '')
             </if>
             <if test="enabledOnly != null and enabledOnly">AND enabled = 1</if>
+            <!--
+              case_kind 列是 NOT NULL DEFAULT 'UNCLASSIFIED'，所以这里不需要
+              「OR IS NULL」那种兜底（environment 那条需要，因为它可空）。
+              迁移脚本里特意选的 NOT NULL，就是为了让这类查询不用每次都记得兜。
+            -->
+            <if test="caseKind != null and caseKind != ''">AND case_kind = #{caseKind}</if>
             <if test="keyword != null and keyword != ''">
                 AND (name LIKE CONCAT('%', #{keyword}, '%')
                   OR requirement_ref LIKE CONCAT('%', #{keyword}, '%')
@@ -79,6 +88,16 @@
         SELECT COUNT(1) FROM api_test_cases WHERE project = #{project}
     </select>
 
+    <!-- 分支用例按分支分组计数：待分诊队列的入口，不用把用例全查出来 -->
+    <select id="countBranchCasesByBranch" resultType="java.util.Map">
+        SELECT source_branch AS sourceBranch, COUNT(1) AS cnt
+        FROM api_test_cases
+        WHERE case_kind = 'BRANCH'
+        <if test="project != null and project != ''">AND project = #{project}</if>
+        GROUP BY source_branch
+        ORDER BY source_branch
+    </select>
+
     <select id="findByEndpointId" resultMap="ApiTestCaseMap">
         SELECT * FROM api_test_cases WHERE endpoint_id = #{endpointId}
         ORDER BY sort_order, created_at
@@ -97,12 +116,16 @@
 
     <insert id="insert">
         INSERT INTO api_test_cases
-        (id, project, environment, name, description, requirement_ref, method, path, url_id, query, headers, body,
-         assertions, extract_json, field_notes, enabled, sort_order, created_by, endpoint_id, created_at, updated_at)
+        (id, project, environment, name, description, requirement_ref, case_kind, source_branch,
+         method, path, url_id, query, headers, body,
+         assertions, extract_json, field_notes, enabled, test_only, sort_order, created_by, endpoint_id, created_at, updated_at)
         VALUES
-        (#{id}, #{project}, #{environment}, #{name}, #{description}, #{requirementRef}, #{method}, #{path}, #{urlId},
+        (#{id}, #{project}, #{environment}, #{name}, #{description}, #{requirementRef},
+         <!-- 空值交给列默认值 UNCLASSIFIED，别在这儿写死 -->
+         COALESCE(#{caseKind}, 'UNCLASSIFIED'), #{sourceBranch},
+         #{method}, #{path}, #{urlId},
          #{query}, #{headers}, #{body},
-         #{assertions}, #{extractJson}, #{fieldNotes}, #{enabled}, #{sortOrder}, #{createdBy}, #{endpointId},
+         #{assertions}, #{extractJson}, #{fieldNotes}, #{enabled}, #{testOnly}, #{sortOrder}, #{createdBy}, #{endpointId},
          #{createdAt}, #{updatedAt})
     </insert>
 
@@ -113,6 +136,19 @@
             name = #{name},
             description = #{description},
             requirement_ref = #{requirementRef},
+            <!--
+              这两个字段用 COALESCE 兜：updateCase 是拿请求体整体覆盖的
+              （只对 test_only 做了保留），任何不认识这两个字段的调用方
+              都会把它们传成 null。裸赋值的话，前端一次普通的改名
+              就会把「这条用例为什么存在」和它的来历一起抹掉——
+              而抹掉是静默的，下次才会发现用例变成了未分类。
+              放在 SQL 层而不是每个 service 里各写一遍保留逻辑：
+              这里只有一处，service 有好几处，漏一处就白做。
+              代价是 source_branch 不能被清空（只能改成别的值），
+              而那正是它该有的语义：它是来历，不是可编辑属性。
+            -->
+            case_kind = COALESCE(#{caseKind}, case_kind),
+            source_branch = COALESCE(#{sourceBranch}, source_branch),
             method = #{method},
             path = #{path},
             url_id = #{urlId},
@@ -123,6 +159,7 @@
             extract_json = #{extractJson},
             field_notes = #{fieldNotes},
             enabled = #{enabled},
+            test_only = #{testOnly},
             sort_order = #{sortOrder},
             endpoint_id = #{endpointId},
             updated_at = #{updatedAt}

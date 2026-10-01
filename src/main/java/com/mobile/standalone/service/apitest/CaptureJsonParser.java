@@ -90,6 +90,46 @@ public final class CaptureJsonParser {
         return s.length() > MAX_SAMPLE_LEN ? s.substring(0, MAX_SAMPLE_LEN) + "…" : s;
     }
 
+    /**
+     * 响应体缩成给 AI 看的样本：数组只留前 2 个，长字符串截断。
+     * 不是 JSON 返回 null——HTML 错误页喂给模型只会让它编断言。
+     */
+    public static String compactJson(String raw, int maxLen) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = JSON.readTree(raw.trim());
+            if (root == null || !(root.isObject() || root.isArray())) {
+                return null;
+            }
+            String s = JSON.writeValueAsString(shrink(root, 0));
+            return s.length() > maxLen ? s.substring(0, maxLen) : s;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static JsonNode shrink(JsonNode n, int depth) {
+        if (n.isArray()) {
+            var out = JSON.createArrayNode();
+            for (int i = 0; i < Math.min(2, n.size()); i++) {
+                out.add(depth > 8 ? JSON.nullNode() : shrink(n.get(i), depth + 1));
+            }
+            return out;
+        }
+        if (n.isObject()) {
+            var out = JSON.createObjectNode();
+            n.fields().forEachRemaining(f -> out.set(f.getKey(),
+                    depth > 8 ? JSON.nullNode() : shrink(f.getValue(), depth + 1)));
+            return out;
+        }
+        if (n.isTextual() && n.asText().length() > 200) {
+            return JSON.getNodeFactory().textNode(n.asText().substring(0, 200) + "…");
+        }
+        return n;
+    }
+
     /** 样本值能否写 equals 断言 */
     public static boolean isAssertableValue(Object v) {
         return v instanceof Number || v instanceof Boolean

@@ -129,35 +129,69 @@ public class MetricBaselineService {
     }
 
     /**
-     * 某个版本某机型上，每个指标<b>最近一次</b>的值。
-     * <p>
-     * 同一个版本可能跑过好几遍（重跑、换设备），取最近一次而不是平均：
-     * 平均会把一次明显异常的采样（比如后台在下载）摊进去，结论变糊。
+     * 某个版本某机型上，每个指标的<b>中位数</b>。
+     *
+     * <p>这里原来取的是「最近一次」，理由是「平均会把一次异常采样摊进去，结论变糊」——
+     * 那个理由对，但<b>中位数正好同时解决了两件事</b>：它和平均不一样，
+     * 一个离群的采样根本影响不到它；同时它也不像「最近一次」那样，
+     * 整个结论取决于哪一轮碰巧跑在最后。
+     *
+     * <p>为什么非改不可：告警阈值是 15%，而 CPU、冷启动的单次波动本来就能到这个量级。
+     * 靠单次采样去比，<b>这套报告会经常报假劣化</b>——
+     * 而报三次假的之后，第四次真的也没人信了。
+     *
+     * <p>只聚合同一个 (包名, 平台, 版本, 机型) 下的多次运行。机型不合并——
+     * 不同机型的 CPU、FPS 不是一个量级，混在一起取中位数是把两组数据搅成一个没意义的数。
      */
     Map<String, Double> latestOf(String packageName, String platform,
                                  String versionName, String deviceModel) {
+        Map<String, List<Double>> byKey = new LinkedHashMap<>();
         Map<String, Double> out = new LinkedHashMap<>();
         if (isBlank(packageName) || isBlank(versionName)) {
             return out;
         }
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                    "SELECT m.metric_key, m.metric_value FROM app_version_metrics m "
-                            + "JOIN (SELECT metric_key, MAX(id) AS max_id FROM app_version_metrics "
-                            + "      WHERE package_name = ? AND platform = ? AND version_name = ? "
-                            + "        AND (? IS NULL OR device_model = ?) "
-                            + "      GROUP BY metric_key) t "
-                            + "  ON t.max_id = m.id",
+                    "SELECT metric_key, metric_value FROM app_version_metrics "
+                            + "WHERE package_name = ? AND platform = ? AND version_name = ? "
+                            + "  AND (? IS NULL OR device_model = ?) "
+                            + "  AND metric_value IS NOT NULL "
+                            + "ORDER BY id",
                     packageName, norm(platform), versionName.trim(), deviceModel, deviceModel);
             for (Map<String, Object> r : rows) {
                 Object v = r.get("metric_value");
-                out.put(String.valueOf(r.get("metric_key")),
-                        v == null ? null : ((Number) v).doubleValue());
+                if (v == null) {
+                    continue;
+                }
+                byKey.computeIfAbsent(String.valueOf(r.get("metric_key")), k -> new ArrayList<>())
+                        .add(((Number) v).doubleValue());
             }
         } catch (Exception e) {
             log.warn("[metric-baseline] 查询失败: {}", e.getMessage());
+            return out;
+        }
+        for (Map.Entry<String, List<Double>> e : byKey.entrySet()) {
+            out.put(e.getKey(), median(e.getValue()));
         }
         return out;
+    }
+
+    /** 中位数。只跑过一次时它就等于那一次，所以不会因为改成中位数而少掉数据 */
+    static Double median(List<Double> values) {
+        if (values == null || values.isEmpty()) {
+            return null;
+        }
+        List<Double> sorted = new ArrayList<>(values);
+        sorted.removeIf(java.util.Objects::isNull);
+        if (sorted.isEmpty()) {
+            return null;
+        }
+        sorted.sort(Double::compareTo);
+        int n = sorted.size();
+        if (n % 2 == 1) {
+            return sorted.get(n / 2);
+        }
+        return (sorted.get(n / 2 - 1) + sorted.get(n / 2)) / 2.0;
     }
 
     /**

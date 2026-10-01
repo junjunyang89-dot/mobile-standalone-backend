@@ -1,5 +1,6 @@
 package com.mobile.standalone.service.apitest;
 
+import com.mobile.standalone.entity.ApiEndpoint;
 import com.mobile.standalone.entity.ApiProject;
 import com.mobile.standalone.entity.ApiTestCase;
 import com.mobile.standalone.entity.ApiTestCollection;
@@ -14,10 +15,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.Locale;
@@ -64,16 +67,26 @@ public class ApiTestCollectionService {
     }
 
     public List<Map<String, Object>> casesOf(String collectionId) {
-        List<ApiTestCase> rows = caseMapper.findByFilters(null, collectionId, null, false, null, null, null);
+        return caseRows(caseMapper.findByFilters(null, collectionId, null, false, null, null, null, null));
+    }
+
+    private List<Map<String, Object>> caseRows(List<ApiTestCase> rows) {
         List<Map<String, Object>> out = new ArrayList<>();
+        Map<String, ApiEndpoint> endpoints = endpointService.getAll(
+                rows.stream().map(ApiTestCase::getEndpointId).toList());
         for (ApiTestCase c : rows) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", c.getId());
             m.put("name", c.getName());
+            m.put("project", c.getProject());
             m.put("method", c.getMethod());
             m.put("path", c.getPath());
             m.put("enabled", c.getEnabled());
-            m.put("controller", controllerOfCase(c));
+            m.put("testOnly", c.getTestOnly());
+            ApiEndpoint ep = c.getEndpointId() == null ? null : endpoints.get(c.getEndpointId());
+            m.put("controller", controllerOfCase(c, ep));
+            EndpointLevel level = ApiEndpointService.levelOf(ep);
+            m.put("level", level == null ? null : level.name());
             m.put("description", c.getDescription());
             m.put("environment", c.getEnvironment());
             m.put("requirementRef", c.getRequirementRef());
@@ -86,6 +99,9 @@ public class ApiTestCollectionService {
             m.put("fieldNotes", c.getFieldNotes());
             m.put("sortOrder", c.getSortOrder());
             m.put("endpointId", c.getEndpointId());
+            m.put("caseKind", c.getCaseKind());
+            m.put("sourceBranch", c.getSourceBranch());
+            m.put("updatedAt", c.getUpdatedAt());
             out.add(m);
         }
         return out;
@@ -460,6 +476,7 @@ public class ApiTestCollectionService {
                 byController.computeIfAbsent(ctrl, k -> new ArrayList<>()).add(row);
             }
 
+            Map<String, int[]> coreByController = coreCoverageByController(code);
             List<Map<String, Object>> controllers = new ArrayList<>();
             for (Map.Entry<String, List<Map<String, Object>>> ce : byController.entrySet()) {
                 Map<String, Object> ctrlNode = new LinkedHashMap<>();
@@ -468,9 +485,26 @@ public class ApiTestCollectionService {
                 ctrlNode.put("label", ce.getKey());
                 ctrlNode.put("handler", ce.getKey());
                 ctrlNode.put("caseCount", ce.getValue().size());
+                int[] core = coreByController.getOrDefault(ce.getKey(), new int[2]);
+                ctrlNode.put("coreTotal", core[0]);
+                ctrlNode.put("coreCovered", core[1]);
+                Set<String> words = new LinkedHashSet<>();
+                for (Map<String, Object> row : ce.getValue()) {
+                    if (row.get("path") != null) {
+                        words.add(String.valueOf(row.get("path")));
+                    }
+                    if (row.get("name") != null) {
+                        words.add(String.valueOf(row.get("name")));
+                    }
+                }
+                ctrlNode.put("searchText", String.join("\n", words));
                 ctrlNode.put("statusTag", "已上线");
+                // 执行报告页靠它建接口树，截断的话排在后面的接口永远看不到报告；同一接口多条用例只留一条
                 List<Map<String, Object>> previews = new ArrayList<>();
-                ce.getValue().stream().limit(8).forEach(row -> {
+                java.util.Set<String> seenIface = new java.util.HashSet<>();
+                ce.getValue().stream()
+                        .filter(row -> seenIface.add(row.get("method") + " " + row.get("path")))
+                        .forEach(row -> {
                     Map<String, Object> p = new LinkedHashMap<>();
                     p.put("method", row.get("method"));
                     p.put("path", row.get("path"));
@@ -562,16 +596,31 @@ public class ApiTestCollectionService {
         return "进行中";
     }
 
-    private String controllerOfCase(ApiTestCase c) {
-        if (c.getEndpointId() != null && !c.getEndpointId().isBlank()) {
-            try {
-                String handler = endpointService.handlerOfEndpoint(c.getEndpointId());
-                if (handler != null && !handler.isBlank()) {
-                    return controllerName(handler);
+    /** Controller → [核心接口数, 其中有启用用例的数] */
+    private Map<String, int[]> coreCoverageByController(String project) {
+        Map<String, int[]> out = new HashMap<>();
+        try {
+            for (ApiEndpoint ep : endpointService.search(project, null, null, null)) {
+                if (ep.isRetired() || "DEPRECATED".equals(ep.getStatus())
+                        || ApiEndpointService.levelOf(ep) != EndpointLevel.CORE) {
+                    continue;
                 }
-            } catch (Exception ignore) {
-                // 查不到就用名字推断
+                int[] a = out.computeIfAbsent(controllerOfEndpoint(ep), k -> new int[2]);
+                a[0]++;
+                if (ep.getEnabledCaseCount() != null && ep.getEnabledCaseCount() > 0) {
+                    a[1]++;
+                }
             }
+        } catch (Exception e) {
+            log.debug("[collection] 核心接口统计跳过 {}: {}", project, e.getMessage());
+        }
+        return out;
+    }
+
+    private static String controllerOfCase(ApiTestCase c, ApiEndpoint ep) {
+        String ctrl = controllerOfEndpoint(ep);
+        if (!ctrl.isBlank()) {
+            return ctrl;
         }
         String name = c.getName() == null ? "" : c.getName().trim();
         int idx = name.indexOf('（');
@@ -579,6 +628,20 @@ public class ApiTestCollectionService {
             return name.substring(0, idx).trim();
         }
         return "UnknownController";
+    }
+
+    /** 扫描出来的 handler 有的只是方法名，Controller 名以源文件为准 */
+    static String controllerOfEndpoint(com.mobile.standalone.entity.ApiEndpoint ep) {
+        if (ep == null) {
+            return "";
+        }
+        String file = ep.getSourceFile();
+        if (file != null && !file.isBlank()) {
+            String base = file.substring(Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')) + 1);
+            return base.endsWith(".java") || base.endsWith(".kt") ? base.substring(0, base.lastIndexOf('.')) : base;
+        }
+        String h = ep.getHandler();
+        return h == null || h.isBlank() ? "" : controllerName(h);
     }
 
     private static String controllerName(String handler) {
@@ -650,15 +713,110 @@ public class ApiTestCollectionService {
         List<ApiTestCollection> cols = mapper.findAll(code, ApiTestCollection.SCOPE_LIVE, null, includeArchived,
                 null, null);
         Set<String> seen = new LinkedHashSet<>();
-        List<Map<String, Object>> out = new ArrayList<>();
+        List<ApiTestCase> merged = new ArrayList<>();
         for (ApiTestCollection col : cols) {
-            for (Map<String, Object> row : casesOf(col.getId())) {
-                if (seen.add(String.valueOf(row.get("id")))) {
-                    out.add(row);
+            for (ApiTestCase c : caseMapper.findByFilters(null, col.getId(), null, false, null, null, null, null)) {
+                if (seen.add(c.getId())) {
+                    merged.add(c);
                 }
             }
         }
+        return caseRows(merged);
+    }
+
+    /**
+     * 生产视图右侧：某 Controller 下按接口分组、分页。
+     * 每个接口带上它（筛选后）的用例，前端点开接口才渲染。
+     */
+    public Map<String, Object> liveInterfacePage(String project, boolean includeArchived, String controller,
+                                                 String keyword, String kind, int page, int size) {
+        List<Map<String, Object>> rows = filterLiveRows(liveCasesOfProject(project, includeArchived),
+                controller, keyword, kind);
+        List<Map<String, Object>> groups = groupByInterface(rows);
+        int safeSize = Math.max(1, Math.min(size, 200));
+        int total = groups.size();
+        int pages = Math.max(1, (total + safeSize - 1) / safeSize);
+        int safePage = Math.max(1, Math.min(page, pages));
+        int from = (safePage - 1) * safeSize;
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total", total);
+        out.put("caseTotal", rows.size());
+        out.put("page", safePage);
+        out.put("size", safeSize);
+        out.put("items", groups.subList(Math.min(from, total), Math.min(from + safeSize, total)));
         return out;
+    }
+
+    static List<Map<String, Object>> filterLiveRows(List<Map<String, Object>> rows, String controller,
+                                                    String keyword, String kind) {
+        String ctrl = controller == null ? "" : controller.trim();
+        String kw = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        ApiCaseKind k = kind == null || kind.isBlank() ? null : ApiCaseKind.of(kind);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> r : rows) {
+            if (!ctrl.isEmpty() && !ctrl.equals(String.valueOf(r.get("controller")))) {
+                continue;
+            }
+            if (k != null && ApiCaseKind.of(r.get("caseKind") == null ? null : String.valueOf(r.get("caseKind"))) != k) {
+                continue;
+            }
+            if (!kw.isEmpty() && !(lower(r.get("path")).contains(kw) || lower(r.get("name")).contains(kw)
+                    || lower(r.get("controller")).contains(kw))) {
+                continue;
+            }
+            out.add(r);
+        }
+        return out;
+    }
+
+    /** 核心用例在前、仅测试其次；接口按其首条用例的顺序排，核心接口整体置顶 */
+    static List<Map<String, Object>> groupByInterface(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> sorted = new ArrayList<>(rows);
+        sorted.sort(java.util.Comparator.comparingInt(ApiTestCollectionService::casePriority));
+        Map<String, Map<String, Object>> groups = new LinkedHashMap<>();
+        for (Map<String, Object> r : sorted) {
+            String method = r.get("method") == null ? "GET" : String.valueOf(r.get("method")).toUpperCase(Locale.ROOT);
+            String path = r.get("path") == null ? "" : String.valueOf(r.get("path"));
+            Map<String, Object> g = groups.computeIfAbsent(method + " " + path, key -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("method", method);
+                m.put("path", path);
+                m.put("title", interfaceTitle(r));
+                m.put("level", null);
+                m.put("cases", new ArrayList<Map<String, Object>>());
+                return m;
+            });
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> cases = (List<Map<String, Object>>) g.get("cases");
+            cases.add(r);
+            if ("CORE".equals(r.get("level"))) {
+                g.put("level", "CORE");
+            }
+        }
+        List<Map<String, Object>> out = new ArrayList<>(groups.values());
+        out.sort(java.util.Comparator.comparingInt(g -> "CORE".equals(g.get("level")) ? 0 : 1));
+        return out;
+    }
+
+    private static int casePriority(Map<String, Object> r) {
+        if ("CORE".equals(r.get("level"))) {
+            return 0;
+        }
+        return Boolean.TRUE.equals(r.get("testOnly")) ? 1 : 2;
+    }
+
+    /** 用例名约定是「接口名 · 场景」 */
+    private static String interfaceTitle(Map<String, Object> r) {
+        String name = r.get("name") == null ? "" : String.valueOf(r.get("name"));
+        int i = name.indexOf(" · ");
+        if (i > 0) {
+            return name.substring(0, i);
+        }
+        return !name.isEmpty() ? name : (r.get("path") == null ? "—" : String.valueOf(r.get("path")));
+    }
+
+    private static String lower(Object o) {
+        return o == null ? "" : String.valueOf(o).toLowerCase(Locale.ROOT);
     }
 
     /** 生成用例级联：APP 全部项目 → 其下测试集合（与用例集合 · 测试环境一致） */

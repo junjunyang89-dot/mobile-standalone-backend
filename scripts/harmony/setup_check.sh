@@ -43,6 +43,27 @@ else
 fi
 
 echo
+echo "== DevEco 鸿蒙模拟器 =="
+EMU=""
+for cand in \
+  "/Applications/DevEco-Studio.app/Contents/tools/emulator/Emulator" \
+  "$HOME/Applications/DevEco-Studio.app/Contents/tools/emulator/Emulator"; do
+  if [[ -x "$cand" ]]; then
+    EMU="$cand"
+    break
+  fi
+done
+if [[ -z "$EMU" ]]; then
+  echo "[缺失] 未找到 DevEco Emulator"
+  echo "  通常在 /Applications/DevEco-Studio.app/Contents/tools/emulator/Emulator"
+else
+  echo "[OK] Emulator = $EMU"
+  "$EMU" -version || true
+  echo "--- list ---"
+  "$EMU" -list || true
+fi
+
+echo
 echo "== Python hmdriver2 =="
 python3 -m pip install -r "$ROOT/scripts/harmony/requirements.txt" -q
 python3 "$ROOT/scripts/harmony/hmdriver_bridge.py" ping

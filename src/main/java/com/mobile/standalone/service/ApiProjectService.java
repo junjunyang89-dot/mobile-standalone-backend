@@ -59,12 +59,14 @@ public class ApiProjectService {
             // 不这么做的话，每加一列就得让人记着去跑一份 migration.sql，漏跑一次就是启动即报错，
             // 而且报出来的是「Unknown column」，看不出该跑哪个文件
             ensureColumn("repo_path", "VARCHAR(512) NULL COMMENT '本地仓库路径'");
+            ensureColumn("git_url", "VARCHAR(512) NULL COMMENT 'GitLab 仓库地址'");
             ensureColumn("base_branch", "VARCHAR(128) NULL COMMENT '对比基线分支，默认 master'");
             ensureColumn("success_code_path", "VARCHAR(128) NULL COMMENT '业务成功码路径，如 $.code'");
             ensureColumn("success_code_value", "VARCHAR(64) NULL COMMENT '业务成功码的值，如 0'");
             ensureColumn("kind", "VARCHAR(16) NULL DEFAULT 'BACKEND' COMMENT 'BACKEND=后端仓库 CLIENT=客户端'");
             ensureColumn("category", "VARCHAR(64) NULL COMMENT '分类 key，留空按编码自动归类'");
             ensureCategoryTableAndSeed();
+            retireLegacyCategories();
             syncCategoriesFromProjects();
             dedupeEmptySimilarCategories();
             widenProjectCategoryColumn();
@@ -218,7 +220,7 @@ public class ApiProjectService {
     /** 分类展示名：以 api_project_categories 为准，未注册时回退 catalog 默认 */
     public String categoryLabel(String categoryKey) {
         if (categoryKey == null || categoryKey.isBlank()) {
-            return ApiProjectCatalog.OTHER.label();
+            return categoryLabel(ApiProjectCatalog.APP.key());
         }
         String key = normalizeCategoryKey(categoryKey);
         for (Map<String, Object> row : listCategoryRegistry()) {
@@ -317,14 +319,27 @@ public class ApiProjectService {
         log.info("[api-projects] 已种子内置分类");
     }
 
+    /**
+     * PVP / WEB / 其他已下线：注册表和项目上的旧值都清掉。
+     * APP 还叫旧默认名时改成「电竞APP」；人手改过的名字不动。
+     */
+    private void retireLegacyCategories() {
+        for (String key : ApiProjectCatalog.RETIRED_CATEGORY_KEYS) {
+            int cats = jdbcTemplate.update("DELETE FROM api_project_categories WHERE cat_key = ?", key);
+            int projects = jdbcTemplate.update(
+                    "UPDATE api_projects SET category = NULL WHERE UPPER(category) = ?", key);
+            if (cats > 0 || projects > 0) {
+                log.info("[api-projects] 已下线分类 {}（清掉 {} 个项目上的旧值）", key, projects);
+            }
+        }
+        jdbcTemplate.update(
+                "UPDATE api_project_categories SET label = ? "
+                        + "WHERE cat_key = 'APP' AND label IN ('APP', 'APP 后端', 'APP后端')",
+                ApiProjectCatalog.APP.label());
+    }
+
     private static int categorySeedOrder(String key) {
-        return switch (key) {
-            case "APP" -> 10;
-            case "PVP" -> 20;
-            case "WEB" -> 30;
-            case "OTHER" -> 40;
-            default -> 100;
-        };
+        return "APP".equals(key) ? 10 : 100;
     }
 
     private void syncCategoriesFromProjects() {
@@ -570,12 +585,11 @@ public class ApiProjectService {
     }
 
     /**
-     * 接口清单左侧树：与「项目管理」同一套 APP / PVP / WEB catalog，
-     * 再叠加接口数统计。不再只展示「库里碰巧有接口」的项目。
+     * 接口清单左侧树：环境在页面顶部分开选；这里只给「分类 → 项目」。
+     * 项目下不再挂 master / 本分支 —— 那一层太碎，清单页只回答有哪些接口。
      */
     public Map<String, Object> buildEndpointInventoryTree(List<ApiEndpoint> allEndpoints) {
         Map<String, int[]> stats = aggregateEndpointStats(allEndpoints);
-        Map<String, List<ApiEndpoint>> byProject = groupEndpointsByProject(allEndpoints);
         Map<String, ApiProject> projectsByCode = new LinkedHashMap<>();
         for (ApiProject p : list(null)) {
             if (!isBackendKind(p)) {
@@ -594,7 +608,7 @@ public class ApiProjectService {
             String catKey = String.valueOf(def.get("key"));
             String label = labels.getOrDefault(catKey, String.valueOf(def.get("label")));
             List<Map<String, Object>> children = buildEndpointCategoryChildren(
-                    catKey, stats, byProject, projectsByCode, assigned);
+                    catKey, stats, projectsByCode, assigned);
             if (ApiProjectCatalog.APP.key().equals(catKey) || !children.isEmpty()) {
                 categories.add(endpointCategoryNode(catKey, label, children));
             }
@@ -607,7 +621,7 @@ public class ApiProjectService {
         return kind == null || kind.isBlank() || ApiProject.KIND_BACKEND.equals(kind);
     }
 
-    private static String inventoryProjectKey(String projectCode) {
+    public static String inventoryProjectKey(String projectCode) {
         if (projectCode == null || projectCode.isBlank()) {
             return "";
         }
@@ -633,24 +647,8 @@ public class ApiProjectService {
         return stats;
     }
 
-    private static Map<String, List<ApiEndpoint>> groupEndpointsByProject(List<ApiEndpoint> all) {
-        Map<String, List<ApiEndpoint>> out = new LinkedHashMap<>();
-        if (all == null) {
-            return out;
-        }
-        for (ApiEndpoint e : all) {
-            String key = inventoryProjectKey(e.getProject());
-            if (key.isBlank()) {
-                continue;
-            }
-            out.computeIfAbsent(key, k -> new ArrayList<>()).add(e);
-        }
-        return out;
-    }
-
     private static Map<String, Object> endpointProjectNode(
-            String code, Map<String, int[]> stats, Map<String, ApiProject> projectsByCode,
-            Map<String, List<ApiEndpoint>> byProject) {
+            String code, Map<String, int[]> stats, Map<String, ApiProject> projectsByCode) {
         int[] c = stats.getOrDefault(code, new int[]{0, 0});
         ApiProject p = projectsByCode.get(code);
         Map<String, Object> node = new LinkedHashMap<>();
@@ -660,94 +658,12 @@ public class ApiProjectService {
         node.put("pending", c[1]);
         node.put("configured", p != null);
         node.put("missing", p == null);
-        node.put("rails", buildEndpointRails(byProject.getOrDefault(code, List.of())));
         return node;
-    }
-
-    /**
-     * 项目下两层：本分支必测（对比分析来的）/ master，再按 Controller 归堆。
-     * 上线后 source_branch 被清掉，接口就从「本分支」落到 master。
-     */
-    static List<Map<String, Object>> buildEndpointRails(List<ApiEndpoint> endpoints) {
-        Map<String, List<ApiEndpoint>> byBranch = new LinkedHashMap<>();
-        List<ApiEndpoint> master = new ArrayList<>();
-        for (ApiEndpoint e : endpoints == null ? List.<ApiEndpoint>of() : endpoints) {
-            String b = e.getSourceBranch();
-            if (b != null && !b.isBlank()) {
-                byBranch.computeIfAbsent(b.trim(), k -> new ArrayList<>()).add(e);
-            } else {
-                master.add(e);
-            }
-        }
-        List<Map<String, Object>> rails = new ArrayList<>();
-        for (Map.Entry<String, List<ApiEndpoint>> e : byBranch.entrySet()) {
-            rails.add(railNode("branch", "本分支必测", e.getKey(), e.getValue()));
-        }
-        rails.add(railNode("master", "master", null, master));
-        return rails;
-    }
-
-    private static Map<String, Object> railNode(String type, String label, String branch, List<ApiEndpoint> eps) {
-        Map<String, Object> rail = new LinkedHashMap<>();
-        rail.put("type", type);
-        rail.put("label", branch == null || branch.isBlank() ? label : label + " · " + shortBranch(branch));
-        rail.put("branch", branch);
-        rail.put("total", eps.size());
-        rail.put("controllers", groupByController(eps));
-        return rail;
-    }
-
-    private static String shortBranch(String branch) {
-        int i = branch.lastIndexOf('/');
-        return i >= 0 && i < branch.length() - 1 ? branch.substring(i + 1) : branch;
-    }
-
-    static String controllerName(String handler) {
-        if (handler == null || handler.isBlank()) {
-            return "未标注 Controller";
-        }
-        String h = handler.trim();
-        int slash = h.lastIndexOf('/');
-        if (slash >= 0) {
-            h = h.substring(slash + 1);
-        }
-        int dot = h.indexOf('.');
-        return dot > 0 ? h.substring(0, dot) : h;
-    }
-
-    private static List<Map<String, Object>> groupByController(List<ApiEndpoint> eps) {
-        Map<String, List<ApiEndpoint>> by = new LinkedHashMap<>();
-        for (ApiEndpoint e : eps) {
-            by.computeIfAbsent(controllerName(e.getHandler()), k -> new ArrayList<>()).add(e);
-        }
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (Map.Entry<String, List<ApiEndpoint>> e : by.entrySet()) {
-            Map<String, Object> c = new LinkedHashMap<>();
-            c.put("name", e.getKey());
-            c.put("total", e.getValue().size());
-            List<Map<String, Object>> items = new ArrayList<>();
-            for (ApiEndpoint ep : e.getValue()) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", ep.getId());
-                row.put("httpMethod", ep.getHttpMethod());
-                row.put("path", ep.getPath());
-                row.put("handler", ep.getHandler());
-                row.put("changeFlag", ep.getChangeFlag());
-                row.put("sourceBranch", ep.getSourceBranch());
-                items.add(row);
-            }
-            c.put("endpoints", items);
-            out.add(c);
-        }
-        out.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(
-                String.valueOf(a.get("name")), String.valueOf(b.get("name"))));
-        return out;
     }
 
     private List<Map<String, Object>> buildEndpointCategoryChildren(
             String catKey,
             Map<String, int[]> stats,
-            Map<String, List<ApiEndpoint>> byProject,
             Map<String, ApiProject> projectsByCode,
             Set<String> assigned) {
         List<Map<String, Object>> children = new ArrayList<>();
@@ -757,9 +673,7 @@ public class ApiProjectService {
                 // 无条件渲染是刻意的：把 GitLab 上有、平台还没建的项目也摆出来，
                 // 「未覆盖」才看得见。见 appProjectSlots() 的 javadoc 与
                 // ApiEndpointInventoryTreeTest。
-                // 注意这跟下面 PVP/WEB 的「库里存在才渲染」不一致——那两处的 javadoc
-                // 写的是「树里固定展示」，与代码相反。要统一的话是个产品决定，别顺手改。
-                children.add(endpointProjectNode(slot, stats, projectsByCode, byProject));
+                children.add(endpointProjectNode(slot, stats, projectsByCode));
                 assigned.add(slot);
                 assigned.add(inventoryProjectKey(slot));
             }
@@ -767,10 +681,11 @@ public class ApiProjectService {
                 if (assigned.contains(code)) {
                     continue;
                 }
-                if (!ApiProjectCatalog.APP.key().equals(ApiProjectCatalog.categoryKeyOf(code))) {
+                // 没手动分类的都算电竞APP；挂在 POGPOG 这类自定义分类下的留给对应分类
+                if (!ApiProjectCatalog.APP.key().equals(resolveEndpointProjectCategory(code, projectsByCode))) {
                     continue;
                 }
-                children.add(endpointProjectNode(code, stats, projectsByCode, byProject));
+                children.add(endpointProjectNode(code, stats, projectsByCode));
                 assigned.add(code);
             }
             return children;
@@ -780,7 +695,7 @@ public class ApiProjectService {
             if (!stats.containsKey(slot) && !projectsByCode.containsKey(slot)) {
                 continue;
             }
-            children.add(endpointProjectNode(slot, stats, projectsByCode, byProject));
+            children.add(endpointProjectNode(slot, stats, projectsByCode));
             assigned.add(slot);
         }
         for (String code : stats.keySet()) {
@@ -790,7 +705,7 @@ public class ApiProjectService {
             if (!catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
                 continue;
             }
-            children.add(endpointProjectNode(code, stats, projectsByCode, byProject));
+            children.add(endpointProjectNode(code, stats, projectsByCode));
             assigned.add(code);
         }
         for (ApiProject p : projectsByCode.values()) {
@@ -799,7 +714,7 @@ public class ApiProjectService {
                 continue;
             }
             if (catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
-                children.add(endpointProjectNode(code, stats, projectsByCode, byProject));
+                children.add(endpointProjectNode(code, stats, projectsByCode));
                 assigned.add(code);
             }
         }
@@ -849,6 +764,7 @@ public class ApiProjectService {
         m.put("sortOrder", p.getSortOrder());
         m.put("successCodePath", p.getSuccessCodePath());
         m.put("successCodeValue", p.getSuccessCodeValue());
+        m.put("gitUrl", p.getGitUrl());
         m.put("repoPath", p.getRepoPath());
         m.put("baseBranch", p.getBaseBranch());
         m.put("category", ApiProjectCatalog.resolveCategoryKey(p.getCode(), p.getCategory()));
@@ -888,6 +804,7 @@ public class ApiProjectService {
         // 不兜这一下，改一次项目名就把 repoPath 清成 null，接口对比分析直接报「未配仓库」，
         // 而且现场看不出是刚才那次编辑干的
         keepIfNull(body::getKind, body::setKind, existing.getKind());
+        keepIfNull(body::getGitUrl, body::setGitUrl, existing.getGitUrl());
         keepIfNull(body::getRepoPath, body::setRepoPath, existing.getRepoPath());
         keepIfNull(body::getBaseBranch, body::setBaseBranch, existing.getBaseBranch());
         keepIfNull(body::getSuccessCodePath, body::setSuccessCodePath, existing.getSuccessCodePath());
@@ -967,6 +884,23 @@ public class ApiProjectService {
             } else {
                 body.setCategory(k);
             }
+        }
+        if (body.getGitUrl() != null && !body.getGitUrl().isBlank()) {
+            String url = body.getGitUrl().trim();
+            if (!ProjectRepoSync.looksLikeGitUrl(url)) {
+                throw new IllegalArgumentException("GitLab 地址要填 clone 地址，如 http://gitlab.shdev.net/SteamCN/data-center.git");
+            }
+            body.setGitUrl(url);
+        }
+        if (body.getRepoPath() != null && !body.getRepoPath().isBlank()) {
+            java.nio.file.Path p = java.nio.file.Path.of(body.getRepoPath().trim()).toAbsolutePath().normalize();
+            if (!java.nio.file.Files.isDirectory(p)) {
+                throw new IllegalArgumentException("本地仓库目录不存在（要填后端所在机器上的路径）: " + p);
+            }
+            if (!java.nio.file.Files.exists(p.resolve(".git"))) {
+                throw new IllegalArgumentException("不是 git 仓库（缺少 .git）: " + p);
+            }
+            body.setRepoPath(p.toString());
         }
     }
 

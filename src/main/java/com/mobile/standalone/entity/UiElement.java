@@ -1,8 +1,10 @@
 package com.mobile.standalone.entity;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 行级 UI 元素：测试/线上默认 SHARED 共用，改定位只改这一行。
@@ -45,4 +47,8 @@ public class UiElement {
     private String createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    /** 仅新建接口的响应里有：顺带在哪些平台建了同名空定位元素。不落库。 */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private List<String> mirroredTo;
 }

@@ -39,7 +39,7 @@ public class CallComponentHandler implements KeywordHandler {
 
     @Override
     public String description() {
-        return "复用已保存的流程组件（如登录）";
+        return "复用已保存的流程组件。组件里元素定位若写了 ${变量}，本步直接填文案即可，不必为每个按钮建元素";
     }
 
     @Override
@@ -82,6 +82,7 @@ public class CallComponentHandler implements KeywordHandler {
         String childApp = child.getAppId() != null && !child.getAppId().isBlank()
                 ? child.getAppId() : ctx.getUiAppId();
         ctx.withUiAppId(childApp)
+                .withExecParams(ctx.locatorParams())
                 .runNested(ctx.getRuntime().parseSteps(child.getSteps()), ctx.getDepth() + 1);
     }
 }

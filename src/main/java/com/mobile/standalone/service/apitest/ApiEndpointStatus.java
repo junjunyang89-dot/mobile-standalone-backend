@@ -10,6 +10,9 @@ import java.util.Locale;
  */
 public enum ApiEndpointStatus {
 
+    /** 人工确认已下线。和 DEPRECATED 分开：那个是扫描判的，这个是人拍板的，扫描不会把它改回去 */
+    RETIRED("已标记废弃", "人工确认已下线：不再生成用例，也不算进未覆盖"),
+
     /** master 上已经没有这个接口了 */
     DEPRECATED("已废弃", "master 上找不到了。确认是有意下线还是分支合错——挂在它下面的用例先别删"),
 

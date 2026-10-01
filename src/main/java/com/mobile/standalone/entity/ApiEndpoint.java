@@ -65,6 +65,29 @@ public class ApiEndpoint {
      */
     private String tablesJson;
 
+    /**
+     * 要不要登录：源码里方法或类上挂了 {@code @Auth} 这类注解为 true；
+     * 仓库用注解鉴权但这个接口没挂为 false；空＝看不出来（走拦截器的仓库）
+     */
+    private Boolean authRequired;
+
+    /** 客户端 / H5 / 其他服务里调它的位置（JSON 数组），全量扫描时顺带搜出来 */
+    private String callersJson;
+    /**
+     * {@code USED} 有人调 / {@code DEF_ONLY} 只在 API 封装里写了路径、封装没人用 /
+     * {@code NONE} 哪都没找到 / 空＝没搜过。后两种多半已下线，抓包也抓不到。
+     */
+    private String callerStatus;
+    private LocalDateTime callersScannedAt;
+
+    /** 人工标记废弃的时间，空＝没标。标了就不再生成用例、不算未覆盖 */
+    private LocalDateTime retiredAt;
+    private String retiredBy;
+
+    /** 人工定的自动化级别（CORE/IMPORTANT/NORMAL/UNUSED），空＝按调用方自动算 */
+    private String levelManual;
+    private String levelSetBy;
+
     private LocalDateTime lastSyncedAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
@@ -86,4 +109,9 @@ public class ApiEndpoint {
      * 就会立刻变绿，而实际上这个接口从此没人验了。
      */
     private Integer enabledCaseCount;
+
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    public boolean isRetired() {
+        return retiredAt != null;
+    }
 }

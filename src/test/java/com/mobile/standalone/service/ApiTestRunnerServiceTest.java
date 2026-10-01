@@ -30,6 +30,20 @@ class ApiTestRunnerServiceTest {
     }
 
     @Test
+    void buildUrl_queryVariablesResolvedBeforeEncoding() throws Exception {
+        var vars = java.util.Map.of("steamId", "76561198000000001", "kw", "a b&c");
+        String url = ApiTestRunnerService.buildUrl(
+                "https://gwapi.pwesports.cn",
+                "/appdatacenter/steamdata/user/steam-summary",
+                "{\"steamId\":\"{{steamId}}\",\"q\":\"x-{{kw}}\"}",
+                s -> com.mobile.standalone.service.apitest.VariableResolver.resolve(s, java.util.Map.of(), vars));
+        assertTrue(url.contains("steamId=76561198000000001"), url);
+        // 变量值里的特殊字符也要被编码，不能把 & 当成参数分隔符发出去
+        assertTrue(url.contains("q=x-a+b%26c"), url);
+        assertFalse(url.contains("%7B%7B"), url);
+    }
+
+    @Test
     void jsonPath_nestedAndIndex() throws Exception {
         String body = "{\"code\":0,\"data\":{\"list\":[{\"id\":\"a1\",\"winRate\":0.5}]}}";
         JsonNode code = ApiTestRunnerService.readJsonPath(body, "$.code");

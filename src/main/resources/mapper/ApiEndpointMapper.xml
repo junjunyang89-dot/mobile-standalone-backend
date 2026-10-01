@@ -18,6 +18,14 @@
         <result property="captureMeta" column="capture_meta"/>
         <result property="docMeta" column="doc_meta"/>
         <result property="tablesJson" column="tables_json"/>
+        <result property="authRequired" column="auth_required"/>
+        <result property="callersJson" column="callers_json"/>
+        <result property="callerStatus" column="caller_status"/>
+        <result property="callersScannedAt" column="callers_scanned_at"/>
+        <result property="retiredAt" column="retired_at"/>
+        <result property="retiredBy" column="retired_by"/>
+        <result property="levelManual" column="level_manual"/>
+        <result property="levelSetBy" column="level_set_by"/>
         <result property="lastSyncedAt" column="last_synced_at"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
@@ -29,7 +37,8 @@
     <sql id="cols">
         e.id, e.project, e.http_method, e.path, e.handler, e.source_file, e.summary,
         e.status, e.change_flag, e.source_branch, e.change_note, e.fields_snapshot,
-        e.capture_meta, e.doc_meta, e.tables_json, e.last_synced_at, e.created_at, e.updated_at
+        e.capture_meta, e.doc_meta, e.tables_json, e.auth_required, e.callers_json, e.caller_status, e.callers_scanned_at,
+        e.retired_at, e.retired_by, e.level_manual, e.level_set_by, e.last_synced_at, e.created_at, e.updated_at
     </sql>
 
     <select id="search" resultMap="endpointMap">
@@ -79,6 +88,20 @@
         FROM api_endpoints e WHERE e.id = #{id}
     </select>
 
+    <!-- 列用例时批量带出接口；不带统计子查询，逐条 findById 会在每个接口上扫一遍用例表 -->
+    <select id="findByIds" resultMap="endpointMap">
+        SELECT <include refid="cols"/>, 0 AS case_count
+        FROM api_endpoints e
+        WHERE e.id IN
+        <foreach item="id" collection="ids" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <select id="findByMethodPath" resultMap="endpointMap">
+        SELECT <include refid="cols"/>, 0 AS case_count
+        FROM api_endpoints e
+        WHERE e.http_method = #{httpMethod} AND e.path = #{path}
+    </select>
+
     <select id="findByKey" resultMap="endpointMap">
         SELECT <include refid="cols"/>, 0 AS case_count
         FROM api_endpoints e
@@ -121,6 +144,10 @@
         WHERE id = #{id}
     </update>
 
+    <update id="updateProject">
+        UPDATE api_endpoints SET project = #{project}, updated_at = NOW() WHERE id = #{id}
+    </update>
+
     <update id="markDeprecatedNotIn">
         UPDATE api_endpoints SET status = 'DEPRECATED', updated_at = NOW()
         WHERE project = #{project} AND status &lt;&gt; 'DEPRECATED'
@@ -142,6 +169,29 @@
                change_note = NULL,
                updated_at = NOW()
          WHERE source_branch = #{branch}
+    </update>
+
+    <!-- 单独一条：null 也要写进去（仓库换成拦截器鉴权后，旧的 true/false 就不作数了） -->
+    <update id="updateAuthRequired">
+        UPDATE api_endpoints SET auth_required = #{authRequired} WHERE id = #{id}
+    </update>
+
+    <update id="updateCallers">
+        UPDATE api_endpoints
+           SET callers_json = #{callersJson},
+               caller_status = #{callerStatus},
+               callers_scanned_at = NOW()
+         WHERE id = #{id}
+    </update>
+
+    <!-- null 也要写进去：取消废弃就是把两列清空 -->
+    <update id="updateRetired">
+        UPDATE api_endpoints SET retired_at = #{retiredAt}, retired_by = #{retiredBy} WHERE id = #{id}
+    </update>
+
+    <!-- null 也要写进去：清空就是回到自动算 -->
+    <update id="updateLevel">
+        UPDATE api_endpoints SET level_manual = #{level}, level_set_by = #{setBy} WHERE id = #{id}
     </update>
 
     <delete id="deleteById">

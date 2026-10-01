@@ -15,6 +15,8 @@ import com.mobile.standalone.mapper.ApplicationMapper;
 import com.mobile.standalone.service.perf.MetricBaselineService;
 import com.mobile.standalone.service.perf.CrashMonitor;
 import com.mobile.standalone.service.perf.IosCrashCollector;
+import com.mobile.standalone.service.perf.ColdStartMeasurer;
+import com.mobile.standalone.service.perf.MemoryLeakAnalyzer;
 import com.mobile.standalone.service.perf.CrashLogParser;
 import com.mobile.standalone.service.driver.AppiumDriverAdapter;
 import com.mobile.standalone.service.driver.PlatformDriver;
@@ -108,6 +110,9 @@ public class PerformanceTestService {
     @Autowired
     private UiFlowService uiFlowService;
 
+    @Autowired(required = false)
+    private com.mobile.standalone.service.perf.ColdStartMeasurer coldStartMeasurer;
+
     /**
      * 从任务 config（JSON）解析执行时长（分钟）。支持前端创建任务时传入 config: {"traversalMinutes": 5}。
      * 范围限制在 1～60，无效或未传则使用配置项 performance.traversal-minutes。
@@ -197,6 +202,15 @@ public class PerformanceTestService {
             // 不清的话上个版本的崩溃会算到这一轮头上，而崩溃次数正是要跟上版比的
             iosCrashCollector.start(deviceId);
         }
+        // 冷启动必须在采样器起来<b>之前</b>测完。
+        //
+        // 它要反复 force-stop + 重启应用五次，如果和资源采样重叠，
+        // 这五次启动的 CPU 尖峰会被算进整条曲线的均值和峰值里——
+        // 于是「开了冷启动测量」的那次 CPU 看着就是比没开的高，
+        // 而两次跑的明明是同一个包。基线一比，报一条不存在的劣化。
+        ColdStartMeasurer.Measurement coldStart =
+                measureColdStart(task, device, packageName, flowId, executionLog);
+
         Thread samplerThread = startSampler(deviceId, packageName, resourceSamples, samplingStopped, resolved.collector());
 
         List<PerformanceTestResultDto.OperationRecord> operations = new ArrayList<>();
@@ -290,6 +304,9 @@ public class PerformanceTestService {
                 .issueSummary(issueSummary)
                 .resourceSamples(resourceSamples.isEmpty() ? null : new ArrayList<>(resourceSamples))
                 .operations(operations)
+                .coldStartMs(coldStart == null ? null : coldStart.medianMs())
+                .coldStartDetail(coldStartDetail(coldStart))
+                .memoryLeak(analyzeMemoryLeak(flowResult, executionLog))
                 .build();
 
         recordBaseline(task, device, result, collectCrashes(task, device, resolvePackageName(task, device), executionLog));
@@ -301,6 +318,154 @@ public class PerformanceTestService {
             out.markFailed("场景化性能流程未通过: " + errMsg);
         }
         return out;
+    }
+
+    /**
+     * 测冷启动耗时。
+     *
+     * <p>这是报告里一直缺的那一项：{@code MetricComparator} 从一开始就认识
+     * {@code coldStartMs}（有中文名、有单位、方向也判对了），但没有任何采集器产生过它。
+     * 也就是说<b>最贴近用户感受的那个指标，报告里一次都没出现过</b>。
+     *
+     * <p>默认跑 {@link ColdStartMeasurer#DEFAULT_ROUNDS} 轮取中位数，
+     * {@code config.coldStartRounds: 0} 可以关掉。
+     */
+    private ColdStartMeasurer.Measurement measureColdStart(
+            Task task, Device device, String packageName, String flowId,
+            List<ExecutionLogEntryDto> executionLog) {
+        if (coldStartMeasurer == null) {
+            return null;
+        }
+        int rounds = resolveColdStartRounds(task);
+        if (rounds <= 0) {
+            return null;
+        }
+        // 流程要的是热启动，就不能在它前面把进程杀五遍——
+        // 那样流程一上来面对的是冷的应用，测的根本不是它想测的那条路径。
+        // 这种冲突不会报错，只会让热启动那条流程的数据悄悄变成另一回事
+        if (flowStepsContain(flowId, "HOT_START") || flowStepsContain(flowId, "HOT_START_IOS")) {
+            executionLog.add(ExecutionLogEntryDto.success("冷启动耗时",
+                    "跳过：这条流程测的是热启动，先反复冷启会破坏它的前置状态"));
+            return null;
+        }
+
+        ColdStartMeasurer.Measurement m = coldStartMeasurer.measure(
+                device.getPlatform(), device.getId(), packageName,
+                resolveLaunchActivityFromConfig(task.getConfig()), rounds);
+
+        if (!m.supported()) {
+            // 说清楚是「这个平台还不支持」，不是「这次启动很快」——
+            // 后者是假结论，而假结论比缺数据难发现得多
+            executionLog.add(ExecutionLogEntryDto.success("冷启动耗时",
+                    m.notes().isEmpty() ? "本平台不支持" : m.notes().get(0)));
+            return m;
+        }
+        for (String note : m.notes()) {
+            executionLog.add(ExecutionLogEntryDto.success("冷启动耗时", note));
+        }
+        for (String bad : m.rejected()) {
+            executionLog.add(ExecutionLogEntryDto.success("冷启动耗时", "丢弃 " + bad));
+        }
+        if (m.medianMs() != null) {
+            executionLog.add(ExecutionLogEntryDto.success("冷启动耗时",
+                    "中位数 " + Math.round(m.medianMs()) + " ms（量到第一帧，不含首页数据加载完）"));
+        }
+        return m;
+    }
+
+    /** 明细给前端：原始值都摆出来，人一眼能看出这次稳不稳 */
+    /**
+     * 把流程里打下的内存点交给泄漏判据。
+     *
+     * <p>没打过点就返回 null——报告上「没测」和「没泄漏」必须长得不一样。
+     * 把没测显示成绿色的「无泄漏」，是这套平台里最不该犯的错。
+     */
+    private Map<String, Object> analyzeMemoryLeak(
+            com.mobile.standalone.dto.FunctionalTestExecutionResult flowResult,
+            List<ExecutionLogEntryDto> executionLog) {
+        List<Long> points = flowResult == null ? null : flowResult.getMemoryCheckpoints();
+        if (points == null || points.isEmpty()) {
+            return null;
+        }
+        MemoryLeakAnalyzer.Analysis a = MemoryLeakAnalyzer.analyze(points);
+
+        // 结论要进执行日志，不能只躺在 JSON 里：
+        // 人打开报告先看的是日志，没人会去翻结构化字段
+        String title = "内存泄漏分析";
+        if (a.verdict() == MemoryLeakAnalyzer.Verdict.LEAKING) {
+            executionLog.add(ExecutionLogEntryDto.fail(title, a.summary(), null));
+        } else if (a.verdict() == MemoryLeakAnalyzer.Verdict.INSUFFICIENT) {
+            // 用 neutral 而不是 success：样本不足是「没测出来」，
+            // 记成通过的话，一条没测成的用例会在报告里显示为绿色
+            executionLog.add(ExecutionLogEntryDto.neutral(title, a.summary()));
+        } else {
+            executionLog.add(ExecutionLogEntryDto.success(title, a.summary()));
+        }
+        for (String note : a.notes()) {
+            executionLog.add(ExecutionLogEntryDto.success(title + " · 说明", note));
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("verdict", a.verdict().name());
+        out.put("summary", a.summary());
+        out.put("slopeKbPerRound", a.slopeKbPerRound());
+        out.put("rSquared", a.rSquared());
+        out.put("growthKb", a.growthKb());
+        out.put("checkpointsKb", points);
+        out.put("effectiveKb", a.effective());
+        out.put("notes", a.notes());
+        return out;
+    }
+
+    private Map<String, Object> coldStartDetail(ColdStartMeasurer.Measurement m) {
+        if (m == null) {
+            return null;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("supported", m.supported());
+        out.put("medianMs", m.medianMs());
+        out.put("samples", m.samples());
+        out.put("rejected", m.rejected());
+        out.put("notes", m.notes());
+        return out;
+    }
+
+    /** {@code config.coldStartRounds}；不传按默认轮数，传 0 关掉 */
+    private int resolveColdStartRounds(Task task) {
+        if (task == null || task.getConfig() == null || task.getConfig().isBlank()) {
+            return ColdStartMeasurer.DEFAULT_ROUNDS;
+        }
+        try {
+            JsonNode node = JSON.readTree(task.getConfig());
+            if (node != null && node.has("coldStartRounds")) {
+                return Math.max(0, Math.min(20, node.get("coldStartRounds").asInt(ColdStartMeasurer.DEFAULT_ROUNDS)));
+            }
+        } catch (Exception e) {
+            log.debug("解析 coldStartRounds 失败，用默认: {}", e.getMessage());
+        }
+        return ColdStartMeasurer.DEFAULT_ROUNDS;
+    }
+
+    /**
+     * {@code config.launchActivity}：显式指定从哪个 Activity 启。
+     *
+     * <p>不传就现场 {@code resolve-activity}，但那个解析出来的未必是用户点图标走的那条——
+     * 有些包会解析到别的入口，于是测的是另一条路径，数字还挺好看。
+     */
+    private String resolveLaunchActivityFromConfig(String configJson) {
+        if (configJson == null || configJson.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = JSON.readTree(configJson);
+            if (node != null && node.hasNonNull("launchActivity")) {
+                String v = node.get("launchActivity").asText("");
+                return v.isBlank() ? null : v.trim();
+            }
+        } catch (Exception ignored) {
+            // 解析不了就现场 resolve，不该因为 config 格式问题让整次性能跑不起来
+        }
+        return null;
     }
 
     private String resolveFlowIdFromConfig(String configJson) {
@@ -439,6 +604,11 @@ public class PerformanceTestService {
             putPeak(metrics, "temperature", rs.getTemperature());
             putPeak(metrics, "networkRxBytes", rs.getNetworkRxBytes());
             putPeak(metrics, "networkTxBytes", rs.getNetworkTxBytes());
+            // 冷启动进基线。这一项和别的不一样：它本身已经是多轮的中位数，
+            // 所以拿它跟上版比，比拿一条曲线的峰值去比要稳得多
+            if (result.getColdStartMs() != null) {
+                metrics.put("coldStartMs", result.getColdStartMs());
+            }
             String pkg = resolvePackageName(task, device);
             // 崩溃次数也进基线：这是最该跟上个版本比的一项——
             // 上版 0 次这版 3 次，比任何资源曲线都说明问题

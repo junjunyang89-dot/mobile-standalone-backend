@@ -39,6 +39,25 @@ public interface PlatformDriver {
      * 输入文本到指定元素
      */
     boolean inputTextToElement(String deviceId, String selector, String text);
+
+    /**
+     * 向当前焦点输入框写字（Android EditText / iOS TextField·TextView）。
+     * <p>
+     * 「友好评论，友善社区」这类占位不是输入框：{@link #inputTextToElement} 会对它 sendKeys 并失败。
+     * 本方法先点 {@code selector}（可空，用来开门），再对焦点框用 IME 输入，不 clear hint。
+     */
+    default boolean inputTextToFocusedEditText(String deviceId, String selector, String text) {
+        if (selector != null && !selector.isBlank()) {
+            clickElement(deviceId, selector);
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return inputText(deviceId, text != null ? text : "");
+    }
     
     /**
      * 截图

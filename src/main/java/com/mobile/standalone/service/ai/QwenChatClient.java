@@ -76,6 +76,11 @@ public class QwenChatClient {
      * @param images 可为空；非空时模型必须具备视觉能力，否则接口会报 invalid_parameter_error
      */
     public String chat(String prompt, List<Image> images) throws Exception {
+        return chat(prompt, images, null);
+    }
+
+    /** @param modelOverride 这一轮换个模型；空则用配置的 */
+    public String chat(String prompt, List<Image> images, String modelOverride) throws Exception {
         if (!isConfigured()) {
             throw new IllegalStateException(
                     "千问未配置：请在 application.yml 的 diagnosis.ai.api-key 填入密钥");
@@ -86,7 +91,7 @@ public class QwenChatClient {
                 .header("Authorization", "Bearer " + apiKey)
                 .timeout(Duration.ofSeconds(Math.max(30, timeoutSeconds)))
                 .POST(HttpRequest.BodyPublishers.ofString(
-                        JSON.writeValueAsString(buildRequest(prompt, images)), StandardCharsets.UTF_8))
+                        JSON.writeValueAsString(buildRequest(prompt, images, modelOverride)), StandardCharsets.UTF_8))
                 .build();
 
         HttpResponse<Stream<String>> response = http.send(request, HttpResponse.BodyHandlers.ofLines());
@@ -98,8 +103,12 @@ public class QwenChatClient {
     }
 
     ObjectNode buildRequest(String prompt, List<Image> images) {
+        return buildRequest(prompt, images, null);
+    }
+
+    ObjectNode buildRequest(String prompt, List<Image> images, String modelOverride) {
         ObjectNode body = JSON.createObjectNode();
-        body.put("model", modelId());
+        body.put("model", modelOverride == null || modelOverride.isBlank() ? modelId() : modelOverride.trim());
         body.put("stream", true);
 
         ObjectNode message = body.putArray("messages").addObject();

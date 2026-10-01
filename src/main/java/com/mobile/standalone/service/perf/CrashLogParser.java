@@ -136,6 +136,73 @@ public final class CrashLogParser {
         return sb.toString().trim();
     }
 
+    private static final Pattern AM_KILL = Pattern.compile("am_kill\\s*:\\s*\\[\\d+,(\\d+),");
+    private static final Pattern AM_PROC_DIED = Pattern.compile("am_proc_died\\s*:\\s*\\[\\d+,(\\d+),([^,\\]]+)");
+    /** logcat 行首：日期 时间 pid tid 级别 tag: */
+    private static final Pattern LINE_PID = Pattern.compile("^\\S+\\s+\\S+\\s+(\\d+)\\s+\\d+\\s+\\w\\s+");
+
+    /**
+     * 主进程死了、却不是谁主动杀的。
+     * <p>
+     * 只认 FATAL EXCEPTION / tombstone 不够：应用集成的崩溃 SDK、WebView 的 crashpad 会把原生崩溃截走，
+     * 系统里不留这两种痕迹，进程就这么没了。真机上实测过：WebView 渲染进程崩了没人处理，
+     * 整个应用跟着退出，logcat 里只剩 {@code am_proc_died}。
+     * <p>
+     * force-stop / 系统按策略回收都会先打 {@code am_kill}，所以「死了但前面没有 am_kill」= 意外退出。
+     *
+     * @param events  events 缓冲区（必须按时间切过，events 不会被 logcat -c 清掉）
+     * @param mainLog main 缓冲区，用来补一句死因
+     */
+    public static List<Incident> unexpectedDeaths(String events, String mainLog, String packageName) {
+        List<Incident> out = new ArrayList<>();
+        if (events == null || events.isBlank() || packageName == null || packageName.isBlank()) {
+            return out;
+        }
+        java.util.Set<String> killed = new java.util.HashSet<>();
+        Matcher k = AM_KILL.matcher(events);
+        while (k.find()) {
+            killed.add(k.group(1));
+        }
+        String[] lines = events.split("\r?\n");
+        for (int i = 0; i < lines.length; i++) {
+            Matcher d = AM_PROC_DIED.matcher(lines[i]);
+            if (!d.find() || !packageName.equals(d.group(2).trim()) || killed.contains(d.group(1))) {
+                continue;
+            }
+            String pid = d.group(1);
+            Incident in = new Incident();
+            in.setType("PROCESS_DIED");
+            in.setProcess(packageName);
+            in.setLineNo(i + 1);
+            if (webViewTookItDown(mainLog, pid)) {
+                in.setTitle("WebView 渲染进程崩溃没人处理，连带整个应用退出（pid " + pid + "）");
+                in.setStack("有 WebView 没处理 WebViewClient.onRenderProcessGone：渲染进程一崩（低内存被回收也算），"
+                        + "系统就把整个应用杀掉。用户看到的是看网页时闪退。");
+            } else {
+                in.setTitle("应用进程意外退出（pid " + pid + "）");
+                in.setStack("不是测试主动结束的（前面没有 am_kill）。可能是原生崩溃被应用内的崩溃 SDK 截走，"
+                        + "也可能是被系统低内存回收。按时间去 logcat 里找 pid " + pid + " 附近的日志。");
+            }
+            out.add(in);
+        }
+        return out;
+    }
+
+    private static boolean webViewTookItDown(String mainLog, String pid) {
+        if (mainLog == null) {
+            return false;
+        }
+        for (String line : mainLog.split("\r?\n")) {
+            if (line.contains("crash wasn't handled by all associated")) {
+                Matcher m = LINE_PID.matcher(line);
+                if (m.find() && m.group(1).equals(pid)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /**
      * 同一次崩溃 logcat 里会重复出现（多个 buffer、系统再打一遍）。
      * 不去重的话一次崩溃报成五次，"崩溃次数"这个指标就没法用了——

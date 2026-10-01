@@ -96,6 +96,19 @@ public final class EndpointAssertionContext {
         return strMap(cap == null ? null : cap.get("reqHeaders"));
     }
 
+    static String reqBodyOf(Map<String, Object> cap) {
+        return text(cap, "reqBody");
+    }
+
+    static String respSampleOf(Map<String, Object> cap) {
+        return text(cap, "respSample");
+    }
+
+    private static String text(Map<String, Object> cap, String key) {
+        Object v = cap == null ? null : cap.get(key);
+        return v == null || String.valueOf(v).isBlank() ? null : String.valueOf(v);
+    }
+
     static Map<String, String> queryOf(Map<String, Object> cap) {
         return strMap(cap == null ? null : cap.get("queryParams"));
     }

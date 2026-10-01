@@ -86,6 +86,8 @@ public final class FailureDiagnosisDtos {
         private String executionStatus;
         /** 落库的简短失败原因 */
         private String errorMessage;
+        /** 运行期间 logcat 里抓到了被测应用的崩溃 */
+        private boolean appCrashed;
 
         /** 失败步骤。为 null 表示这次执行没有失败步骤（可能是停止或性能任务） */
         private LogLine failedStep;

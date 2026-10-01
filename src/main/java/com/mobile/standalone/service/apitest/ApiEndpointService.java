@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -72,6 +73,23 @@ public class ApiEndpointService {
             // 能直接展开看「这个接口动哪些表 + DDL 测试点」，不用每次重算
             ensureColumn("api_endpoints", "tables_json",
                     "VARCHAR(2048) NULL COMMENT '涉及的表（JSON 数组），来自对比分析的依赖解析' AFTER doc_meta");
+            ensureColumn("api_endpoints", "auth_required",
+                    "TINYINT(1) NULL COMMENT '要不要登录：源码有鉴权注解=1，空=看不出来' AFTER tables_json");
+            ensureColumn("api_endpoints", "callers_json",
+                    "MEDIUMTEXT NULL COMMENT '调用方位置（JSON 数组）' AFTER tables_json");
+            ensureColumn("api_endpoints", "caller_status",
+                    "VARCHAR(16) NULL COMMENT 'USED/DEF_ONLY/NONE，空=没搜过' AFTER callers_json");
+            ensureColumn("api_endpoints", "callers_scanned_at",
+                    "DATETIME NULL COMMENT '最近一次搜调用方' AFTER caller_status");
+            // 人工确认的废弃单独一列，不复用 status：status 由扫描维护，接口还在源码里就会被改回 ACTIVE
+            ensureColumn("api_endpoints", "retired_at",
+                    "DATETIME NULL COMMENT '人工标记废弃的时间，空=没标' AFTER callers_scanned_at");
+            ensureColumn("api_endpoints", "retired_by",
+                    "VARCHAR(100) NULL COMMENT '谁标的废弃' AFTER retired_at");
+            ensureColumn("api_endpoints", "level_manual",
+                    "VARCHAR(16) NULL COMMENT '人工定的自动化级别 CORE/IMPORTANT/NORMAL/UNUSED，空=按调用方自动算' AFTER retired_by");
+            ensureColumn("api_endpoints", "level_set_by",
+                    "VARCHAR(100) NULL COMMENT '谁改的级别' AFTER level_manual");
             migrateExistingCases();
             log.info("[api-endpoints] 表已就绪");
         } catch (Exception e) {
@@ -87,7 +105,9 @@ public class ApiEndpointService {
                     Integer.class, table, column);
             if (n != null && n == 0) {
                 jdbcTemplate.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
-                jdbcTemplate.execute("ALTER TABLE " + table + " ADD INDEX idx_endpoint_id (" + column + ")");
+                if ("endpoint_id".equals(column)) {
+                    jdbcTemplate.execute("ALTER TABLE " + table + " ADD INDEX idx_endpoint_id (" + column + ")");
+                }
                 log.info("[api-endpoints] 已补充 {}.{} 列", table, column);
             }
         } catch (Exception e) {
@@ -157,6 +177,19 @@ public class ApiEndpointService {
         return id == null ? null : endpointMapper.findById(id);
     }
 
+    /** id → 接口，不含用例统计 */
+    public Map<String, ApiEndpoint> getAll(java.util.Collection<String> ids) {
+        List<String> distinct = ids == null ? List.of() : ids.stream()
+                .filter(s -> s != null && !s.isBlank()).distinct().toList();
+        Map<String, ApiEndpoint> out = new HashMap<>();
+        for (int i = 0; i < distinct.size(); i += 500) {
+            for (ApiEndpoint e : endpointMapper.findByIds(distinct.subList(i, Math.min(i + 500, distinct.size())))) {
+                out.put(e.getId(), e);
+            }
+        }
+        return out;
+    }
+
     /** 解析接口 handler，供用例集合等模块展示 Controller 名称 */
     public String handlerOfEndpoint(String endpointId) {
         ApiEndpoint ep = get(endpointId);
@@ -187,6 +220,95 @@ public class ApiEndpointService {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 全量扫描的结果入库：没有的建，有的补上方法名 / 中文名 / 源码文件。
+     * <p>
+     * 不动变更标记、不标废弃：全量扫描回答的是「现在有哪些接口」，
+     * 「这一版改了什么」是对比分析的事，混进来会把整个项目都标成「新增」。
+     */
+    @Transactional
+    public ScanSyncResult upsertFromSource(String project, List<SourceEndpointScanner.Scanned> scanned) {
+        int created = 0;
+        int updated = 0;
+        LocalDateTime now = LocalDateTime.now();
+        for (SourceEndpointScanner.Scanned s : scanned) {
+            ApiEndpoint existing = endpointMapper.findByKey(project, s.httpMethod(), s.path());
+            if (existing == null) {
+                ApiEndpoint row = new ApiEndpoint();
+                row.setId("ep-" + UUID.randomUUID());
+                row.setProject(project);
+                row.setHttpMethod(s.httpMethod());
+                row.setPath(s.path());
+                row.setHandler(s.handler());
+                row.setSummary(blankToNull(s.summary()));
+                row.setSourceFile(s.file());
+                row.setStatus("ACTIVE");
+                row.setLastSyncedAt(now);
+                endpointMapper.insert(row);
+                endpointMapper.updateAuthRequired(row.getId(), s.auth());
+                created++;
+                continue;
+            }
+            ApiEndpoint patch = new ApiEndpoint();
+            patch.setId(existing.getId());
+            patch.setHandler(s.handler());
+            // 源码里没写 @ApiOperation 时别把人工补过的中文名抹掉
+            patch.setSummary(blankToNull(s.summary()));
+            patch.setSourceFile(s.file());
+            patch.setStatus("ACTIVE");
+            patch.setLastSyncedAt(now);
+            endpointMapper.update(patch);
+            endpointMapper.updateAuthRequired(existing.getId(), s.auth());
+            updated++;
+        }
+        log.info("[api-endpoints] 源码全量扫描 {}：新建 {}、更新 {}", project, created, updated);
+        return new ScanSyncResult(created, updated);
+    }
+
+    /**
+     * 在其他仓库里搜这个项目每个接口的调用方，结果挂到接口上。
+     *
+     * @param roots   搜哪些目录
+     * @param exclude 项目自己的源码目录，它自己的 Controller 不算调用方
+     */
+    public CallerSyncResult syncCallers(String project, List<java.nio.file.Path> roots, java.nio.file.Path exclude)
+            throws java.io.IOException {
+        List<ApiEndpoint> rows = endpointMapper.search(List.of(project), null, null, null);
+        List<String> paths = rows.stream().map(ApiEndpoint::getPath).distinct().toList();
+        Map<String, List<CallerRefScanner.Ref>> found = CallerRefScanner.scan(paths, roots, exclude);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        int used = 0;
+        int defOnly = 0;
+        int none = 0;
+        for (ApiEndpoint row : rows) {
+            List<CallerRefScanner.Ref> refs = found.getOrDefault(row.getPath(), List.of());
+            String status;
+            if (refs.isEmpty()) {
+                status = "NONE";
+                none++;
+            } else if (refs.stream().allMatch(CallerRefScanner.Ref::unused)) {
+                status = "DEF_ONLY";
+                defOnly++;
+            } else {
+                status = "USED";
+                used++;
+            }
+            endpointMapper.updateCallers(row.getId(), refs.isEmpty() ? null : json.writeValueAsString(refs), status);
+        }
+        log.info("[api-endpoints] 调用方 {}：有调用 {}、只定义 {}、没找到 {}", project, used, defOnly, none);
+        return new CallerSyncResult(used, defOnly, none);
+    }
+
+    public record CallerSyncResult(int used, int defOnly, int none) {
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s.trim();
+    }
+
+    public record ScanSyncResult(int created, int updated) {
     }
 
     @Transactional
@@ -562,7 +684,10 @@ public class ApiEndpointService {
             return;
         }
         CaptureJsonParser.Sample sample = CaptureJsonParser.parseBodies(reqBody, respBody);
-        if (sample.fieldNames().isEmpty() && sample.topLevelSamples().isEmpty()) {
+        String fullReq = reqBody == null || reqBody.isBlank() || reqBody.length() > 16384 ? null : reqBody.trim();
+        String respSample = CaptureJsonParser.compactJson(respBody, 8000);
+        if (sample.fieldNames().isEmpty() && sample.topLevelSamples().isEmpty() && fullReq == null
+                && respSample == null) {
             return;
         }
 
@@ -571,12 +696,23 @@ public class ApiEndpointService {
             row.setFieldsSnapshot(fieldsJson(merged));
         }
 
-        Map<String, Object> capMeta = new java.util.LinkedHashMap<>();
+        // 合并而不是覆盖：applyCaptureRequest 存的 queryParams / reqHeaders 不能被这里冲掉
+        Map<String, Object> capMeta = new java.util.LinkedHashMap<>(captureMetaOf(row));
         capMeta.put("capturedAt", java.time.LocalDateTime.now().toString());
-        capMeta.put("fields", sample.fieldNames());
-        capMeta.put("samples", sample.topLevelSamples());
+        if (!sample.fieldNames().isEmpty()) {
+            capMeta.put("fields", sample.fieldNames());
+            capMeta.put("samples", sample.topLevelSamples());
+        }
         if (sample.reqPreview() != null) {
             capMeta.put("reqPreview", sample.reqPreview());
+        }
+        // POST 用例要原样请求体才能跑，reqPreview 是截断过的
+        if (fullReq != null) {
+            capMeta.put("reqBody", fullReq);
+        }
+        // AI 按它写断言：只有字段名的话，模型不知道业务码是几、数据在哪一层
+        if (respSample != null) {
+            capMeta.put("respSample", respSample);
         }
         row.setCaptureMeta(EndpointAssertionContext.metaJson(capMeta));
         endpointMapper.update(row);
@@ -648,11 +784,60 @@ public class ApiEndpointService {
      *                          {@code code == 0}，不能再算「仅探活」
      */
     public ApiEndpointStatus statusOf(ApiEndpoint e, boolean projectHasBizCode) {
+        if (e.isRetired()) {
+            return ApiEndpointStatus.RETIRED;
+        }
         int cases = e.getCaseCount() == null ? 0 : e.getCaseCount();
         return ApiEndpointStatus.of(e.getStatus(), e.getChangeFlag(), cases,
                 e.getStrongCaseCount() == null ? 0 : e.getStrongCaseCount(),
                 e.getEnabledCaseCount() == null ? cases : e.getEnabledCaseCount(),
                 projectHasBizCode);
+    }
+
+    /**
+     * 人工标记 / 取消废弃。只动 retired_* 两列，扫描和对比分析都不碰它们。
+     *
+     * @return 实际改到的条数
+     */
+    @Transactional
+    public int setRetired(List<String> ids, boolean retired, String operator) {
+        if (ids == null || ids.isEmpty()) {
+            return 0;
+        }
+        LocalDateTime at = retired ? LocalDateTime.now() : null;
+        String by = retired ? operator : null;
+        int n = 0;
+        for (String id : ids) {
+            if (id != null && !id.isBlank()) {
+                n += endpointMapper.updateRetired(id.trim(), at, by);
+            }
+        }
+        return n;
+    }
+
+    /** level 为 null 时清掉人工级别，回到按调用方自动算 */
+    public int setLevel(List<String> ids, EndpointLevel level, String operator) {
+        if (ids == null || ids.isEmpty()) {
+            return 0;
+        }
+        String value = level == null ? null : level.name();
+        String by = level == null ? null : operator;
+        int n = 0;
+        for (String id : ids) {
+            if (id != null && !id.isBlank()) {
+                n += endpointMapper.updateLevel(id.trim(), value, by);
+            }
+        }
+        return n;
+    }
+
+    /** 人工定过的优先，其次按调用方算 */
+    public static EndpointLevel levelOf(ApiEndpoint e) {
+        if (e == null) {
+            return null;
+        }
+        EndpointLevel manual = EndpointLevel.parse(e.getLevelManual());
+        return manual != null ? manual : EndpointLevel.of(e.getCallerStatus(), e.getCallersJson()).level();
     }
 
     /** 同步进来的一条接口变化 */

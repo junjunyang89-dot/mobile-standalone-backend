@@ -7,6 +7,7 @@ import com.mobile.standalone.entity.ApiTestCase;
 import com.mobile.standalone.entity.ApiTestEnv;
 import com.mobile.standalone.mapper.ApiTestCaseMapper;
 import com.mobile.standalone.mapper.ApiTestEnvMapper;
+import com.mobile.standalone.service.apitest.ApiCaseKind;
 import com.mobile.standalone.util.TestEnvironment;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -153,6 +154,20 @@ public class ApiTestCaseService {
             ensureCollectionScopeColumns();
             ensureColumn("api_test_cases", "extract_json",
                     "TEXT NULL COMMENT '执行后抽变量，如 {\"token\":\"$.result.token\"}' AFTER assertions");
+            ensureColumn("api_test_cases", "test_only",
+                    "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '只在测试环境跑，线上执行时跳过' AFTER enabled");
+            // NOT NULL DEFAULT 是故意的，不是图省事：
+            // 允许 NULL 的话，「定期回归跑哪些」会写成 case_kind <> 'BRANCH'，
+            // 而 SQL 里 NULL <> 'BRANCH' 的结果是 NULL（不是 TRUE），
+            // 库里全部历史用例会在加这个字段那天集体从回归里消失 ——
+            // 而少跑用例是静默的，没人会发现覆盖掉了，通过率还更好看。
+            ensureColumn("api_test_cases", "case_kind",
+                    "VARCHAR(16) NOT NULL DEFAULT 'UNCLASSIFIED' "
+                            + "COMMENT 'BRANCH=为某次提测写的 / REGRESSION=长期守已有行为 / "
+                            + "UNCLASSIFIED=加字段前就有的' AFTER requirement_ref");
+            ensureColumn("api_test_cases", "source_branch",
+                    "VARCHAR(191) NULL COMMENT '为哪个提测分支写的；升级成回归用例后不要清空，它是来历' "
+                            + "AFTER case_kind");
             // 数据库断言的连接跟着环境走，和 base_url 一个逻辑：
             // 切到预发就该查预发的库，否则「接口打的是预发、断言查的是测试库」，
             // 这种错查出来的结论全是反的
@@ -166,18 +181,8 @@ public class ApiTestCaseService {
             seedEnvsIfEmpty();
             projectService.ensureExists(PROJECT_DATA_CENTER, "APP-DATA-CENTER（数据中心）");
             importProjectSeedIfAbsent(PROJECT_DATA_CENTER, "api-test/seed-data-center.json");
-            // 接口对比调试用的那套 CRUD 用例。
-            // 原来是一个要手跑的 seed_debug_api_test_cases.sql，里面先 DELETE 再 INSERT——
-            // 那种写法不能放到启动时跑：每次重启都会把人改过的断言冲掉，
-            // 而表现是「我明明改过的用例又变回去了」。走 IfAbsent，只在这个项目一条用例都没有时导一次
-            projectService.ensureExists(PROJECT_DEBUG_TESTS, "debug-tests（接口对比调试）");
-            importProjectSeedIfAbsent(PROJECT_DEBUG_TESTS, "api-test/seed-debug-tests.json");
-            projectService.ensureExists(PROJECT_DEBUG_FLOW, "debug-flow（多层依赖嵌套调试）");
-            importProjectSeedIfAbsent(PROJECT_DEBUG_FLOW, "api-test/seed-debug-flow.json");
-            projectService.ensureExists(PROJECT_DEBUG_COMPAT, "debug-compat（不兼容变更调试）");
-            importProjectSeedIfAbsent(PROJECT_DEBUG_COMPAT, "api-test/seed-debug-compat.json");
-            projectService.ensureExists(PROJECT_DEBUG_SMOKE, "debug-smoke（0825提测）");
-            importProjectSeedIfAbsent(PROJECT_DEBUG_SMOKE, "api-test/seed-debug-smoke.json");
+            // debug-* 调试项目不再在启动时自动补建：项目管理里已经删掉了，
+            // 这里一补就又带着种子用例回来。要用时走 ApiTestController 的手动导入
             log.info("[api-test] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-test] 建表/导入失败: {}", e.getMessage());
@@ -332,7 +337,7 @@ public class ApiTestCaseService {
                 return 0;
             }
             if (replaceSeedRows) {
-                List<ApiTestCase> existing = caseMapper.findByFilters(project, null, null, null, null, null, null);
+                List<ApiTestCase> existing = caseMapper.findByFilters(project, null, null, null, null, null, null, null);
                 for (ApiTestCase c : existing) {
                     if (c.getCreatedBy() != null && c.getCreatedBy().startsWith("seed-")) {
                         caseMapper.deleteById(c.getId());
@@ -442,23 +447,64 @@ public class ApiTestCaseService {
     }
 
     public List<ApiTestCase> listCases(String project, String collectionId, String environment,
-                                       Boolean enabledOnly, String keyword) {
+                                       Boolean enabledOnly, String keyword, String caseKind) {
         return caseMapper.findByFilters(blankToNull(project), blankToNull(collectionId), normalizeListEnv(environment),
-                enabledOnly, blankToNull(keyword), null, null);
+                enabledOnly, blankToNull(keyword), normalizeCaseKindFilter(caseKind), null, null);
     }
 
     public PageResult<ApiTestCase> listCasesPage(String project, String collectionId, String environment,
-                                                 Boolean enabledOnly, String keyword, int page, int size) {
+                                                 Boolean enabledOnly, String keyword, String caseKind,
+                                                 int page, int size) {
         int p = Math.max(1, page);
         int s = Math.min(200, Math.max(1, size));
         int offset = (p - 1) * s;
         String env = normalizeListEnv(environment);
+        // 两个查询必须用同一个 kind：只给 find 加筛选、count 不加的话，
+        // 总数会比实际多，分页会多出几页空白，而没人会把这个归因到筛选上
+        String kind = normalizeCaseKindFilter(caseKind);
         long total = caseMapper.countByFilters(
-                blankToNull(project), blankToNull(collectionId), env, enabledOnly, blankToNull(keyword));
+                blankToNull(project), blankToNull(collectionId), env, enabledOnly, blankToNull(keyword), kind);
         List<ApiTestCase> content = caseMapper.findByFilters(
-                blankToNull(project), blankToNull(collectionId), env, enabledOnly, blankToNull(keyword), offset, s);
+                blankToNull(project), blankToNull(collectionId), env, enabledOnly, blankToNull(keyword), kind, offset, s);
         int totalPages = total == 0 ? 0 : (int) ((total + s - 1) / s);
         return new PageResult<>(content, total, totalPages, p, s);
+    }
+
+    /**
+     * 筛选用的 caseKind 规范化。空＝不筛。
+     *
+     * <p><b>认不出来的值要抛，不能悄悄不筛</b>——这和存储时
+     * {@link ApiCaseKind#of} 把脏值归到 UNCLASSIFIED 是<b>相反的方向</b>，故意的：
+     * <ul>
+     *   <li>存的时候宽松：一个拼错的值不该让整条用例写不进去</li>
+     *   <li>筛的时候严格：前端传 {@code caseKind=BRANCHH} 如果当成不筛，
+     *       界面会把全部用例显示成「分支用例」，人按这个去分诊</li>
+     * </ul>
+     * 这里用 {@code of()} 更糟：它会把 BRANCHH 归成 UNCLASSIFIED，
+     * 于是你筛分支用例，看到的是一堆未分类的——而且看起来像是真的没有分支用例。
+     */
+    // 包级可见是为了能直接单测：这条判据（认不出来就抛）最容易被下一个人
+    // 顺手改成 return null，而那个改动不会让任何现有测试变红
+    static String normalizeCaseKindFilter(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        ApiCaseKind k = ApiCaseKind.strict(raw);
+        if (k == null) {
+            throw new IllegalArgumentException(
+                    "caseKind 只能是 BRANCH / REGRESSION / UNCLASSIFIED，收到: " + raw);
+        }
+        return k.name();
+    }
+
+    /**
+     * 分支用例按来源分支分组计数——待分诊队列的入口。
+     *
+     * <p>只返回计数：分诊的第一步是「哪些分支还挂着用例」，
+     * 把上千条用例全查出来只为数个数，列表页会卡。
+     */
+    public List<Map<String, Object>> branchCaseGroups(String project) {
+        return caseMapper.countBranchCasesByBranch(blankToNull(project));
     }
 
     /** 列表筛选：TEST/PROD；空则不过滤环境 */
@@ -500,6 +546,9 @@ public class ApiTestCaseService {
         ApiTestCase existing = caseMapper.findById(id);
         if (existing == null) return null;
         body.setId(id);
+        if (body.getTestOnly() == null) {
+            body.setTestOnly(existing.getTestOnly());
+        }
         validateCase(body);
         defaults(body);
         // 路径或方法被改过时要重新挂：改完还挂在老接口上，
@@ -569,6 +618,7 @@ public class ApiTestCaseService {
         }
         body.setEnvironment(env);
         if (body.getEnabled() == null) body.setEnabled(true);
+        if (body.getTestOnly() == null) body.setTestOnly(false);
         if (body.getSortOrder() == null) body.setSortOrder(100);
         if (body.getQuery() == null || body.getQuery().isBlank()) body.setQuery("{}");
         if (body.getHeaders() == null || body.getHeaders().isBlank()) body.setHeaders("{}");
@@ -577,6 +627,39 @@ public class ApiTestCaseService {
         }
         if (body.getFieldNotes() == null || body.getFieldNotes().isBlank()) body.setFieldNotes("{}");
         if (body.getBody() == null) body.setBody("");
+        // 空白串要变 null：带空格的分支名会让「这个分支还挂着几条用例」分组出两行
+        body.setSourceBranch(blankToNull(body.getSourceBranch()));
+        defaultCaseKind(body);
+    }
+
+    /**
+     * 新用例的种类：调用方传了就规范化，没传就按<b>有没有来源分支</b>定。
+     *
+     * <p>这里和 {@link com.mobile.standalone.service.apitest.ApiCaseKind} 里
+     * 「必须存不能推」<b>不矛盾</b>，区别在时点：
+     * <ul>
+     *   <li>创建这一刻推一次，然后<b>存下来</b>——带分支就是为某次提测写的，
+     *       这个信号在当下是准的</li>
+     *   <li>被禁止的是<b>持续推导</b>：那样分支一合进 master，结果会自己
+     *       从 BRANCH 翻成 REGRESSION，把唯一需要人决定的那一刻静默吃掉</li>
+     * </ul>
+     *
+     * <p>为什么新用例不默认 UNCLASSIFIED：那个值是留给「加字段之前就存在、
+     * 没人标过」的历史数据的。新建的也塞进去，未分类就会一直涨，
+     * 而一个只增不减的待处理桶等于没有这个字段。
+     */
+    private void defaultCaseKind(ApiTestCase body) {
+        String raw = body.getCaseKind();
+        if (raw != null && !raw.isBlank()) {
+            // 规范化：前端传 "branch" 也要存成 "BRANCH"，
+            // 否则 WHERE case_kind = 'BRANCH' 查不到它，而查不到是静默的
+            body.setCaseKind(ApiCaseKind.of(raw).name());
+            return;
+        }
+        boolean fromBranch = body.getSourceBranch() != null && !body.getSourceBranch().isBlank();
+        body.setCaseKind(fromBranch
+                ? ApiCaseKind.BRANCH.name()
+                : ApiCaseKind.REGRESSION.name());
     }
 
     private static String blankToNull(String s) {

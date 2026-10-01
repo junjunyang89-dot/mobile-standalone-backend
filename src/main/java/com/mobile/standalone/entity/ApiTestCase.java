@@ -20,6 +20,26 @@ public class ApiTestCase {
     private String name;
     private String description;
     private String requirementRef;
+    /**
+     * 这条用例<b>为什么存在</b>:BRANCH / REGRESSION / UNCLASSIFIED,
+     * 见 {@link com.mobile.standalone.service.apitest.ApiCaseKind}。
+     * <p>
+     * 和 {@code environment}(在哪儿跑)、{@code testOnly}(能不能在线上跑)
+     * 是三个正交的轴,不要混。空值按 UNCLASSIFIED 解析。
+     */
+    private String caseKind;
+    /**
+     * 这条用例是为哪个提测分支写的,如 {@code mike/20260901/APP-9083}。
+     * <p>
+     * 只有 BRANCH 用例需要填。它有两个用处:
+     * <ul>
+     *   <li>分支合并上线后,靠它找出"该分诊但还没分诊"的用例——
+     *       即 caseKind 仍是 BRANCH 而这个分支已经进了 master 的那些</li>
+     *   <li>升级成回归用例之后<b>不要清空</b>——它记录的是这条用例的来历,
+     *       将来有人问"这个断言为什么这么写"时,能顺着分支找到当初的需求</li>
+     * </ul>
+     */
+    private String sourceBranch;
     /** GET/POST/PUT/PATCH/DELETE */
     private String method;
     /** 相对路径，如 /appdatacenter/deadlock/...；也可写绝对 URL（则忽略 URL/环境 baseUrl） */
@@ -60,6 +80,8 @@ public class ApiTestCase {
      */
     private String fieldNotes;
     private Boolean enabled;
+    /** 只在测试环境跑：写数据、调付费服务这类，线上执行集合时跳过 */
+    private Boolean testOnly;
     private Integer sortOrder;
     private String createdBy;
     private LocalDateTime createdAt;

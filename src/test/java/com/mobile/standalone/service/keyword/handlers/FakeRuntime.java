@@ -30,6 +30,12 @@ class FakeRuntime implements FlowRuntime {
     int cancelAfterChecks = -1;
     /** 默认 xpath:；需要走「按 resource-id 从 pageSource 找节点」那条路的用例改成 "id:" */
     String selectorPrefix = "xpath:";
+    /** 记录 directionalSwipe 的方向，供双向滑动等用例核对顺序 */
+    final List<String> swipeDirections = new ArrayList<>();
+    /** requireSelectors 每次拿到的定位变量（依次点击用来核对年份） */
+    final List<Map<String, String>> locatorParamsSeen = new ArrayList<>();
+    /** 解析过的元素 key，核对「进入 / 跳转 / 返回」顺序 */
+    final List<String> elementKeysSeen = new ArrayList<>();
 
     private int cancelChecks = 0;
 
@@ -42,6 +48,8 @@ class FakeRuntime implements FlowRuntime {
             logs.add(ExecutionLogEntryDto.fail(stepName, "无 ACTIVE 元素: " + elementKey, elementKey));
             throw new UiFlowExecutionException("无 ACTIVE 元素: " + elementKey, logs);
         }
+        locatorParamsSeen.add(execParams == null ? Map.of() : Map.copyOf(execParams));
+        elementKeysSeen.add(elementKey);
         return List.of(selectorPrefix + elementKey);
     }
 
@@ -73,9 +81,12 @@ class FakeRuntime implements FlowRuntime {
         return List.of();
     }
 
+    /** parseSteps 的返回值，依次点击后执行组件时用来冒充组件步骤 */
+    List<Map<String, Object>> nestedFromParse = List.of();
+
     @Override
     public List<Map<String, Object>> parseSteps(String stepsJson) {
-        return List.of();
+        return nestedFromParse;
     }
 
     @Override
@@ -114,8 +125,24 @@ class FakeRuntime implements FlowRuntime {
         return "com.example.app";
     }
 
+    /** 单测里不碰设备，永远返回 null＝没有额外线索，失败信息保持原样 */
+    @Override
+    public String foregroundMismatchHint(PlatformDriver driver, String deviceId, String platform,
+                                         String uiAppId, Map<String, Object> stepParams,
+                                         Map<String, String> execParams) {
+        return null;
+    }
+
     @Override
     public boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction, int durationMs) {
+        swipeDirections.add(direction);
+        return true;
+    }
+
+    @Override
+    public boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction,
+                                    int durationMs, double distanceRatio) {
+        swipeDirections.add(direction);
         return true;
     }
 

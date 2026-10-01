@@ -16,6 +16,17 @@ public interface ApiTestRunMapper {
 
     int insertRunCase(ApiTestRunCase row);
 
+    /**
+     * 一次运行的结果按 {@code case_kind} 分组计数。
+     * <p>
+     * 返回 {@code [{caseKind, total, passed, blocked}]}，
+     * 其中 {@code caseKind} 可能为 null（没记录的历史行）。
+     * <b>分桶不在这里做</b>——交给
+     * {@link com.mobile.standalone.service.apitest.RunPassRateBuckets#fold}，
+     * 那样分桶规则只有一份实现。
+     */
+    List<java.util.Map<String, Object>> countByCaseKind(@Param("runId") String runId);
+
     List<ApiTestRunCase> findRecentCases(@Param("limit") int limit);
 
     /** 报告页的执行历史列表 */

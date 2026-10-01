@@ -70,6 +70,9 @@ public final class ApiAppCatalog {
         m.put("comment-service", "app-message-center");
         m.put("event-center", "app-event");
         m.put("steam-admin", "app-admin");
+        m.put("partneragent", "app-partneragent");
+        m.put("coupon", "app-coupon");
+        m.put("mall-center", "app-mall-center");
         return Map.copyOf(m);
     }
 

@@ -81,6 +81,17 @@ public class CaptureStore {
         return Path.of(root(), safe(sessionId));
     }
 
+    /**
+     * 响应改写规则文件。<b>全局一份，不按会话分</b>。
+     *
+     * <p>按会话分看着更干净，但那会让「现在代理上到底挂没挂改写」变成一个
+     * 要翻目录才能回答的问题。而这恰恰是最需要一眼看清的事——
+     * 一次被悄悄改写过的执行，它的结论是不能信的。
+     */
+    public Path overrideRulesFile() {
+        return Path.of(root(), "api-overrides.json");
+    }
+
     /** 流水文件。mitmdump 直接往这里写 JSONL */
     public Path flowFileOf(String sessionId) throws IOException {
         Path dir = dirOf(sessionId);

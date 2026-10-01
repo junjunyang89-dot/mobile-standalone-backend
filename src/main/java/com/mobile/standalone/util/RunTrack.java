@@ -17,6 +17,13 @@ public final class RunTrack {
 
     public static final String REGRESSION = "REGRESSION";
     public static final String AUTOMATION = "AUTOMATION";
+    /**
+     * 兼容性测试：核心流程 × 多台设备。
+     * <p>
+     * 候选只取标了核心的流程，不分回归/自动化用途；顺序和失败处理跟自动化一样——
+     * 一台机上某条核心流程挂了，其余不相干的照跑，否则一张矩阵里只剩第一个红格有信息量。
+     */
+    public static final String COMPATIBILITY = "COMPATIBILITY";
 
     /**
      * 试跑：在流程编辑器里改完步骤跑一下看通不通。
@@ -36,11 +43,29 @@ public final class RunTrack {
         if (raw == null || raw.isBlank()) {
             return REGRESSION;
         }
-        return AUTOMATION.equals(raw.trim().toUpperCase(Locale.ROOT)) ? AUTOMATION : REGRESSION;
+        String t = raw.trim().toUpperCase(Locale.ROOT);
+        if (AUTOMATION.equals(t) || COMPATIBILITY.equals(t)) {
+            return t;
+        }
+        return REGRESSION;
     }
 
     public static boolean isAutomation(String raw) {
         return AUTOMATION.equals(normalize(raw));
+    }
+
+    public static boolean isCompatibility(String raw) {
+        return COMPATIBILITY.equals(normalize(raw));
+    }
+
+    /** 按前置依赖拓扑排序、自动补入没勾的前置 */
+    public static boolean ordersByDependency(String raw) {
+        return isAutomation(raw) || isCompatibility(raw);
+    }
+
+    /** 一条失败只跳过依赖它的，其余继续跑；回归是线性串，一步挂了整批停 */
+    public static boolean continuesOnFailure(String raw) {
+        return isAutomation(raw) || isCompatibility(raw);
     }
 
     /**
@@ -57,6 +82,9 @@ public final class RunTrack {
         if (isDebug(raw)) {
             return "试跑";
         }
+        if (isCompatibility(raw)) {
+            return "兼容性测试";
+        }
         return isAutomation(raw) ? "自动化编排" : "回归";
     }
 
@@ -70,6 +98,9 @@ public final class RunTrack {
     public static final String INSTALL = "INSTALL";
 
     public static List<String> catalogs(String raw) {
+        if (isCompatibility(raw)) {
+            return List.of("ONLINE", "AUTOMATION", "SHARED");
+        }
         return isAutomation(raw) ? List.of("AUTOMATION", "SHARED") : List.of("ONLINE", "SHARED");
     }
 

@@ -39,6 +39,11 @@ import java.util.concurrent.TimeUnit;
  * 解密的话 X5 WebView 不认用户证书，动态 import 会 Failed to fetch。
  * 不能改成 {@code --allow-hosts} 只开白名单：mitmproxy 按 host:port 匹配，
  * 正则对不上时会变成「全部放行、一条都抓不到」。
+ * <p>
+ * 测试环境 nginx 经常挂自签或过期证书（例如 {@code news-testing.wmpvp.com}
+ * 那张 2019 年的 {@code *.wmpvp.com}）。默认校验证书的话，白名单里这种域名
+ * 会报 {@code certificate has expired}，一条都抓不到。所以默认
+ * {@code --ssl-insecure}，只跳过上游校验，手机侧的 mitm 证书照常拦截。
  */
 @Slf4j
 @Service
@@ -58,9 +63,19 @@ public class PacketCaptureService {
     /**
      * 这些域名只转发、不解密。H5 页面和 CDN 必须走这里——解密的话
      * WebView 不认用户证书，动态加载的 JS 分包会直接 Failed to fetch。
+     * <p>
+     * {@code appengine.wmpvp.com}：商城 H5（news.wmpvp.com/gameMall.html）的 CORS 接口。
+     * 解密时 OPTIONS 常被上游打成 502，页面壳在、接口全挂，看起来像「接口打不开」。
      */
-    @Value("${app.capture.passthrough-hosts:pogpog.gg,unpkg.com}")
+    @Value("${app.capture.passthrough-hosts:pogpog.gg,unpkg.com,appengine.wmpvp.com}")
     private String passthroughHosts;
+
+    /**
+     * 不校验上游 HTTPS 证书。测试环境 nginx 自签/过期证书必须开，
+     * 否则白名单里的域名会报 certificate has expired，接口抓不到。
+     */
+    @Value("${app.capture.ssl-insecure:true}")
+    private boolean sslInsecure = true;
 
     private final CaptureStore captureStore;
     private final ObjectMapper json = new ObjectMapper();
@@ -141,7 +156,7 @@ public class PacketCaptureService {
      * @param sessionId 会话 id；传 {@code last} 表示上一场已结束的抓包
      */
     public JsonNode body(String sessionId, int seq) {
-        Path out = "last".equals(sessionId) ? lastOut : outOf(sessionId);
+        Path out = resolveOut(sessionId);
         if (out == null) {
             return null;
         }
@@ -154,9 +169,53 @@ public class PacketCaptureService {
         }
     }
 
-    private Path outOf(String sessionId) {
+    /**
+     * 找这场抓包的流水文件。
+     * <p>
+     * 内存里的 {@code lastOut} 一重启就没了，但磁盘和库还在——
+     * 点详情是抓完之后的事，不能靠 JVM 还没重启过。
+     */
+    private Path resolveOut(String sessionId) {
+        if (sessionId == null || sessionId.isBlank() || "last".equals(sessionId)) {
+            if (lastOut != null) {
+                return lastOut;
+            }
+            return latestFinishedOut();
+        }
         Session s = sessions.get(sessionId);
-        return s == null ? lastOut : s.outFile;
+        if (s != null) {
+            return s.outFile;
+        }
+        if (lastOut != null && lastOut.toString().contains(sessionId)) {
+            return lastOut;
+        }
+        try {
+            Path flow = captureStore.flowFileOf(sessionId);
+            return Files.exists(flow) ? flow : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Path latestFinishedOut() {
+        try {
+            var rows = captureStore.list(null, 1);
+            if (rows.isEmpty()) {
+                return null;
+            }
+            Object id = rows.get(0).get("id");
+            if (id == null) {
+                return null;
+            }
+            Path flow = captureStore.flowFileOf(String.valueOf(id));
+            return Files.exists(flow) ? flow : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Path outOf(String sessionId) {
+        return resolveOut(sessionId);
     }
 
     @Getter
@@ -199,7 +258,12 @@ public class PacketCaptureService {
                 resolveMitmdump(), "-q", "-p", String.valueOf(proxyPort),
                 "-s", script.toAbsolutePath().toString(),
                 "--set", "out=" + out.toAbsolutePath(),
-                "--set", "hosts=" + hostList));
+                "--set", "hosts=" + hostList,
+                // 响应改写规则。文件不存在＝不改写任何东西，所以一直传着没关系
+                "--set", "overrides=" + overrideRulesFile().toAbsolutePath()));
+        // 测试环境 nginx 自签/过期证书：不跳过校验就会变成
+        // 「白名单内的域名连不上（certificate has expired）」
+        appendSslInsecure(cmd, sslInsecure);
         // 只放行 H5/CDN，不解密。不能用 --allow-hosts 只开白名单：
         // mitmproxy 按 host:port 匹配，正则稍错就会变成「全部放行、一条都抓不到」。
         appendIgnoreHosts(cmd, passthroughHosts);
@@ -255,7 +319,39 @@ public class PacketCaptureService {
         // 反过来的话，手机会有一小段时间指向一个已经不存在的端口，整机断网
         exec("adb", "-s", deviceId, "shell", "settings", "put", "global", "http_proxy", ":0");
         exec("adb", "-s", deviceId, "shell", "settings", "delete", "global", "http_proxy");
+        exec("adb", "-s", deviceId, "shell", "settings", "delete", "global", "global_http_proxy_host");
+        exec("adb", "-s", deviceId, "shell", "settings", "delete", "global", "global_http_proxy_port");
         exec("adb", "-s", deviceId, "reverse", "--remove", "tcp:" + proxyPort);
+        // 有人会把 Wi‑Fi「手动代理」也设成 127.0.0.1:8080。全局代理清掉后那一项还在，
+        // 抓包一停整机就上不了网。清不掉也不拦结束——下面只是尽力而为
+        tryClearWifiManualProxy(deviceId);
+    }
+
+    /** 尽力关掉当前 Wi‑Fi 的手动代理；各厂商 cmd 不一，失败只打日志 */
+    private void tryClearWifiManualProxy(String deviceId) {
+        String ssid = currentWifiSsid(deviceId);
+        if (ssid == null || ssid.isBlank()) {
+            return;
+        }
+        execQuiet("adb", "-s", deviceId, "shell", "cmd", "wifi", "set-proxy", ssid, "none");
+    }
+
+    private String currentWifiSsid(String deviceId) {
+        try {
+            String out = execOut("adb", "-s", deviceId, "shell", "dumpsys", "wifi");
+            int i = out.indexOf("mWifiInfo SSID:");
+            if (i < 0) {
+                return null;
+            }
+            int q1 = out.indexOf('"', i);
+            int q2 = q1 < 0 ? -1 : out.indexOf('"', q1 + 1);
+            if (q1 < 0 || q2 < 0) {
+                return null;
+            }
+            return out.substring(q1 + 1, q2);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private String iosTip() {
@@ -391,12 +487,44 @@ public class PacketCaptureService {
     }
 
     /** 插件脚本打在 jar 里，跑之前先落到临时目录——mitmdump 只认文件路径 */
+    /**
+     * 把插件释放到临时目录。
+     *
+     * <p><b>两个文件都要释放</b>：{@code flow_writer.py} 里 {@code import api_override}
+     * 走的是同目录查找，只释放一个的话导入会失败——而那个失败是被 try 吞掉的
+     * （改写坏了不该连累抓包），表现就是「规则配了但一条都没生效」，
+     * 且没有任何报错。所以这两个文件必须一起走。
+     */
+    /**
+     * 响应改写规则文件的位置。
+     *
+     * <p>放在抓包目录下，和会话同寿命。规则里写了过期时间，
+     * Python 侧过期就一条都不生效——<b>忘了关的改写规则会污染之后所有的测试结果，
+     * 而那种污染没有任何迹象</b>：人只会看到一批莫名其妙的失败，
+     * 查半天才想起来代理上还挂着东西。
+     */
+    public Path overrideRulesFile() {
+        return captureStore.overrideRulesFile();
+    }
+
     private Path extractScript() throws IOException {
         Path target = Path.of(System.getProperty("java.io.tmpdir"), "mobile-standalone-flow-writer.py");
         try (InputStream in = new ClassPathResource("capture/flow_writer.py").getInputStream()) {
             Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
         }
+        // 必须和 flow_writer.py 同目录，且文件名就是模块名
+        Path helper = target.getParent().resolve("api_override.py");
+        try (InputStream in = new ClassPathResource("capture/api_override.py").getInputStream()) {
+            Files.copy(in, helper, StandardCopyOption.REPLACE_EXISTING);
+        }
         return target;
+    }
+
+    /** 包级可见：这条漏了，过期自签证书的测试域名会整段抓不到 */
+    static void appendSslInsecure(List<String> cmd, boolean insecure) {
+        if (insecure) {
+            cmd.add("--ssl-insecure");
+        }
     }
 
     private void appendIgnoreHosts(List<String> cmd, String passthrough) {
@@ -470,6 +598,22 @@ public class PacketCaptureService {
         } catch (Exception e) {
             log.warn("[capture] 命令失败 {}: {}", String.join(" ", cmd), e.getMessage());
         }
+    }
+
+    private void execQuiet(String... cmd) {
+        try {
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            p.waitFor(8, TimeUnit.SECONDS);
+        } catch (Exception ignore) {
+            // 清 Wi‑Fi 代理是尽力而为，各 ROM 命令不同
+        }
+    }
+
+    private String execOut(String... cmd) throws Exception {
+        Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        p.waitFor(12, TimeUnit.SECONDS);
+        return out;
     }
 
     private void sleep(long ms) {

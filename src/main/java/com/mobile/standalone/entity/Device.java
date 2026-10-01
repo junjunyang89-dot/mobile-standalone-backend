@@ -22,6 +22,60 @@ public class Device {
     private String environment;
     /** 哪台执行节点扫到的这台手机；控制面自己不扫设备 */
     private String workerId;
+
+    /**
+     * 这台是不是模拟器。
+     * <p>
+     * 单独存一列，而不是靠序列号前缀猜：本地 AVD 是 {@code emulator-5554} 没错，
+     * 但雷电、夜神、云真机都是以 {@code 127.0.0.1:5555} 这种形式连进来的，前缀判不出来。
+     * 扫描时读 getprop 定性，一次定死——同一个序列号不会一会儿是模拟器一会儿不是。
+     * <p>
+     * 存它是为了拦两件事：模拟器不能跑生产环境的流程（会去取生产账号变量），
+     * 也不能跑性能测试（帧率、启动耗时在模拟器上没有参考价值）。
+     */
+    private Boolean emulator;
+
+    /**
+     * 写在 getter 上：Jackson 默认走 getEmulator()，只标字段时前端拿到的是 {@code emulator}，
+     * 设备列表的「模拟器」标签就永远不亮。
+     */
+    @com.fasterxml.jackson.annotation.JsonProperty("isEmulator")
+    public Boolean getEmulator() {
+        return emulator;
+    }
+
+    @com.fasterxml.jackson.annotation.JsonProperty("isEmulator")
+    public void setEmulator(Boolean emulator) {
+        this.emulator = emulator;
+    }
+
+    /**
+     * 列为空时不当真机拦掉，但 {@code emulator-5554} 这种序列号没有歧义，
+     * 加列之前扫进来的 AVD 不能因此在设备池里显示成 0 台模拟器。
+     */
+    public static boolean isEmulator(Device d) {
+        if (d == null) return false;
+        if (Boolean.TRUE.equals(d.getEmulator())) return true;
+        if (d.getEmulator() != null) return false;
+        String id = d.getId() == null ? "" : d.getId().trim();
+        return id.startsWith("emulator-");
+    }
+
+    /**
+     * 上次派活的时间，设备池轮转用。
+     * <p>
+     * 轮转做成「谁闲得最久谁上」而不是转指针：设备会上线下线、会被人借走，
+     * 指针那套一遇到设备增减就乱，而这个不用记状态，天然均衡。
+     */
+    private LocalDateTime lastUsedAt;
+
+    /**
+     * 人工停用：坏了、在维护、被某个专项独占。
+     * <p>
+     * 与「离线」分开：离线是客观事实，停用是人的决定。混成一个的话，
+     * 一台在维护的设备只要还插着就会被继续派活，而拔掉它又会让人以为设备丢了。
+     */
+    private Boolean disabled;
     
     public enum Platform {
         ANDROID, IOS, HARMONYOS,

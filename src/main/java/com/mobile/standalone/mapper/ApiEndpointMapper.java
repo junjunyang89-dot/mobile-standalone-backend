@@ -17,9 +17,18 @@ public interface ApiEndpointMapper {
 
     ApiEndpoint findById(@Param("id") String id);
 
+    /** 不含用例统计；ids 不能为空 */
+    List<ApiEndpoint> findByIds(@Param("ids") List<String> ids);
+
     ApiEndpoint findByKey(@Param("project") String project,
                           @Param("httpMethod") String httpMethod,
                           @Param("path") String path);
+
+    /** 跨项目按 方法+路径 找，抓包认不出归属时用 */
+    List<ApiEndpoint> findByMethodPath(@Param("httpMethod") String httpMethod,
+                                       @Param("path") String path);
+
+    int updateProject(@Param("id") String id, @Param("project") String project);
 
     int countByProject(@Param("project") String project);
 
@@ -35,6 +44,20 @@ public interface ApiEndpointMapper {
 
     /** 分支上线：该分支接口并入 master（更新覆盖、新增挂上，变更标记清掉） */
     int promoteBranchToMaster(@Param("branch") String branch);
+
+    int updateAuthRequired(@Param("id") String id, @Param("authRequired") Boolean authRequired);
+
+    int updateCallers(@Param("id") String id,
+                      @Param("callersJson") String callersJson,
+                      @Param("callerStatus") String callerStatus);
+
+    int updateRetired(@Param("id") String id,
+                      @Param("retiredAt") java.time.LocalDateTime retiredAt,
+                      @Param("retiredBy") String retiredBy);
+
+    int updateLevel(@Param("id") String id,
+                    @Param("level") String level,
+                    @Param("setBy") String setBy);
 
     int deleteById(@Param("id") String id);
 

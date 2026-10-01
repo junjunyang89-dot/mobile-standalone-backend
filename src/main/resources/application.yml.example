@@ -1,5 +1,5 @@
 server:
-  port: 3000
+  port: 3080
   servlet:
     context-path: /api
 
@@ -8,9 +8,8 @@ spring:
     import: optional:file:.db-profile.properties
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    # 公司库走 SSH 隧道：先 ssh -N -L 3307:127.0.0.1:3306 yangjun@192.168.10.5
-    # yml 只写 127.0.0.1:3307，不要写 192.168.10.5
-    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3307}/${DB_NAME:mobile_standalone}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&connectionCollation=utf8mb4_unicode_ci
+    # 公司共享库公网直连
+    url: jdbc:mysql://${DB_HOST:118.25.144.133}:${DB_PORT:13306}/${DB_NAME:mobile_standalone}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&connectionCollation=utf8mb4_unicode_ci&connectTimeout=60000&socketTimeout=120000&tcpKeepAlive=true
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:}
     hikari:
@@ -32,6 +31,36 @@ mybatis:
 app:
   node:
     role: ALL
+
+# 主菜单 AI助手 → Cursor SDK。密钥用环境变量，勿把生产 key 写进仓库
+# export CURSOR_API_KEY=cursor_...
+# cursor.ask.cwd 默认指向本机业务代码根目录
+cursor:
+  ask:
+    enabled: true
+    api-key: ${CURSOR_API_KEY:}
+    cwd: ${user.home}/projects/qa_coding/app_coding
+    # 环境搭建要同时看见服务源码、k8s-config、skills
+    k8s-cwd: ${user.home}/projects/qa_coding
+    model: default
+    timeout-seconds: 300
+    k8s-timeout-seconds: 600
+
+# 抓包：H5/CDN/商城网关解密会搞挂页面，默认原样转发（不解密）
+# app:
+#   capture:
+#     passthrough-hosts: pogpog.gg,unpkg.com,appengine.wmpvp.com
+
+# 发版文档 / 上线看板（账号密码放本机 application.yml，勿提交）
+# release-doc:
+#   wiki-base-url: https://wiki.shdev.net
+#   username: your.name
+#   password: ***
+#   branch-keywords:
+#     - app-engine
+#     - esports-api
+#     - app-community
+#     - data-center
 
 appium:
   enabled: true

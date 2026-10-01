@@ -8,6 +8,7 @@ import com.mobile.standalone.service.driver.PlatformDriver;
 import lombok.Builder;
 import lombok.Getter;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -85,6 +86,15 @@ public class KeywordContext {
          */
         public final java.util.List<com.mobile.standalone.service.UiElementHealthService.ElementUsage>
                 elementUsages = new java.util.ArrayList<>();
+
+        /**
+         * MEMORY_CHECKPOINT 打下的内存点（PSS KB），按打点顺序。
+         * <p>
+         * 攒在这里而不是从执行日志文案里解析：文案是给人看的，随时可能改一个字，
+         * 而靠正则从文案里捞数字，改文案的人完全不会意识到自己弄坏了内存泄漏分析——
+         * <b>坏掉的样子还是「没泄漏」</b>，没有任何报错。
+         */
+        public final java.util.List<Long> memoryCheckpoints = new java.util.ArrayList<>();
 
         public RunState(boolean earlyReturn, String returnMessage) {
             this.earlyReturn = earlyReturn;
@@ -254,17 +264,63 @@ public class KeywordContext {
      */
     public UiFlowExecutionException fail(String title, String detail, String locator, String errorMessage)
             throws UiFlowExecutionException {
+        // 元素类步骤失败：顺手回答「应用是不是根本没在前台」。
+        // 这一下要跑 adb，但只在已经失败的路径上——流程已经要停了，多花半秒换一句
+        // 能直接指方向的话，比让人对着「点击失败: xxx」猜半天划算得多
+        if (elementKey != null && !elementKey.isBlank()) {
+            try {
+                String hint = runtime.foregroundMismatchHint(
+                        driver, deviceId, platform, uiAppId, stepParams, execParams);
+                if (hint != null && !hint.isBlank()) {
+                    detail = detail + "。" + hint;
+                    errorMessage = errorMessage + "（" + hint + "）";
+                }
+            } catch (Exception ignored) {
+                // 诊断失败不能盖过真正的失败原因
+            }
+        }
         logs.add(ExecutionLogEntryDto.fail(sn(title), detail, locator, elementKey));
         throw new UiFlowExecutionException(errorMessage, logs);
     }
 
     // —— 常用回调的快捷方式 ——
 
+    /**
+     * 定位展开用的变量：流程执行参数 + 本步参数。
+     * 同名时步骤覆盖流程，这样同一个「按文案点」元素可以在同页点五次、每次文案不同。
+     */
+    public Map<String, String> locatorParams() {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (execParams != null) {
+            out.putAll(execParams);
+        }
+        if (stepParams != null) {
+            for (Map.Entry<String, Object> e : stepParams.entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                if (e.getValue() instanceof List<?> || e.getValue() instanceof Map<?, ?>) {
+                    continue;
+                }
+                String v = String.valueOf(e.getValue()).trim();
+                if (!v.isEmpty()) {
+                    out.put(e.getKey(), v);
+                }
+            }
+        }
+        return out;
+    }
+
     public List<String> selectors(String stepName) throws UiFlowExecutionException {
         if (resolvedSelectors != null && !resolvedSelectors.isEmpty()) {
             return resolvedSelectors;
         }
-        return runtime.requireSelectors(platform, uiAppId, elementKey, execParams, logs, sn(stepName));
+        return selectorsFor(elementKey, stepName);
+    }
+
+    /** 本步主元素以外的另一个元素（依次进入后要点的跳转、返回） */
+    public List<String> selectorsFor(String otherKey, String stepName) throws UiFlowExecutionException {
+        return runtime.requireSelectors(platform, uiAppId, otherKey, locatorParams(), logs, sn(stepName));
     }
 
     public String selector(String stepName) throws UiFlowExecutionException {
@@ -303,6 +359,21 @@ public class KeywordContext {
     /** 组件调用：子流程可能绑定了别的应用字典 */
     public KeywordContext withUiAppId(String childUiAppId) {
         return toBuilder().uiAppId(childUiAppId).build();
+    }
+
+    /** 调用组件时把本步填的文案变量并进子流程 */
+    public KeywordContext withExecParams(Map<String, String> childExec) {
+        return toBuilder().execParams(childExec).build();
+    }
+
+    /** 本步再覆盖一个参数（依次点击里每一轮的年份），后写的盖住文案变量里的同名固定值 */
+    public KeywordContext overlayStepParam(String key, String value) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (stepParams != null) {
+            merged.putAll(stepParams);
+        }
+        merged.put(key, value);
+        return toBuilder().stepParams(merged).build();
     }
 
     public KeywordContextBuilder toBuilder() {

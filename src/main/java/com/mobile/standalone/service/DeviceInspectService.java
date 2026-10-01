@@ -23,6 +23,7 @@ import org.w3c.dom.NodeList;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -30,10 +31,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -61,6 +66,22 @@ public class DeviceInspectService {
     private final ConcurrentHashMap<String, int[]> lastScreenshotSizeByDevice = new ConcurrentHashMap<>();
     /** 与最近一次截图同一时刻的 page source，避免滚动后 dump 与截图不一致 / 长列表 bounds 干扰 */
     private final ConcurrentHashMap<String, String> lastPageSourceByDevice = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> hierarchyGen = new ConcurrentHashMap<>();
+    /**
+     * {@link #lastPageSourceByDevice} 里那棵树是第几代的。
+     * <p>它小于 {@link #hierarchyGen} 就说明<b>树比截图旧</b>——录制时这是致命的：
+     * 人对着新截图点，却按旧树去认元素，认出来的是上一屏的控件。
+     */
+    private final ConcurrentHashMap<String, Long> hierarchyReadyGen = new ConcurrentHashMap<>();
+    /** 存着那棵树是什么时候抓的。代数只说「有没有更新过」，时间才说得清「有多旧」 */
+    private final ConcurrentHashMap<String, Long> hierarchyAt = new ConcurrentHashMap<>();
+    /** 超过这个岁数的树，录制时一律不认——宁可现抓也不能拿它认元素 */
+    private static final long HIERARCHY_MAX_AGE_MS = 2500;
+    private final ExecutorService hierarchyRefresh = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "inspect-hierarchy-refresh");
+        t.setDaemon(true);
+        return t;
+    });
 
     @Autowired(required = false)
     private AppiumDriverAdapter appiumDriverAdapter;
@@ -72,7 +93,120 @@ public class DeviceInspectService {
     private DeviceManager deviceManager;
 
     public SnapshotResult snapshot(String deviceId) {
-        Device device = requireConnected(deviceId);
+        return captureScreen(deviceId, true, false, false);
+    }
+
+    /**
+     * 录制自己已经占着 RECORD 锁，再走普通 snapshot 会被当成「外人来采集」拒掉。
+     * 真机点选、任务占用仍然拦。
+     */
+    public SnapshotResult snapshotForRecording(String deviceId) {
+        return captureScreen(deviceId, true, true, true);
+    }
+
+    /**
+     * 录制点完一步：先出截图，dump 丢到后台。
+     * 点一下如果同步 dump，模拟器上 uiautomator 经常等到超时，左边一直转圈、设备上也不点。
+     */
+    public SnapshotResult snapshotAfterRecordingAction(String deviceId) {
+        // 只出图，不 dump。树在 hitTestForRecording 里当场抓——
+        // 这里也去 dump 的话，2 秒一次的自动补帧会把 uiautomator 占满，
+        // 真正需要树的那一刻反而抓不到
+        return captureScreen(deviceId, false, true, true);
+    }
+
+    private void refreshHierarchyAsync(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) return;
+        String id = deviceId.trim();
+        long gen = hierarchyGen.merge(id, 1L, Long::sum);
+        hierarchyRefresh.execute(() -> {
+            // 「被新一代取代了就放弃」这条本身没错，但它会饿死：
+            // 录制页每 2 秒自动补一帧，而慢设备上一次 dump 要两三秒——
+            // 每个排队的任务都在轮到自己之前就被下一代作废，于是<b>一次都跑不完</b>，
+            // 树永远停在会话刚开始那一刻（那时多半还是桌面）。
+            // 所以：只要手上这棵树已经旧到不能用了，就不许再放弃，必须跑完一次。
+            if (hierarchyGen.getOrDefault(id, 0L) != gen && !hierarchyStale(id)) return;
+            try {
+                Device device = requireConnected(id, true);
+                String xml = fetchPageSource(id, device, true);
+                if (usableHierarchy(xml)) {
+                    lastPageSourceByDevice.put(id, xml);
+                    hierarchyReadyGen.put(id, gen);
+                    hierarchyAt.put(id, System.currentTimeMillis());
+                }
+            } catch (Exception e) {
+                log.warn("录制后台 dump 失败: deviceId={} {}", id, e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * 等这台设备的控件树追上最新一次截图。
+     *
+     * <p><b>这是录制正确性的地基。</b>「点完立刻出图、dump 丢后台」让界面不卡，
+     * 但代价是有一段时间：<b>截图是新的，树还是旧的</b>。
+     * 人在这段时间里点下一步，就是拿新画面的坐标去旧树上找控件——
+     * 找出来的是上一屏那个位置的控件，而且<b>看起来完全正常</b>：
+     * 名字像模像样，locator 也是个真 id，只是它属于上一个界面（甚至属于桌面）。
+     * 一直要到回放时才炸，而那时早已看不出是哪一步串了位。
+     *
+     * <p>所以录制的每一次点击之前都必须在这里等一下。宁可让人多等几百毫秒，
+     * 也不能让他录出一条自己都不知道错在哪的流程。
+     *
+     * <p>等超时了就<b>同步 dump 一次</b>——慢总比错好。
+     */
+    public void awaitHierarchyFresh(String deviceId, long timeoutMs) {
+        if (deviceId == null || deviceId.isBlank()) return;
+        String id = deviceId.trim();
+        long want = hierarchyGen.getOrDefault(id, 0L);
+        long deadline = System.currentTimeMillis() + Math.max(0, timeoutMs);
+        while (want > 0 && hierarchyReadyGen.getOrDefault(id, -1L) < want
+                && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        // 代数追上了还不够，还得够新。代数只保证「更新过」，
+        // 而饿死的场景里代数可以一直追平、树却是十分钟前的
+        if (want > 0 && hierarchyReadyGen.getOrDefault(id, -1L) >= want && !hierarchyStale(id)) {
+            return;
+        }
+        // 后台那次没赶上（dump 超时、设备卡）。自己同步抓一次，
+        // 别把一棵旧树交出去——旧树的害处是「悄悄记错」，比「等久一点」严重得多
+        try {
+            Device device = requireConnected(id, true);
+            String xml = fetchPageSource(id, device, true);
+            if (usableHierarchy(xml)) {
+                lastPageSourceByDevice.put(id, xml);
+                hierarchyReadyGen.put(id, hierarchyGen.getOrDefault(id, want));
+                hierarchyAt.put(id, System.currentTimeMillis());
+                log.info("[record] 后台 dump 没赶上或树太旧，已同步补一次: deviceId={}", id);
+            }
+        } catch (Exception e) {
+            log.warn("[record] 同步补 dump 失败 deviceId={}: {}", id, e.getMessage());
+        }
+    }
+
+    /** 手上这棵树是不是已经旧到不能拿来认元素了 */
+    private boolean hierarchyStale(String deviceId) {
+        Long at = hierarchyAt.get(deviceId);
+        return at == null || System.currentTimeMillis() - at > HIERARCHY_MAX_AGE_MS;
+    }
+
+    /**
+     * 只拍当前屏，不 dump 控件树。
+     * 执行中预览用这条：snapshot() 会顺带抓 page source，跟正在跑的 Appium 会话抢，装包时尤其慢。
+     */
+    public SnapshotResult preview(String deviceId) {
+        return captureScreen(deviceId, false, false, false);
+    }
+
+    private SnapshotResult captureScreen(String deviceId, boolean withHierarchy,
+                                         boolean allowRecordingHolder, boolean dumpOnly) {
+        Device device = requireConnected(deviceId, allowRecordingHolder);
         try {
             Files.createDirectories(SCREENSHOTS_DIR);
         } catch (Exception e) {
@@ -115,13 +249,15 @@ public class DeviceInspectService {
             lastScreenshotSizeByDevice.put(id, size);
         }
 
-        // 与截图同一时刻冻结控件树，点选时不要再现场 dump（手机滚动后树会变，长列表 max bounds 也会把坐标映射坏）
-        String xml = fetchPageSource(deviceId, device);
-        if (usableHierarchy(xml)) {
-            lastPageSourceByDevice.put(id, xml);
-        } else {
-            lastPageSourceByDevice.remove(id);
-            log.warn("snapshot 未拿到 page source，后续 hit-test 将尝试现场 dump: deviceId={}", id);
+        if (withHierarchy) {
+            // 与截图同一时刻冻结控件树，点选时不要再现场 dump（手机滚动后树会变，长列表 max bounds 也会把坐标映射坏）
+            String xml = fetchPageSource(deviceId, device, dumpOnly);
+            if (usableHierarchy(xml)) {
+                lastPageSourceByDevice.put(id, xml);
+            } else {
+                lastPageSourceByDevice.remove(id);
+                log.warn("snapshot 未拿到 page source，后续 hit-test 将尝试现场 dump: deviceId={}", id);
+            }
         }
 
         long ts = System.currentTimeMillis();
@@ -245,12 +381,62 @@ public class DeviceInspectService {
 
     public HitTestResult hitTest(String deviceId, Double xRatio, Double yRatio, Integer x, Integer y,
                                  String appId) {
-        return hitTest(deviceId, xRatio, yRatio, x, y, appId, null);
+        return hitTest(deviceId, xRatio, yRatio, x, y, appId, null, false, true);
     }
 
     public HitTestResult hitTest(String deviceId, Double xRatio, Double yRatio, Integer x, Integer y,
                                  String appId, String elementKey) {
-        Device device = requireConnected(deviceId);
+        return hitTest(deviceId, xRatio, yRatio, x, y, appId, elementKey, false, true);
+    }
+
+    /**
+     * 录制点一下：<b>当场 dump，用刚抓的树认元素</b>。
+     *
+     * <p>这里推翻了原来的做法，值得写清楚为什么。
+     *
+     * <p>原来是「用上一次冻住的树」，理由是现场 dump 又慢又容易超时。听着合理，
+     * 实际上埋了一个没有下限的坑：那棵树只在<b>成功抓到</b>时才会被替换。
+     * 一旦设备慢到 dump 连续失败（1 核模拟器 + Appium 抢 uiautomator，很常见），
+     * 树就<b>永远停在最后一次成功的那一刻</b>——往往是会话刚开始、应用还没起来、
+     * 桌面还在的时候。于是人对着应用画面点，平台拿桌面的树去认，
+     * 认出来的全是 {@code nexuslauncher} 的控件。
+     *
+     * <p>更糟的是它<b>不会报错</b>：树是完整的、locator 是合法的、matchCount 也正常，
+     * 只是它描述的是另一个界面。加代数、加时间戳都只能缓解，不能根治——
+     * 根子在于「用旧数据」这件事本身是可以静默失败的。
+     *
+     * <p>所以换成：每次点击当场抓。慢（这台机器上一两秒），但树和点击之间不再有任何窗口。
+     * 抓不到就退回坐标点击并说明原因，绝不拿旧树顶上。
+     *
+     * <p>配套地，录制页那个每 2 秒的自动补帧<b>不再触发 dump</b>——
+     * 它只需要画面跟上。让它也去 dump 的话，慢设备上排队的 dump 会一直互相顶掉，
+     * 谁都跑不完，这正是上面那个「树永远停在开头」的直接成因。
+     */
+    public HitTestResult hitTestForRecording(String deviceId, Double xRatio, Double yRatio,
+                                             Integer x, Integer y, String appId) {
+        return hitTest(deviceId, xRatio, yRatio, x, y, appId, true, true);
+    }
+
+    /** 录制滑动：把截图上的 0~1 换成截图像素，和点选用同一套尺寸。 */
+    public int[] mapRatioToPixels(String deviceId, double xRatio, double yRatio) {
+        Device device = requireConnected(deviceId, true);
+        int[] shotSize = resolveShotSize(deviceId, device);
+        if (shotSize == null || shotSize[0] <= 0 || shotSize[1] <= 0) {
+            throw new IllegalStateException("无法读取截图/屏幕尺寸");
+        }
+        int x = (int) Math.round(clamp01(xRatio) * (shotSize[0] - 1));
+        int y = (int) Math.round(clamp01(yRatio) * (shotSize[1] - 1));
+        return new int[]{x, y};
+    }
+
+    private HitTestResult hitTest(String deviceId, Double xRatio, Double yRatio, Integer x, Integer y,
+                                 String appId, boolean allowRecordingHolder, boolean liveDump) {
+        return hitTest(deviceId, xRatio, yRatio, x, y, appId, null, allowRecordingHolder, liveDump);
+    }
+
+    private HitTestResult hitTest(String deviceId, Double xRatio, Double yRatio, Integer x, Integer y,
+                                 String appId, String elementKey, boolean allowRecordingHolder, boolean liveDump) {
+        Device device = requireConnected(deviceId, allowRecordingHolder);
         String id = deviceId.trim();
         int[] shotSize = resolveShotSize(deviceId, device);
         if (shotSize == null || shotSize[0] <= 0 || shotSize[1] <= 0) {
@@ -270,16 +456,20 @@ public class DeviceInspectService {
             throw new IllegalArgumentException("请传 xRatio/yRatio 或像素 x/y");
         }
 
-        // Android / 鸿蒙：每次点选都重新 dump；iOS 优先用冻结树
+        // 真机点选：Android / 鸿蒙每次重新 dump。录制：只用冻结树，dump 失败也要能点下去。
         String xml;
-        if (Device.isAndroidOrPogAndroid(device.getPlatform()) || Device.usesHdcAutomation(device.getPlatform())) {
-            xml = fetchPageSource(deviceId, device);
+        boolean androidOrHarmony = Device.isAndroidOrPogAndroid(device.getPlatform())
+                || Device.usesHdcAutomation(device.getPlatform());
+        if (liveDump && androidOrHarmony) {
+            xml = fetchPageSource(deviceId, device, allowRecordingHolder);
             if (usableHierarchy(xml)) {
                 lastPageSourceByDevice.put(id, xml);
+                hierarchyReadyGen.put(id, hierarchyGen.getOrDefault(id, 0L));
+                hierarchyAt.put(id, System.currentTimeMillis());
             }
         } else {
             xml = lastPageSourceByDevice.get(id);
-            if (!usableHierarchy(xml)) {
+            if (!usableHierarchy(xml) && liveDump) {
                 xml = fetchPageSource(deviceId, device);
                 if (usableHierarchy(xml)) {
                     lastPageSourceByDevice.put(id, xml);
@@ -287,6 +477,11 @@ public class DeviceInspectService {
             }
         }
         if (!usableHierarchy(xml)) {
+            // 录制场景：抓不到树也要让这一步点得下去，退回坐标并在 warnings 里说清楚。
+            // 关键是<b>不能拿上一次的旧树顶上</b>——旧树会安静地认出别的界面的控件
+            if (allowRecordingHolder) {
+                return coordinateOnlyResult(deviceId, device, shotX, shotY, shotSize);
+            }
             throw new IllegalStateException(
                     "无法获取控件树：请先点「刷新截图」。"
                             + (Device.usesHdcAutomation(device.getPlatform())
@@ -343,6 +538,7 @@ public class DeviceInspectService {
         // 坐标始终作为可选方案之一；H5/WebView 无子树时提到最前并写明原因
         hits = appendCoordinateCandidate(hits, px, py, shotSize[0], shotSize[1]);
         hits = promoteCoordinateWhenOnlyH5Shell(hits);
+        stampLocatorLayers(hits);
         String platform = device.getPlatform() != null ? device.getPlatform().name() : null;
         enrichMatchedElements(hits, appId, platform);
 
@@ -500,6 +696,25 @@ public class DeviceInspectService {
         return px >= left && px < right && py >= top && py < bottom;
     }
 
+    /** 录制时树还没冻住：先按截图坐标点下去，不要卡在 dump 上让人以为没反应 */
+    private HitTestResult coordinateOnlyResult(String deviceId, Device device, int px, int py, int[] shotSize) {
+        HitTestResult result = new HitTestResult();
+        result.setDeviceId(deviceId);
+        result.setPlatform(device.getPlatform() != null ? device.getPlatform().name() : null);
+        result.setX(px);
+        result.setY(py);
+        result.setWidth(shotSize[0]);
+        result.setHeight(shotSize[1]);
+        List<HitCandidate> only = appendCoordinateCandidate(null, px, py, shotSize[0], shotSize[1]);
+        stampLocatorLayers(only);
+        result.setCandidates(only);
+        result.setWarnings(List.of("这一刻没抓到控件树（设备太慢，或 uiautomator 被 Appium 占着），"
+                + "这一步只能记成坐标点击。宁可退坐标也不用上一次的旧树——"
+                + "旧树会安安静静地认出别的界面的控件。等一下再点，或先点「刷新截图」。"));
+        return result;
+    }
+    }
+
     /** 坐标方案追加到末尾，不抢默认首选 */
     private static List<HitCandidate> appendCoordinateCandidate(List<HitCandidate> hits, int px, int py,
                                                                 int screenW, int screenH) {
@@ -560,11 +775,12 @@ public class DeviceInspectService {
             for (HitCandidate c : others) {
                 String type = c.getLocatorType() != null ? c.getLocatorType().toLowerCase(Locale.ROOT) : "";
                 String val = c.getLocatorValue() != null ? c.getLocatorValue() : "";
-                boolean shellLike = val.contains("WebView")
+                boolean shellLike = isH5PageShellLocator(type, val)
                         || isAppChromeLabel(c.getText())
                         || isAppChromeLabel(c.getSuggestedNameZh())
                         || isAppChromeLabel(val)
-                        || ("classname".equals(type) && (val.contains("FrameLayout") || val.contains("ViewGroup")));
+                        || ("classname".equals(type) && (val.contains("FrameLayout") || val.contains("ViewGroup")
+                        || val.contains("LinearLayout")));
                 if (!shellLike) {
                     onlyShell = false;
                     break;
@@ -581,7 +797,8 @@ public class DeviceInspectService {
             }
         }
         coord.setSuggestedNameZh("H5坐标点选");
-        coord.setVisualHint("动态/社区列表在 WebView 内，原生树看不到帖子卡片；请用坐标，或点原生 Tab/评论框。"
+        coord.setVisualHint("搜索框/商品卡在 X5 里，原生树只有 layoutMain、vg_web_root 这类大壳，"
+                + "resource-id 点不到「请输入搜索关键词」。请用本坐标点搜索框，输入用「EditText输入」。"
                 + " 坐标 " + coord.getLocatorValue());
         List<HitCandidate> out = new ArrayList<>();
         out.add(coord);
@@ -591,6 +808,10 @@ public class DeviceInspectService {
     }
 
     private Device requireConnected(String deviceId) {
+        return requireConnected(deviceId, false);
+    }
+
+    private Device requireConnected(String deviceId, boolean allowRecordingHolder) {
         if (deviceId == null || deviceId.isBlank()) {
             throw new IllegalArgumentException("deviceId 不能为空");
         }
@@ -604,6 +825,9 @@ public class DeviceInspectService {
         // 采集会 dump 控件树并操作前台，和正在跑的任务/回归互斥
         DeviceLockService.Holder holder = deviceLockService.current(deviceId.trim());
         if (holder != null) {
+            if (allowRecordingHolder && holder.kind() == DeviceLockService.Kind.RECORD) {
+                return device;
+            }
             throw new IllegalStateException("设备 " + deviceId + " 正被占用：" + holder.describe()
                     + "。请等其结束后再采集元素。");
         }
@@ -611,6 +835,10 @@ public class DeviceInspectService {
     }
 
     private String fetchPageSource(String deviceId, Device device) {
+        return fetchPageSource(deviceId, device, false);
+    }
+
+    private String fetchPageSource(String deviceId, Device device, boolean dumpOnly) {
         if (Device.usesHdcAutomation(device.getPlatform())) {
             try {
                 String raw = platformRouter.getDriver(device).getPageSource(deviceId);
@@ -649,6 +877,10 @@ public class DeviceInspectService {
                 }
             }
             boolean dumpUsable = dump != null && dump.contains("<");
+            // 录制必须快、不能跟 Appium 抢 uiautomator，否则点一下左边就转圈卡死
+            if (dumpOnly) {
+                return dumpUsable ? dump : null;
+            }
             // 协议 / 温馨提示页仍旧只信 dump：这类页面 Appium 建会话本身就容易出问题，
             // 而它们的控件又极少，多窗口带不来任何好处。留着这条保护不亏
             if (dumpUsable && looksLikePrivacyWarmTip(dump)) {
@@ -750,6 +982,10 @@ public class DeviceInspectService {
                 log.info("点选丢弃误导候选 side_layout");
                 continue;
             }
+            if (isH5PageShellLocator(type, val)) {
+                log.info("点选丢弃 H5 页壳: {} {}", type, val);
+                continue;
+            }
             // 全屏 WebView 壳：动态/社区 H5 里点帖子只会命中这层，不能当定位
             if ("classname".equals(type) && val.contains("WebView")) {
                 log.info("点选丢弃 WebView className 壳");
@@ -769,7 +1005,8 @@ public class DeviceInspectService {
                 boolean huge = area >= screenArea * 0.85;
                 if (huge
                         && ("classname".equals(type) || "xpath".equals(type))
-                        && (val.contains("FrameLayout") || val.contains("side_layout") || val.contains("WebView"))) {
+                        && (val.contains("FrameLayout") || val.contains("LinearLayout")
+                        || val.contains("side_layout") || val.contains("WebView"))) {
                     log.info("点选丢弃全屏容器候选: {} {}", type, val);
                     continue;
                 }
@@ -792,6 +1029,33 @@ public class DeviceInspectService {
         return kept;
     }
 
+    /**
+     * 商城/社区 H5：原生树只有整页容器，点搜索框也会命中这些 id。
+     * 不能当定位，否则执行时点的是整页壳，输入框毫无反应。
+     */
+    static boolean isH5PageShellLocator(String type, String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String v = value.toLowerCase(Locale.ROOT);
+        boolean idLike = type == null
+                || type.isBlank()
+                || "id".equals(type)
+                || "resource-id".equals(type)
+                || "resourceid".equals(type)
+                || "xpath".equals(type);
+        if (idLike && (v.contains("layoutmain")
+                || v.contains("vg_web_root")
+                || v.contains("vg_webroot")
+                || v.contains("pwx5webview")
+                || v.contains("pwx5refreshwebview")
+                || v.contains("id/web_root")
+                || v.contains("id/webview"))) {
+            return true;
+        }
+        return v.contains("pwx5webview") || v.contains("pwx5refreshwebview");
+    }
+
     /** 顶栏/壳上的品牌名，不能当内容区点选结果 */
     private static boolean isAppChromeLabel(String label) {
         if (label == null || label.isBlank()) return false;
@@ -804,6 +1068,45 @@ public class DeviceInspectService {
         return "完美世界电竞".equals(s)
                 || "PogPog".equalsIgnoreCase(s)
                 || "Steam".equalsIgnoreCase(s);
+    }
+
+    /**
+     * 点选方案分三层：原生控件、H5 壳（WebView 容器）、H5 内容（壳里面的搜索框/卡片）。
+     * 后两层不能用 resource-id 当「就是你点的那个字」。
+     */
+    static final String LAYER_NATIVE = "NATIVE";
+    static final String LAYER_H5_SHELL = "H5_SHELL";
+    static final String LAYER_H5 = "H5";
+
+    static void stampLocatorLayers(List<HitCandidate> hits) {
+        if (hits == null) {
+            return;
+        }
+        for (HitCandidate c : hits) {
+            c.setLayer(classifyLocatorLayer(c));
+        }
+    }
+
+    static String classifyLocatorLayer(HitCandidate c) {
+        if (c == null) {
+            return LAYER_NATIVE;
+        }
+        String type = c.getLocatorType() != null ? c.getLocatorType().toLowerCase(Locale.ROOT) : "";
+        String val = c.getLocatorValue() != null ? c.getLocatorValue() : "";
+        String hint = (c.getVisualHint() != null ? c.getVisualHint() : "")
+                + (c.getSuggestedNameZh() != null ? c.getSuggestedNameZh() : "");
+        if (isH5PageShellLocator(type, val)
+                || (c.getResourceId() != null && isH5PageShellLocator("id", c.getResourceId()))
+                || (c.getClassName() != null && c.getClassName().contains("WebView"))) {
+            return LAYER_H5_SHELL;
+        }
+        if ("coordinate".equals(type) || "coord".equals(type) || "tap".equals(type)) {
+            if (hint.contains("H5") || hint.contains("WebView") || hint.contains("X5")
+                    || hint.contains("layoutMain") || hint.contains("vg_web")) {
+                return LAYER_H5;
+            }
+        }
+        return LAYER_NATIVE;
     }
 
     /** 完美世界电竞首启「温馨提示」协议弹窗（及同类 id） */
@@ -838,34 +1141,107 @@ public class DeviceInspectService {
         return n;
     }
 
-    /** 可靠 dump：写入设备文件再 pull，避开 MiUI dump /dev/tty 时 stdout 混入异常栈 */
+    /**
+     * dump 控件树。模拟器上 {@code uiautomator dump} 常卡在 waitForIdle，
+     * 12 秒还不杀的话录制左边会一直转。先 exec-out，再文件，超时 5 秒并清掉残留进程。
+     */
     private String dumpUiAutomatorXml(String deviceId) {
-        String remote = "/sdcard/ms_inspect_uidump.xml";
+        String viaExec = dumpUiAutomatorExecOut(deviceId);
+        if (viaExec != null) return viaExec;
+        return dumpUiAutomatorFilePull(deviceId);
+    }
+
+    private String dumpUiAutomatorExecOut(String deviceId) {
         try {
-            Process dump = new ProcessBuilder("adb", "-s", deviceId, "shell", "uiautomator", "dump", remote)
+            Process dump = new ProcessBuilder("adb", "-s", deviceId, "exec-out",
+                    "uiautomator", "dump", "--compressed", "/dev/tty")
                     .redirectErrorStream(true)
                     .start();
-            // 消费输出，避免阻塞
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(dump.getInputStream()))) {
-                while (r.readLine() != null) { /* drain */ }
+            ByteArrayOutputStream buf = new ByteArrayOutputStream();
+            if (!awaitProcess(dump, 5, buf)) {
+                killStuckUiAutomator(deviceId);
+                log.warn("uiautomator exec-out dump 超时: deviceId={}", deviceId);
+                return null;
             }
-            dump.waitFor();
+            return extractHierarchyXml(buf.toString(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            log.debug("exec-out dump 失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String dumpUiAutomatorFilePull(String deviceId) {
+        String remote = "/sdcard/ms_inspect_uidump.xml";
+        try {
+            Process dump = new ProcessBuilder("adb", "-s", deviceId, "shell",
+                    "uiautomator", "dump", "--compressed", remote)
+                    .redirectErrorStream(true)
+                    .start();
+            if (!awaitProcess(dump, 5, null)) {
+                killStuckUiAutomator(deviceId);
+                log.warn("uiautomator dump 超时: deviceId={}", deviceId);
+                return null;
+            }
             Path local = SCREENSHOTS_DIR.resolve("uidump_" + deviceId.replaceAll("[^a-zA-Z0-9._-]", "_") + ".xml");
             Files.createDirectories(SCREENSHOTS_DIR);
             Process pull = new ProcessBuilder("adb", "-s", deviceId, "pull", remote, local.toString())
                     .redirectErrorStream(true)
                     .start();
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(pull.getInputStream()))) {
-                while (r.readLine() != null) { /* drain */ }
+            if (!awaitProcess(pull, 5, null)) {
+                return null;
             }
-            pull.waitFor();
             if (!Files.isRegularFile(local)) {
                 return null;
             }
-            return Files.readString(local, StandardCharsets.UTF_8);
+            return extractHierarchyXml(Files.readString(local, StandardCharsets.UTF_8));
         } catch (Exception e) {
             log.warn("dumpUiAutomatorXml 失败: {}", e.getMessage());
             return null;
+        }
+    }
+
+    /** 先异步排空 stdout，再限时等进程。同步读会在 dump 卡住时永远走不到 waitFor。 */
+    private static boolean awaitProcess(Process p, int seconds, ByteArrayOutputStream capture)
+            throws InterruptedException {
+        ByteArrayOutputStream dest = capture != null ? capture : new ByteArrayOutputStream();
+        Thread drain = new Thread(() -> {
+            try (var in = p.getInputStream()) {
+                in.transferTo(dest);
+            } catch (Exception ignored) {
+                // 进程被杀时流会断
+            }
+        }, "adb-drain");
+        drain.setDaemon(true);
+        drain.start();
+        if (!p.waitFor(seconds, TimeUnit.SECONDS)) {
+            p.destroyForcibly();
+            drain.join(500);
+            return false;
+        }
+        drain.join(500);
+        return true;
+    }
+
+    static String extractHierarchyXml(String raw) {
+        if (raw == null) return null;
+        int start = raw.indexOf('<');
+        if (start < 0) return null;
+        int end = raw.lastIndexOf('>');
+        if (end <= start) return null;
+        String xml = raw.substring(start, end + 1);
+        return xml.contains("hierarchy") || xml.contains("<node") ? xml : null;
+    }
+
+    private static void killStuckUiAutomator(String deviceId) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "pkill", "-f", "uiautomator")
+                    .redirectErrorStream(true)
+                    .start();
+            if (!p.waitFor(2, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+            }
+        } catch (Exception ignored) {
+            // 清残留失败不挡下一步点击
         }
     }
 
@@ -1141,14 +1517,16 @@ public class DeviceInspectService {
         if (px < 240 && py < 320) {
             return HitZone.TITLE_LEFT;
         }
+        if (findMergedH5FilterNode(null, labelPool, px, py) != null
+                || findMergedH5FilterNode(null, scoped, px, py) != null) {
+            return HitZone.H5_FILTER;
+        }
         if (scoped != null) {
             for (HitNode n : scoped) {
                 String sid = shortResourceId(n.resourceId);
                 if (isListRowBadgeId(sid) || "cv_activity_card".equalsIgnoreCase(sid)) {
                     return HitZone.LIST_CARD;
                 }
-                String lab = firstNonBlank(n.text, n.contentDesc);
-                if (pickMergedH5FilterLabel(lab, n, px) != null) return HitZone.H5_FILTER;
             }
         }
         return HitZone.DEFAULT;
@@ -1206,6 +1584,9 @@ public class DeviceInspectService {
                 }
             }
             case LIST_CARD, H5_FILTER, DEFAULT -> {
+                if (zone == HitZone.H5_FILTER) {
+                    prependH5FilterSplit(out, seen, labelPool, px, py);
+                }
                 if (zone == HitZone.DEFAULT) {
                     HitCandidate stripTab = buildScopedTabCandidate(scoped, labelPool, px, py);
                     if (stripTab != null) {
@@ -1289,6 +1670,11 @@ public class DeviceInspectService {
         for (HitNode n : texts) {
             if (added >= 3 || out.size() >= 10) break;
             String t = firstNonBlank(n.text, n.contentDesc).trim();
+            if (pickMergedH5FilterLabel(t, n, px) != null) {
+                prependH5FilterSplitFromNode(out, seen, n, px);
+                added++;
+                continue;
+            }
             HitCandidate text = baseCandidate(n, t);
             text.setLocatorType("text");
             text.setLocatorValue(t);
@@ -1334,6 +1720,29 @@ public class DeviceInspectService {
                     out.add(clickable);
                 }
             }
+        }
+    }
+
+    /** 评论筛选条拆段置顶，避免父壳 / 底栏文案抢首选 */
+    private void prependH5FilterSplit(List<HitCandidate> out, java.util.LinkedHashSet<String> seen,
+                                      List<HitNode> labelPool, int px, int py) {
+        HitNode filter = findMergedH5FilterNode(null, labelPool, px, py);
+        if (filter == null) return;
+        prependH5FilterSplitFromNode(out, seen, filter, px);
+    }
+
+    private void prependH5FilterSplitFromNode(List<HitCandidate> out, java.util.LinkedHashSet<String> seen,
+                                              HitNode filter, int px) {
+        if (filter == null) return;
+        String merged = firstNonBlank(filter.text, filter.contentDesc);
+        String splitFilter = pickMergedH5FilterLabel(merged, filter, px);
+        if (splitFilter == null) return;
+        for (HitCandidate c : buildH5FilterSplitCandidates(filter, merged, splitFilter, px)) {
+            if (c.getLocatorValue() == null || c.getLocatorValue().isBlank()) continue;
+            String key = c.getLocatorType() + "|" + c.getLocatorValue();
+            if (!seen.add(key)) continue;
+            c.setRank(out.size());
+            out.add(c);
         }
     }
 
@@ -2167,6 +2576,86 @@ public class DeviceInspectService {
         };
     }
 
+    /**
+     * 找评论筛选合并节点：自身 / 点上的子节点 / 祖先 / 略偏下的同列条。
+     * 点「最新」时红框常罩到下面赞数，父壳自己没有这串 text。
+     */
+    private static HitNode findMergedH5FilterNode(HitNode around, List<HitNode> pool, int px, int py) {
+        if (pool == null || px < 0) return null;
+        HitNode best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (HitNode o : pool) {
+            if (o == null || !o.displayed) continue;
+            String t = firstNonBlank(o.text, o.contentDesc);
+            if (orderedMergedFilterHits(t).size() < 2) continue;
+            boolean covers = py >= 0 && o.left <= px && px < o.right && o.top <= py && py < o.bottom;
+            boolean sameColumnNear = o.left <= px && px < o.right
+                    && py >= o.top - 16
+                    && py < o.bottom + 180;
+            boolean aroundInside = around != null && isTreeDescendantOrSelf(around, o);
+            boolean childOfAround = around != null && isTreeDescendantOrSelf(o, around)
+                    && o.left <= px && px < o.right
+                    && Math.abs(((o.top + o.bottom) / 2) - Math.max(py, o.top)) < 160;
+            boolean overlapsHit = around != null
+                    && around.left < o.right && around.right > o.left
+                    && around.top < o.bottom + 8 && around.bottom > o.top
+                    && o.left <= px && px < o.right
+                    && around.area() < 200_000;
+            if (!covers && !sameColumnNear && !aroundInside && !childOfAround && !overlapsHit) continue;
+            int score = 0;
+            if (covers) score += 80;
+            else if (sameColumnNear) score += 40;
+            score -= Math.min(40, o.area() / 20_000);
+            if (best == null || score > bestScore || (score == bestScore && o.area() < best.area())) {
+                best = o;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private List<HitCandidate> buildH5FilterSplitCandidates(HitNode n, String mergedSrc, String splitFilter, int px) {
+        List<HitCandidate> list = new ArrayList<>();
+        if (n == null || splitFilter == null) return list;
+        HitNode web = findAncestorByShortId(n, "pwX5WebView");
+        String webId = web != null && web.resourceId != null
+                ? web.resourceId.trim()
+                : "com.pwrd.steam.esports:id/pwX5WebView";
+        Map<String, Integer> segBounds = segmentBoundsForMergedFilter(n, mergedSrc, splitFilter, px);
+        HitCandidate split = baseCandidate(n, splitFilter);
+        split.setBounds(segBounds);
+        split.setLocatorType("xpath");
+        split.setLocatorValue("//*[@resource-id=" + xpathLiteral(webId)
+                + "]//*[contains(@text," + xpathLiteral(splitFilter) + ")]");
+        split.setSuggestedNameZh(splitFilter);
+        split.setSuggestedNameEn(mergedFilterNameEn(splitFilter));
+        split.setVisualHint("H5合并拆分 · " + splitFilter + " · 红框为估算段；执行点击可用坐标更准");
+        split.setText(splitFilter);
+        list.add(split);
+
+        int sl = segBounds.getOrDefault("left", n.left);
+        int st = segBounds.getOrDefault("top", n.top);
+        int sr = segBounds.getOrDefault("right", n.right);
+        int sb = segBounds.getOrDefault("bottom", n.bottom);
+        int cx = (sl + sr) / 2;
+        int cy = (st + sb) / 2;
+        HitCandidate segCoord = baseCandidate(n, splitFilter);
+        segCoord.setBounds(segBounds);
+        segCoord.setLocatorType("coordinate");
+        segCoord.setLocatorValue(cx + "," + cy);
+        segCoord.setSuggestedNameZh(splitFilter);
+        segCoord.setSuggestedNameEn(mergedFilterNameEn(splitFilter) + "_tap");
+        segCoord.setVisualHint("段中心坐标 (" + cx + "," + cy + ") · 精确点「" + splitFilter + "」");
+        list.add(segCoord);
+        return list;
+    }
+
+    private static boolean nodeInStrip(HitNode n, String containerShortId) {
+        if (n == null || containerShortId == null) return false;
+        if (containerShortId.equalsIgnoreCase(shortResourceId(n.resourceId))) return true;
+        return findAncestorByShortId(n, containerShortId) != null;
+    }
+
     private static boolean isBottomNavTabLabel(String label) {
         if (label == null || isNoiseLabel(label)) return false;
         return switch (label.trim()) {
@@ -2189,8 +2678,9 @@ public class DeviceInspectService {
 
     /**
      * 底栏图标格子常无 text，「我的」在兄弟 TextView。按点击 X（或节点中心）对齐找最近底栏文案。
+     * 必须点在条上，或节点本身就在条里——评论区右侧和「我的」同列，绝不能只靠 X。
      */
-    private static String findStripLabelNear(TabStripDef strip, HitNode n, List<HitNode> pool, int px) {
+    private static String findStripLabelNear(TabStripDef strip, HitNode n, List<HitNode> pool, int px, int py) {
         if (strip == null || pool == null) return null;
         HitNode bar = findAncestorByShortId(n, strip.containerShortId);
         if (bar == null) {
@@ -2202,6 +2692,11 @@ public class DeviceInspectService {
             }
         }
         if (bar == null) return null;
+        boolean nodeInBar = n != null && isTreeDescendantOrSelf(n, bar);
+        boolean clickOnBar = px >= 0 && py >= 0
+                && px >= bar.left && px < bar.right
+                && py >= bar.top - 24 && py < bar.bottom + 24;
+        if (!nodeInBar && !clickOnBar) return null;
         int anchorX = px >= 0 ? px : (n != null ? (n.left + n.right) / 2 : -1);
         if (anchorX < 0) return null;
         HitNode best = null;
@@ -2252,7 +2747,7 @@ public class DeviceInspectService {
             }
             if (!hitBar) continue;
 
-            String tabLabel = findStripLabelNear(strip, bar, labelPool, px);
+            String tabLabel = findStripLabelNear(strip, bar, labelPool, px, py);
             if (tabLabel == null) continue;
 
             HitNode labelNode = null;
@@ -2657,50 +3152,23 @@ public class DeviceInspectService {
                 nestedLabel = null;
             }
         }
-        String nearBottom = findStripLabelNear(TAB_STRIPS.get(0), n, labelPool, px);
-        String nearMine = findStripLabelNear(TAB_STRIPS.get(1), n, labelPool, px);
-        // 命名优先用控件自身文案
+        String nearBottom = findStripLabelNear(TAB_STRIPS.get(0), n, labelPool, px, py);
+        String nearMine = findStripLabelNear(TAB_STRIPS.get(1), n, labelPool, px, py);
+        // 命名优先用控件自身文案；底栏文案绝不能当评论区父壳的名字
         String displayName = firstNonBlank(ownLabel, nestedLabel, nearMine, nearBottom);
         boolean unstableId = isUnstableResourceId(n.resourceId) || isBottomTabSharedId(n.resourceId);
         boolean hasId = n.resourceId != null && !n.resourceId.isBlank() && !"null".equalsIgnoreCase(n.resourceId);
 
         // H5 评论筛选条：无障碍把多 Tab 挤成一串 text → 按点击 X 拆成单段
-        String mergedSrc = firstNonBlank(ownLabel, nestedLabel, displayName);
-        String splitFilter = pickMergedH5FilterLabel(mergedSrc, n, px);
+        HitNode filterNode = findMergedH5FilterNode(n, labelPool, px, py);
+        String mergedSrc = filterNode != null
+                ? firstNonBlank(filterNode.text, filterNode.contentDesc)
+                : firstNonBlank(ownLabel, nestedLabel);
+        HitNode splitBase = filterNode != null ? filterNode : n;
+        String splitFilter = pickMergedH5FilterLabel(mergedSrc, splitBase, px);
         boolean h5FilterSplit = splitFilter != null;
         if (h5FilterSplit) {
-            HitNode web = findAncestorByShortId(n, "pwX5WebView");
-            String webId = web != null && web.resourceId != null
-                    ? web.resourceId.trim()
-                    : "com.pwrd.steam.esports:id/pwX5WebView";
-            Map<String, Integer> segBounds = segmentBoundsForMergedFilter(n, mergedSrc, splitFilter, px);
-            HitCandidate split = baseCandidate(n, splitFilter);
-            split.setBounds(segBounds);
-            split.setLocatorType("xpath");
-            split.setLocatorValue("//*[@resource-id=" + xpathLiteral(webId)
-                    + "]//*[contains(@text," + xpathLiteral(splitFilter) + ")]");
-            split.setSuggestedNameZh(splitFilter);
-            split.setSuggestedNameEn(mergedFilterNameEn(splitFilter));
-            split.setVisualHint("H5合并拆分 · " + splitFilter + " · 红框为估算段；执行点击可用坐标更准");
-            split.setText(splitFilter);
-            list.add(split);
-
-            // 段中心坐标：真正点「最新」时比点整条栏更稳
-            int sl = segBounds.getOrDefault("left", n.left);
-            int st = segBounds.getOrDefault("top", n.top);
-            int sr = segBounds.getOrDefault("right", n.right);
-            int sb = segBounds.getOrDefault("bottom", n.bottom);
-            int cx = (sl + sr) / 2;
-            int cy = (st + sb) / 2;
-            HitCandidate segCoord = baseCandidate(n, splitFilter);
-            segCoord.setBounds(segBounds);
-            segCoord.setLocatorType("coordinate");
-            segCoord.setLocatorValue(cx + "," + cy);
-            segCoord.setSuggestedNameZh(splitFilter);
-            segCoord.setSuggestedNameEn(mergedFilterNameEn(splitFilter) + "_tap");
-            segCoord.setVisualHint("段中心坐标 (" + cx + "," + cy + ") · 精确点「" + splitFilter + "」");
-            list.add(segCoord);
-
+            list.addAll(buildH5FilterSplitCandidates(splitBase, mergedSrc, splitFilter, px));
             // 表单展示用单段名；勿再推 exact @text=单段或整串（树里实际是整串）
             displayName = splitFilter;
             ownLabel = null;
@@ -2723,10 +3191,14 @@ public class DeviceInspectService {
                 }
             }
             if (bar == null || bar.resourceId == null) continue;
+            if (!nodeInStrip(n, strip.containerShortId)
+                    && findStripLabelNear(strip, n, labelPool, px, py) == null) {
+                continue;
+            }
             String tabLabel = firstNonBlank(
                     (ownLabel != null && strip.labels.contains(ownLabel.trim())) ? ownLabel : null,
                     (nestedLabel != null && strip.labels.contains(nestedLabel.trim())) ? nestedLabel : null,
-                    findStripLabelNear(strip, n, labelPool, px));
+                    findStripLabelNear(strip, n, labelPool, px, py));
             if (tabLabel == null) continue;
             HitCandidate scoped = baseCandidate(n, tabLabel);
             scoped.setLocatorType("xpath");
@@ -3048,6 +3520,7 @@ public class DeviceInspectService {
         c.setText(n.text);
         c.setContentDesc(n.contentDesc);
         c.setResourceId(n.resourceId);
+        c.setPackageName(n.attrs == null ? null : n.attrs.get("package"));
         c.setClickable(n.clickable);
         c.setEnabled(n.enabled);
         Map<String, Integer> box = Map.of("left", n.left, "top", n.top, "right", n.right, "bottom", n.bottom);
@@ -3094,36 +3567,56 @@ public class DeviceInspectService {
             } else if ("取消".equals(trimmed) && ownExact) {
                 c.setSuggestedNameEn("logout_cancel");
                 c.setSuggestedNameZh("取消退出");
-            } else if ("发现".equals(trimmed)) {
-                c.setSuggestedNameEn("home_tab_discover");
-                c.setSuggestedNameZh("底栏发现");
-            } else if ("赛事".equals(trimmed)) {
-                c.setSuggestedNameEn("home_tab_match");
-                c.setSuggestedNameZh("底栏赛事");
-            } else if ("社区".equals(trimmed)) {
-                c.setSuggestedNameEn("home_tab_community");
-                c.setSuggestedNameZh("底栏社区");
-            } else if ("数据".equals(trimmed)) {
-                c.setSuggestedNameEn("home_tab_data");
-                c.setSuggestedNameZh("底栏数据");
-            } else if ("我的".equals(trimmed)) {
-                c.setSuggestedNameEn("home_tab_mine");
-                c.setSuggestedNameZh("底栏我的");
-            } else if ("动态".equals(trimmed)) {
-                c.setSuggestedNameEn("mine_tab_feed");
-                c.setSuggestedNameZh("我的-动态");
-            } else if ("评论".equals(trimmed)) {
-                c.setSuggestedNameEn("mine_tab_comment");
-                c.setSuggestedNameZh("我的-评论");
-            } else if ("梗词条".equals(trimmed)) {
-                c.setSuggestedNameEn("mine_tab_meme");
-                c.setSuggestedNameZh("我的-梗词条");
-            } else if ("完美时刻".equals(trimmed)) {
-                c.setSuggestedNameEn("mine_tab_moment");
-                c.setSuggestedNameZh("我的-完美时刻");
-            } else if ("留言".equals(trimmed)) {
-                c.setSuggestedNameEn("mine_tab_guestbook");
-                c.setSuggestedNameZh("我的-留言");
+            } else if (isBottomNavTabLabel(trimmed) && nodeInStrip(n, "bottomTabLayout")) {
+                switch (trimmed) {
+                    case "发现" -> {
+                        c.setSuggestedNameEn("home_tab_discover");
+                        c.setSuggestedNameZh("底栏发现");
+                    }
+                    case "赛事" -> {
+                        c.setSuggestedNameEn("home_tab_match");
+                        c.setSuggestedNameZh("底栏赛事");
+                    }
+                    case "社区" -> {
+                        c.setSuggestedNameEn("home_tab_community");
+                        c.setSuggestedNameZh("底栏社区");
+                    }
+                    case "数据" -> {
+                        c.setSuggestedNameEn("home_tab_data");
+                        c.setSuggestedNameZh("底栏数据");
+                    }
+                    case "我的" -> {
+                        c.setSuggestedNameEn("home_tab_mine");
+                        c.setSuggestedNameZh("底栏我的");
+                    }
+                    default -> {
+                    }
+                }
+            } else if (isMineContentTabLabel(trimmed) && nodeInStrip(n, "view_mine_tab")) {
+                switch (trimmed) {
+                    case "动态" -> {
+                        c.setSuggestedNameEn("mine_tab_feed");
+                        c.setSuggestedNameZh("我的-动态");
+                    }
+                    case "评论" -> {
+                        c.setSuggestedNameEn("mine_tab_comment");
+                        c.setSuggestedNameZh("我的-评论");
+                    }
+                    case "梗词条" -> {
+                        c.setSuggestedNameEn("mine_tab_meme");
+                        c.setSuggestedNameZh("我的-梗词条");
+                    }
+                    case "完美时刻" -> {
+                        c.setSuggestedNameEn("mine_tab_moment");
+                        c.setSuggestedNameZh("我的-完美时刻");
+                    }
+                    case "留言" -> {
+                        c.setSuggestedNameEn("mine_tab_guestbook");
+                        c.setSuggestedNameZh("我的-留言");
+                    }
+                    default -> {
+                    }
+                }
             }
         } else {
             String shortId = shortResourceId(n.resourceId);
@@ -3168,7 +3661,8 @@ public class DeviceInspectService {
                 int dist = Math.abs(ocx - px) + Math.abs(ocy - py);
                 score += Math.max(0, 80 - dist / 20);
             }
-            if (isKnownStripTabLabel(t)) score += 120;
+            if (isKnownStripTabLabel(t) && covers) score += 120;
+            if (orderedMergedFilterHits(t).size() >= 2 && covers) score += 180;
             score += Math.min(30, t.trim().length() * 3);
             int area = o.area();
             if (area > 0 && area < 50_000) score += 5;
@@ -3288,8 +3782,12 @@ public class DeviceInspectService {
             s -= 45;
         }
         // 底栏 / 我的内容 Tab 文案：避免被大容器 / 红点「·」盖住
-        if (isKnownStripTabLabel(label)) {
+        if ((isBottomNavTabLabel(label) && nodeInStrip(n, "bottomTabLayout"))
+                || (isMineContentTabLabel(label) && nodeInStrip(n, "view_mine_tab"))) {
             s += 28;
+        }
+        if (orderedMergedFilterHits(label).size() >= 2) {
+            s += 42;
         }
         if (isNoiseLabel(label)) {
             s -= 40;
@@ -3366,6 +3864,57 @@ public class DeviceInspectService {
     }
 
     // ==================== Inspector 式控件树：整棵交给前端，选哪个节点是人的事 ====================
+
+    /**
+     * 读当前屏 WebView 的完整 URL（尽量含 hash）。
+     * <p>
+     * 先保证 Appium 会话（与点选截图同一路），再切 WEBVIEW context。
+     * X5 读不到时返回 available=false 和说明，不抛错。
+     */
+    public Map<String, Object> webviewUrl(String deviceId) {
+        Device device = requireConnected(deviceId);
+        if (appiumDriverAdapter == null) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("available", false);
+            out.put("url", "");
+            out.put("context", "");
+            out.put("contexts", List.of());
+            out.put("message", "Appium 未启用，无法读 H5 URL");
+            return out;
+        }
+        String id = deviceId.trim();
+        if (Device.isAndroidOrPogAndroid(device.getPlatform())) {
+            if (appiumServerManager != null) {
+                appiumServerManager.ensureRunning();
+            }
+            if (!appiumDriverAdapter.attachAndroidUiSession(id)) {
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("available", false);
+                out.put("url", "");
+                out.put("context", "");
+                out.put("contexts", List.of());
+                out.put("message", "挂接 Android Appium 会话失败，请确认设备已连接且 Appium 可用");
+                return out;
+            }
+            return appiumDriverAdapter.readWebViewUrl(id);
+        }
+        if (Device.usesIosAutomation(device.getPlatform())) {
+            try {
+                // 触发/复用 iOS 会话；失败则仍尝试读（可能已有会话）
+                appiumDriverAdapter.getPageSource(id);
+            } catch (Exception e) {
+                log.debug("读 H5 URL 前取 iOS pageSource: {}", e.getMessage());
+            }
+            return appiumDriverAdapter.readWebViewUrl(id);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("available", false);
+        out.put("url", "");
+        out.put("context", "");
+        out.put("contexts", List.of());
+        out.put("message", "当前平台暂不支持读 H5 URL（仅 Android / iOS）");
+        return out;
+    }
 
     /**
      * 返回当前屏的完整控件树，供前端做「截图 + 树」双栏：所有节点边框叠加、hover 高亮、点树选中。
@@ -3833,6 +4382,12 @@ public class DeviceInspectService {
         private int rank;
         private String className;
         private String resourceId;
+        /**
+         * 这个控件属于哪个应用。
+         * <p>录制时用它挡住「点到桌面 / 系统弹窗上去了」——那种控件长得跟正常元素一模一样
+         * （有 id、有文案、locator 也合法），但它不属于被测应用，录进流程回放必然失败。
+         */
+        private String packageName;
         private String text;
         private String contentDesc;
         private Boolean clickable;
@@ -3855,6 +4410,12 @@ public class DeviceInspectService {
         private Integer matchCount;
         /** matchCount == 1；无法校验时为 null */
         private Boolean unique;
+        /**
+         * NATIVE：原生树里的真实控件，可用 id/文案/xpath。
+         * H5_SHELL：WebView 大壳，id 能点到但不是你看到的字。
+         * H5：壳里面的内容，原生定位无效，用坐标（或以后切 WEBVIEW）。
+         */
+        private String layer;
     }
 }
 

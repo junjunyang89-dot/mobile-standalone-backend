@@ -81,6 +81,8 @@ python3 scripts/harmony/hmdriver_bridge.py list-devices
 
 启动应用包名可写 `bundleName`，或 `bundleName/AbilityName`。
 
+设备池里的**鸿蒙模拟器**（DevEco Phone Emulator 启停）见 `docs/设备池-主控机搭建.md` 第四节。模拟器起来之后同样走 `hdc list targets`，序列号一般是 `127.0.0.1:端口`。
+
 ## 4. 真机注意
 
 - 开发者模式、USB 调试（hdc）、信任电脑

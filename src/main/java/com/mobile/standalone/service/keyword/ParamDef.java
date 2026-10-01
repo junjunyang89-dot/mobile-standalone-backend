@@ -66,6 +66,10 @@ public record ParamDef(
         return new ParamDef(name, label, Type.TEXTAREA, false, null, null, null, null);
     }
 
+    public static ParamDef requiredText(String name, String label) {
+        return new ParamDef(name, label, Type.TEXTAREA, true, null, null, null, null);
+    }
+
     public static ParamDef number(String name, String label, Number defaultValue) {
         return new ParamDef(name, label, Type.NUMBER, false, defaultValue, null, null, null);
     }

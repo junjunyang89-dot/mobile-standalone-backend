@@ -39,6 +39,24 @@ public class DeviceInspectController {
         }
     }
 
+    /**
+     * 执行中看屏：只截图，不 dump 控件树。
+     * 和 snapshot 分开，避免装包/跑步骤时再去抢 Appium 的 page source。
+     */
+    @GetMapping("/{id}/inspect/preview")
+    public ResponseEntity<?> preview(@PathVariable String id) {
+        try {
+            return ResponseEntity.ok(deviceInspectService.preview(id));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "预览失败"));
+        }
+    }
+
     /** 返回该设备最近一次点选截图（image/png 或 jpeg） */
     @GetMapping(value = "/{id}/inspect/screenshot")
     public ResponseEntity<byte[]> screenshot(@PathVariable String id,
@@ -77,6 +95,24 @@ public class DeviceInspectController {
         } catch (Exception e) {
             return ResponseEntity.internalServerError()
                     .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "命中失败"));
+        }
+    }
+
+    /**
+     * 读当前 WebView 完整地址（含 hash，若 Appium 能进 WEBVIEW context）。
+     * X5 等读不到时 available=false，message 说明原因。
+     */
+    @GetMapping("/{id}/inspect/webview-url")
+    public ResponseEntity<?> webviewUrl(@PathVariable String id) {
+        try {
+            return ResponseEntity.ok(deviceInspectService.webviewUrl(id));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "读取 H5 URL 失败"));
         }
     }
 

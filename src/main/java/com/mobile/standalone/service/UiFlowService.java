@@ -51,6 +51,14 @@ public class UiFlowService {
                 jdbcTemplate.execute("ALTER TABLE ui_flows ADD COLUMN release_stage VARCHAR(16) NOT NULL DEFAULT 'ONLINE' "
                         + "COMMENT 'TESTING=本版新功能，线上包没有；ONLINE=已上线可常驻' AFTER env_bound");
             }
+            Integer c = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ui_flows' AND COLUMN_NAME = 'is_core'",
+                    Integer.class);
+            if (c != null && c == 0) {
+                jdbcTemplate.execute("ALTER TABLE ui_flows ADD COLUMN is_core TINYINT(1) NOT NULL DEFAULT 0 "
+                        + "COMMENT '核心流程：兼容性测试只跑这一批' AFTER release_stage");
+            }
         } catch (Exception e) {
             org.slf4j.LoggerFactory.getLogger(UiFlowService.class)
                     .warn("[ui-flows] env_bound 列检查失败: {}", e.getMessage());
@@ -70,8 +78,13 @@ public class UiFlowService {
     /** name 按流程名称模糊匹配 */
     public List<UiFlow> list(String appId, String platform, String catalog,
                              Boolean componentOnly, String environment, String name) {
+        return list(appId, platform, catalog, componentOnly, environment, name, null);
+    }
+
+    public List<UiFlow> list(String appId, String platform, String catalog,
+                             Boolean componentOnly, String environment, String name, Boolean coreOnly) {
         return uiFlowMapper.findByFilters(blankToNull(appId), blankToNull(platform),
-                blankToNull(catalog), componentOnly, blankToNull(environment), blankToNull(name));
+                blankToNull(catalog), componentOnly, blankToNull(environment), blankToNull(name), coreOnly);
     }
 
     /** 回归勾选列表：轨道为回归（ONLINE/SHARED）、启用、非组件，按 sort_order */
@@ -97,7 +110,8 @@ public class UiFlowService {
     public List<UiFlow> listForBatch(String appId, String platform, String environment,
                                      String track, boolean releasedPackage) {
         return uiFlowMapper.findForBatch(blankToNull(appId), blankToNull(platform),
-                TestEnvironment.normalize(environment), RunTrack.catalogs(track), releasedPackage);
+                TestEnvironment.normalize(environment), RunTrack.catalogs(track), releasedPackage,
+                RunTrack.isCompatibility(track));
     }
 
     /** 新建流程默认 TESTING：本版新写的流程，线上包里还没有对应功能 */
@@ -209,19 +223,65 @@ public class UiFlowService {
             flow.setCatalog("SHARED");
         }
         flow.setEnvironment(TestEnvironment.normalize(flow.getEnvironment()));
+        // release_stage 是 NOT NULL，而这里以前不兜底——调用方只要没显式设，
+        // INSERT 就直接被数据库打回来（列上的 DEFAULT 救不了：INSERT 显式列出了这一列并传了 null，
+        // DEFAULT 只在整列被省略时才生效）。上面那些字段个个都兜了底，唯独漏了它
+        flow.setReleaseStage(normalizeReleaseStage(flow.getReleaseStage()));
         // 默认绑环境：装包类误标成不绑会把测试 debug 包装进线上回归
         if (flow.getEnvBound() == null) flow.setEnvBound(true);
+        if (flow.getCore() == null) flow.setCore(false);
         if (flow.getIsComponent() == null) flow.setIsComponent(false);
         if (flow.getEnabled() == null) flow.setEnabled(true);
         if (flow.getSortOrder() == null) flow.setSortOrder(100);
         flow.setId("uif-" + UUID.randomUUID());
         flow.setName(flow.getName().trim());
+        // 署名由服务端盖，<b>覆盖掉请求体里传进来的值</b>。
+        // 这个字段原先是 @RequestBody 里的一个普通字段，谁都能填任何名字——署名等于没有，
+        // 而且伪造没有任何痕迹。取不到登录人（定时任务、组件复制）时留 null，
+        // 比编一个名字诚实
+        flow.setCreatedBy(com.mobile.standalone.auth.CurrentUser.nameOrNull());
         validateDependencies(flow);
         LocalDateTime now = LocalDateTime.now();
         flow.setCreatedAt(now);
         flow.setUpdatedAt(now);
         uiFlowMapper.insert(flow);
         return flow;
+    }
+
+    /**
+     * 复制一条流程：步骤原样带走，名字加「副本」，新 id。
+     * 用例关联不复制——那是另一条流程的绑定，拷过去容易人以为两边还连着。
+     */
+    @Transactional
+    public UiFlow copy(String id) {
+        UiFlow src = uiFlowMapper.findById(id);
+        if (src == null) {
+            return null;
+        }
+        UiFlow copy = new UiFlow();
+        copy.setName(uniqueCopyName(src.getName()));
+        copy.setDescription(src.getDescription());
+        copy.setAppId(src.getAppId());
+        copy.setPlatform(src.getPlatform());
+        copy.setCatalog(src.getCatalog());
+        copy.setEnvironment(src.getEnvironment());
+        copy.setEnvBound(src.getEnvBound());
+        copy.setReleaseStage(src.getReleaseStage());
+        copy.setIsComponent(src.getIsComponent());
+        copy.setSteps(src.getSteps());
+        copy.setDependsOn(src.getDependsOn());
+        copy.setEnabled(src.getEnabled());
+        copy.setSortOrder(src.getSortOrder());
+        return create(copy);
+    }
+
+    private String uniqueCopyName(String raw) {
+        String base = (raw == null || raw.isBlank()) ? "未命名流程" : raw.trim();
+        // 名字不强制唯一，只保证一眼能看出是副本；连点两次就自然变成「… 副本 副本」
+        if (base.endsWith(" 副本")) {
+            return base;
+        }
+        return base + " 副本";
     }
 
     @Transactional
@@ -237,6 +297,10 @@ public class UiFlowService {
             existing.setEnvironment(TestEnvironment.normalize(patch.getEnvironment()));
         }
         if (patch.getEnvBound() != null) existing.setEnvBound(patch.getEnvBound());
+        if (patch.getReleaseStage() != null) {
+            existing.setReleaseStage(normalizeReleaseStage(patch.getReleaseStage()));
+        }
+        if (patch.getCore() != null) existing.setCore(patch.getCore());
         if (patch.getIsComponent() != null) existing.setIsComponent(patch.getIsComponent());
         if (patch.getSteps() != null) existing.setSteps(patch.getSteps());
         if (patch.getEnabled() != null) existing.setEnabled(patch.getEnabled());

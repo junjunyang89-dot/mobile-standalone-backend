@@ -4,6 +4,10 @@ import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.mapper.DeviceMapper;
 import com.mobile.standalone.service.AutomationEngine;
 import com.mobile.standalone.service.DeviceManager;
+import com.mobile.standalone.service.h5.H5CdpLink;
+import com.mobile.standalone.service.h5.H5ContextPages;
+import com.mobile.standalone.service.h5.H5DomClick;
+import com.mobile.standalone.service.h5.H5WebViewJs;
 import com.mobile.standalone.util.LocatorTemplate;
 import io.appium.java_client.AppiumBy;
 import io.appium.java_client.AppiumDriver;
@@ -34,6 +38,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -183,18 +188,25 @@ public class AppiumDriverAdapter implements PlatformDriver {
                 driver = new AndroidDriver(url, opts);
                 applyAndroidUiStabilitySettings(driver);
             } else if (Device.usesIosAutomation(dp)) {
-                // 本机已有 WDA+iproxy 占着 wdaLocalPort 时，不能再让 Appium 去绑同一端口，否则报
-                // "The port #8101 is occupied" → 表现为「无法启动应用程序」
-                int wdaPort = wdaLocalPortFor(deviceId);
-                String wdaUrl = "http://127.0.0.1:" + wdaPort;
-                if (!deviceManager.ensureIosWdaRunning(deviceId, wdaPort)) {
-                    log.error("无法拉起本机 WDA（test-without-building+iproxy）: deviceId={}, port={}", deviceId, wdaPort);
-                    return false;
-                }
                 XCUITestOptions opts = buildIosOptions(deviceId, packageName);
-                opts.setWebDriverAgentUrl(wdaUrl);
-                opts.setForceAppLaunch(true);
-                log.info("iOS launchApp 挂接已运行的 WDA: {} bundle={}", wdaUrl, packageName);
+                if (deviceManager.isIosSimulator(deviceId)) {
+                    // Simulator 上 Appium 自己编/拉 WDA，不走真机那套 iproxy + 签名安装
+                    opts.setUsePrebuiltWda(false);
+                    opts.setForceAppLaunch(true);
+                    log.info("iOS launchApp 走 Simulator: udid={} bundle={}", deviceId, packageName);
+                } else {
+                    // 本机已有 WDA+iproxy 占着 wdaLocalPort 时，不能再让 Appium 去绑同一端口，否则报
+                    // "The port #8101 is occupied" → 表现为「无法启动应用程序」
+                    int wdaPort = wdaLocalPortFor(deviceId);
+                    String wdaUrl = "http://127.0.0.1:" + wdaPort;
+                    if (!deviceManager.ensureIosWdaRunning(deviceId, wdaPort)) {
+                        log.error("无法拉起本机 WDA（test-without-building+iproxy）: deviceId={}, port={}", deviceId, wdaPort);
+                        return false;
+                    }
+                    opts.setWebDriverAgentUrl(wdaUrl);
+                    opts.setForceAppLaunch(true);
+                    log.info("iOS launchApp 挂接已运行的 WDA: {} bundle={}", wdaUrl, packageName);
+                }
                 driver = new IOSDriver(url, opts);
             } else {
                 log.warn("Appium 驱动暂不支持平台: {}", device.getPlatform());
@@ -769,6 +781,17 @@ public class AppiumDriverAdapter implements PlatformDriver {
     public boolean attachAndroidUiSession(String deviceId) {
         if (deviceId == null || deviceId.isBlank()) return false;
         AppiumDriver existing = sessions.get(deviceId);
+        // 缓存里有会话 ≠ 那个会话还活着。
+        // Appium 的 newCommandTimeout（我们设的 300 秒）一到，服务端会把会话干掉，
+        // 而这边的对象还在 map 里躺着——之后每条命令都会撞上
+        // 「A session is either terminated or not started」，而且<b>永远不会自愈</b>，
+        // 因为没有任何一处会把死掉的会话从 map 里摘出去。
+        // 人的体感是「点选用着用着就废了，重启后端才好」。
+        if (existing != null && !sessionAlive(existing)) {
+            log.info("缓存的 Appium 会话已失效（多半是 newCommandTimeout 到了），重建: deviceId={}", deviceId);
+            quitQuietly(sessions.remove(deviceId));
+            existing = null;
+        }
         if (existing instanceof AndroidDriver androidDriver) {
             applyAndroidMultiWindowSettings(androidDriver);
             return true;
@@ -1780,6 +1803,89 @@ public class AppiumDriverAdapter implements PlatformDriver {
     }
 
     @Override
+    public boolean inputTextToFocusedEditText(String deviceId, String selector, String text) {
+        String value = text != null ? text : "";
+        if (selector != null && !selector.isBlank()) {
+            // 点不开也继续：半屏可能已经起来，占位节点已从树上消失
+            clickElement(deviceId, selector);
+            sleepQuiet(450);
+        }
+        WebElement field = findFocusedEditField(deviceId);
+        if (field != null) {
+            try {
+                field.click();
+            } catch (Exception ignored) {
+            }
+            sleepQuiet(180);
+        }
+        // 先走 IME。hint 还在 text 上时 clear()+sendKeys 会把框搞挂
+        if (inputText(deviceId, value)) {
+            return true;
+        }
+        if (field != null) {
+            try {
+                field.sendKeys(value);
+                return true;
+            } catch (Exception e) {
+                log.warn("焦点输入框 sendKeys 仍失败: {}", e.getMessage());
+            }
+        }
+        return typeAsciiViaAdb(deviceId, value);
+    }
+
+    /** 当前焦点的原生输入框；找不到再退到页面上第一个 EditText / TextField */
+    private WebElement findFocusedEditField(String deviceId) {
+        Device device = deviceMapper.findById(deviceId);
+        boolean ios = device != null && Device.usesIosAutomation(device.getPlatform());
+        List<String> xpaths = ios
+                ? List.of(
+                "//XCUIElementTypeTextView[@focused='true' or @focused='1']",
+                "//XCUIElementTypeTextField[@focused='true' or @focused='1']",
+                "//XCUIElementTypeSearchField[@focused='true' or @focused='1']",
+                "//XCUIElementTypeTextView",
+                "//XCUIElementTypeTextField")
+                : List.of(
+                "//android.widget.EditText[@focused='true']",
+                "//android.widget.MultiAutoCompleteTextView[@focused='true']",
+                "//android.widget.EditText");
+        for (String xp : xpaths) {
+            WebElement el = findElementWithTimeout(deviceId, "xpath:" + xp, 2);
+            if (el != null) {
+                return el;
+            }
+        }
+        return null;
+    }
+
+    /** adb input text 只吃 ASCII；中文评论走这条等于白打 */
+    private boolean typeAsciiViaAdb(String deviceId, String text) {
+        if (text == null || text.isEmpty()) {
+            return true;
+        }
+        if (!text.chars().allMatch(c -> c < 127)) {
+            return false;
+        }
+        Device device = deviceMapper.findById(deviceId);
+        if (device == null || !Device.isAndroidOrPogAndroid(device.getPlatform())) {
+            return false;
+        }
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "text", text)
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                return false;
+            }
+            return p.exitValue() == 0;
+        } catch (Exception e) {
+            log.warn("adb input text 失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public String takeScreenshot(String deviceId, String savePath) {
         Device device = deviceMapper.findById(deviceId);
         // Android 统一走 ADB 截图，更稳定、适合连续多张
@@ -2249,6 +2355,9 @@ public class AppiumDriverAdapter implements PlatformDriver {
             return driver.findElement(by);
         } catch (Exception e) {
             String msg = firstLineOf(e.getMessage());
+            // 会话被回收掉的话，这里每次都会失败，而且表现成「元素找不到」——
+            // 方向全错。摘掉死会话，下一次调用会重建，自己就好了
+            dropSessionIfDead(deviceId, e);
             if (looksLikeUiAutomationDead(msg)) {
                 recordPageSourceFailure("findElement: " + msg);
                 log.warn("Appium 找元素失败且疑似 UiAutomator2 已挂: {}", msg);
@@ -2597,6 +2706,490 @@ public class AppiumDriverAdapter implements PlatformDriver {
      */
     public io.appium.java_client.AppiumDriver getAppiumDriver(String deviceId) {
         return sessions.get(deviceId);
+    }
+
+    /**
+     * 读当前 WebView 的完整地址（尽量含 hash）。
+     * <p>
+     * 优先切到 {@code WEBVIEW_*} / {@code CHROMIUM} 后执行 {@code location.href}。
+     * 切失败（常见：缺 Chromedriver）时，回退 {@code mobile: getContexts} 读 pages[].url——
+     * 完美电竞 X5/{@code pwX5WebView} 在调试通道开着时，这条往往仍能拿到带 hash 的完整地址。
+     * 两边都没有时 {@code available=false}，文案说明原因，不假装成功。
+     */
+    /**
+     * 这条错误说明服务端的会话已经没了，本地这个对象是个空壳。
+     * <p>字符串匹配不优雅，但 Appium 把这几种都归在同一类异常里，
+     * 按类型分不出来；而分得出来与否，决定了我们是「重建一次就好」还是「一直报错」。
+     */
+    static boolean isDeadSessionError(String msg) {
+        if (msg == null) return false;
+        String m = msg.toLowerCase(Locale.ROOT);
+        return m.contains("a session is either terminated or not started")
+                || m.contains("invalid session id")
+                || m.contains("session id is null")
+                || m.contains("nosuchsessionexception")
+                || m.contains("session not started");
+    }
+
+    /** 打一条最便宜的往返命令探活。拿不到就当它死了——宁可多重建一次 */
+    private boolean sessionAlive(AppiumDriver driver) {
+        if (driver == null) return false;
+        try {
+            if (driver.getSessionId() == null) return false;
+            driver.manage().timeouts().getImplicitWaitTimeout();
+            return true;
+        } catch (Exception e) {
+            log.debug("会话探活失败（视为已失效）: {}", firstLineOf(e.getMessage()));
+            return false;
+        }
+    }
+
+    private void quitQuietly(AppiumDriver driver) {
+        if (driver == null) return;
+        try {
+            driver.quit();
+        } catch (Exception ignored) {
+            // 会话本来就没了，quit 报错很正常
+        }
+    }
+
+    /**
+     * 命令失败时，如果是会话已死，就把它从缓存里摘掉，让下一次调用自己重建。
+     * <p>不在这里重试：各处的重试语义不一样（有的要重新截图、有的要重新找元素），
+     * 统一在这儿硬重试反而会掩盖真正的失败。摘掉就够了——下一次自然是新会话。
+     */
+    private void dropSessionIfDead(String deviceId, Exception e) {
+        if (deviceId == null || !isDeadSessionError(e == null ? null : e.getMessage())) return;
+        AppiumDriver dead = sessions.remove(deviceId);
+        if (dead != null) {
+            log.info("会话已失效，已从缓存摘除，下次调用会重建: deviceId={}", deviceId);
+            quitQuietly(dead);
+        }
+    }
+
+    /**
+     * 探一下 WebView 里到底渲染出东西没有。
+     *
+     * <p>和 {@link #readWebViewUrl} 走同一条路（切 WEBVIEW_* context），
+     * 因为那条路上 X5 的各种坑已经趟过一遍了，没必要再趟一次。
+     *
+     * <p>返回 {@code available=false} 时调用方<b>绝不能当成通过</b>——
+     * 那只是「没验成」。release 包没开调试通道时就是这个结果。
+     */
+    public Map<String, Object> probeWebViewRender(String deviceId) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("available", false);
+        out.put("message", "");
+
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) {
+            out.put("message", "没有 Appium 会话");
+            return out;
+        }
+        if (!(driver instanceof SupportsContextSwitching ctxDriver)) {
+            out.put("message", "当前驱动不支持 WebView context 切换");
+            return out;
+        }
+
+        String originalContext = null;
+        try {
+            originalContext = ctxDriver.getContext();
+            Set<String> contexts = ctxDriver.getContextHandles();
+            List<String> all = contexts == null ? List.of() : new ArrayList<>(contexts);
+            out.put("contexts", all);
+            List<String> webViews = all.stream()
+                    .filter(c -> c != null && (c.startsWith("WEBVIEW_") || c.startsWith("CHROMIUM")))
+                    .toList();
+            if (webViews.isEmpty()) {
+                out.put("message", all.isEmpty()
+                        ? "getContextHandles 为空，WebView 没开调试通道"
+                        : "只有原生 context（" + String.join(", ", all)
+                                + "），读不到页面内容。X5 WebView 未开调试通道时就是这样");
+                return out;
+            }
+            String lastErr = null;
+            for (String ctx : webViews) {
+                try {
+                    ctxDriver.context(ctx);
+                    Object raw = driver.executeScript(RENDER_PROBE_JS);
+                    if (raw instanceof Map<?, ?> m) {
+                        out.put("available", true);
+                        out.put("context", ctx);
+                        for (Map.Entry<?, ?> e : m.entrySet()) {
+                            out.put(String.valueOf(e.getKey()), e.getValue());
+                        }
+                        return out;
+                    }
+                    lastErr = "探针脚本没有返回对象";
+                } catch (Exception e) {
+                    lastErr = e.getMessage();
+                    log.warn("[h5-probe] context={} 执行探针失败: {}", ctx, e.getMessage());
+                }
+            }
+            out.put("message", "切进了 WebView 但探针没跑成：" + lastErr);
+            return out;
+        } catch (Exception e) {
+            out.put("message", "读 WebView context 失败：" + e.getMessage());
+            return out;
+        } finally {
+            if (originalContext != null) {
+                try {
+                    ctxDriver.context(originalContext);
+                } catch (Exception e) {
+                    log.debug("切回原 context 失败: {}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * 渲染探针。
+     *
+     * <p>两个刻意的选择：
+     * <ul>
+     *   <li>用 {@code innerText} <b>不是</b> {@code textContent}——前者只算渲染出来的文字。
+     *       用 textContent 的话，一个 DOM 齐全但整体没显示的白屏页会被判成正常</li>
+     *   <li>图只数 {@code naturalWidth > 0} 的——一页全是加载失败的图，看上去就是白屏，
+     *       而 {@code querySelectorAll('img').length} 会把它们全算成「有内容」</li>
+     * </ul>
+     */
+    private static final String RENDER_PROBE_JS = """
+            try {
+              var b = document.body;
+              if (!b) {
+                return {bodyPresent:false, readyState:document.readyState,
+                        textLength:0, mediaCount:0, elementCount:0, url:location.href};
+              }
+              var t = (b.innerText || '').replace(/\\s+/g, ' ').trim();
+              var media = 0;
+              var imgs = document.getElementsByTagName('img');
+              for (var i = 0; i < imgs.length; i++) { if (imgs[i].naturalWidth > 0) media++; }
+              media += document.getElementsByTagName('canvas').length;
+              media += document.getElementsByTagName('video').length;
+              return {bodyPresent:true, readyState:document.readyState,
+                      textLength:t.length, mediaCount:media,
+                      elementCount:document.getElementsByTagName('*').length,
+                      url:location.href};
+            } catch (e) {
+              return {error:String(e)};
+            }
+            """;
+
+    public Map<String, Object> readWebViewUrl(String deviceId) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("available", false);
+        out.put("url", "");
+        out.put("context", "");
+        out.put("contexts", List.of());
+        out.put("message", "");
+
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) {
+            out.put("message", "没有 Appium 会话，请先在真机点选里点一次「刷新截图」");
+            return out;
+        }
+        if (!(driver instanceof SupportsContextSwitching ctxDriver)) {
+            // 仍可试 mobile:getContexts（部分驱动无 context API 但仍暴露该扩展）
+            Map<String, String> viaMobile = readUrlViaMobileGetContexts(driver);
+            if (viaMobile != null) {
+                out.put("available", true);
+                out.put("url", viaMobile.get("url"));
+                out.put("context", viaMobile.getOrDefault("context", "mobile:getContexts"));
+                return out;
+            }
+            out.put("message", "当前驱动不支持 WebView context 切换");
+            return out;
+        }
+
+        String originalContext = null;
+        List<String> webViews = List.of();
+        String switchError = null;
+        try {
+            originalContext = ctxDriver.getContext();
+            Set<String> contexts = ctxDriver.getContextHandles();
+            List<String> all = contexts == null ? List.of() : new ArrayList<>(contexts);
+            out.put("contexts", all);
+
+            webViews = all.stream()
+                    .filter(c -> c != null && (c.startsWith("WEBVIEW_") || c.startsWith("CHROMIUM")))
+                    .toList();
+
+            for (String ctx : webViews) {
+                try {
+                    ctxDriver.context(ctx);
+                    String href = null;
+                    try {
+                        Object raw = driver.executeScript("return window.location.href;");
+                        if (raw != null) {
+                            href = String.valueOf(raw).trim();
+                        }
+                    } catch (Exception e) {
+                        log.debug("location.href 失败 context={}: {}", ctx, e.getMessage());
+                    }
+                    if (href == null || href.isBlank() || "undefined".equalsIgnoreCase(href)
+                            || "null".equalsIgnoreCase(href)) {
+                        try {
+                            href = driver.getCurrentUrl();
+                        } catch (Exception e) {
+                            log.debug("getCurrentUrl 失败 context={}: {}", ctx, e.getMessage());
+                        }
+                    }
+                    if (isUsableWebUrl(href)) {
+                        out.put("available", true);
+                        out.put("url", href);
+                        out.put("context", ctx);
+                        out.put("message", "");
+                        return out;
+                    }
+                } catch (Exception e) {
+                    switchError = e.getMessage();
+                    log.warn("切换 WebView context={} 失败: {}", ctx, e.getMessage());
+                }
+            }
+
+            Map<String, String> viaMobile = readUrlViaMobileGetContexts(driver);
+            if (viaMobile != null) {
+                out.put("available", true);
+                out.put("url", viaMobile.get("url"));
+                out.put("context", viaMobile.getOrDefault("context", "mobile:getContexts"));
+                out.put("message", "");
+                return out;
+            }
+
+            if (all.isEmpty()) {
+                out.put("message", "getContextHandles 为空，WebView 可能未开启调试");
+            } else if (webViews.isEmpty()) {
+                out.put("message", "只有原生 context（" + String.join(", ", all)
+                        + "），读不到 H5 地址。常见于 X5 WebView（pwX5WebView）且未暴露调试通道；"
+                        + "系统 Chrome WebView / 已开调试的包才容易成功");
+            } else if (switchError != null && switchError.toLowerCase(Locale.ROOT).contains("chromedriver")) {
+                out.put("message", "已找到 WebView context（" + String.join(", ", webViews)
+                        + "），但本机 Chromedriver 无法驱动该 Chrome 版本，且 mobile:getContexts 也没读到页面 URL。"
+                        + "详情: " + switchError);
+            } else {
+                out.put("message", "已找到 WebView context，但读不到有效 URL（"
+                        + String.join(", ", webViews) + "）");
+            }
+            return out;
+        } catch (Exception e) {
+            Map<String, String> viaMobile = readUrlViaMobileGetContexts(driver);
+            if (viaMobile != null) {
+                out.put("available", true);
+                out.put("url", viaMobile.get("url"));
+                out.put("context", viaMobile.getOrDefault("context", "mobile:getContexts"));
+                out.put("message", "");
+                return out;
+            }
+            if (isDeadSessionError(e.getMessage())) {
+                dropSessionIfDead(deviceId, e);
+                out.put("message", "Appium 会话已经失效了（闲置超过 "
+                        + "newCommandTimeout 会被服务端回收）。已经把它清掉，再点一次「读当前 H5 URL」就会重建会话。"
+                        + "如果连着两次都这样，说明设备和 Appium 之间断了，先点「刷新截图」确认还连得上");
+            } else {
+                out.put("message", "读 H5 URL 失败: " + e.getMessage());
+            }
+            return out;
+        } finally {
+            if (originalContext != null) {
+                try {
+                    ctxDriver.context(originalContext);
+                } catch (Exception e) {
+                    log.debug("切回原 context 失败: {}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    /** 判断是否为可展示的 H5 地址。 */
+    private static boolean isUsableWebUrl(String href) {
+        if (href == null) {
+            return false;
+        }
+        String t = href.trim();
+        if (t.isEmpty()) {
+            return false;
+        }
+        if ("undefined".equalsIgnoreCase(t) || "null".equalsIgnoreCase(t)
+                || "about:blank".equalsIgnoreCase(t)) {
+            return false;
+        }
+        return t.startsWith("http://") || t.startsWith("https://") || t.contains("://");
+    }
+
+    /**
+     * Android：{@code mobile: getContexts} 可在不切 Chromedriver 的情况下列出各页 url（含 hash）。
+     * 返回 {@code url}/{@code context}，读不到则 null。
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, String> readUrlViaMobileGetContexts(AppiumDriver driver) {
+        try {
+            Object raw = driver.executeScript("mobile: getContexts");
+            if (!(raw instanceof List<?> list) || list.isEmpty()) {
+                return null;
+            }
+            String bestVisible = null;
+            String bestHash = null;
+            String bestAny = null;
+            String bestCtx = "mobile:getContexts";
+            for (Object item : list) {
+                if (!(item instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                Object webview = m.get("webview");
+                Object pagesObj = m.get("pages");
+                if (!(pagesObj instanceof List<?> pages)) {
+                    continue;
+                }
+                for (Object p : pages) {
+                    if (!(p instanceof Map<?, ?> page)) {
+                        continue;
+                    }
+                    Object urlObj = page.get("url");
+                    if (urlObj == null) {
+                        continue;
+                    }
+                    String url = String.valueOf(urlObj).trim();
+                    if (!isUsableWebUrl(url)) {
+                        continue;
+                    }
+                    if (bestAny == null) {
+                        bestAny = url;
+                        if (webview != null) {
+                            bestCtx = String.valueOf(webview);
+                        }
+                    }
+                    if (url.contains("#") && bestHash == null) {
+                        bestHash = url;
+                        if (webview != null) {
+                            bestCtx = String.valueOf(webview);
+                        }
+                    }
+                    Object desc = page.get("description");
+                    if (desc != null && String.valueOf(desc).contains("\"visible\":true") && bestVisible == null) {
+                        bestVisible = url;
+                        if (webview != null) {
+                            bestCtx = String.valueOf(webview);
+                        }
+                    }
+                }
+            }
+            String pick = bestVisible != null ? bestVisible : (bestHash != null ? bestHash : bestAny);
+            if (pick == null) {
+                return null;
+            }
+            Map<String, String> hit = new LinkedHashMap<>();
+            hit.put("url", pick);
+            hit.put("context", bestCtx);
+            return hit;
+        } catch (Exception e) {
+            log.debug("mobile: getContexts 读 URL 失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 通用 H5 点/输入。页与页只换文案和 URL，这里按通道自动试：
+     * Appium CDP → adb 转发 devtools → 能切则 WebView JS。
+     */
+    public Map<String, Object> clickH5(String deviceId, String text, String css) {
+        return clickH5(deviceId, text, css, null);
+    }
+
+    /** {@code typeValue} 非空时，点中后再往该节点写入。 */
+    public Map<String, Object> clickH5(String deviceId, String text, String css, String typeValue) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        out.put("url", "");
+        out.put("x", 0);
+        out.put("y", 0);
+        out.put("tag", "");
+        out.put("message", "");
+
+        String t = text == null ? "" : text.trim();
+        String s = css == null ? "" : css.trim();
+        if (t.isEmpty() && s.isEmpty()) {
+            out.put("message", "请填写文案或 CSS 选择器");
+            return out;
+        }
+        if (!attachAndroidUiSession(deviceId)) {
+            out.put("message", "没有 Appium 会话。请先启动应用并打开 H5，或在真机点选里点一次「刷新截图」");
+            return out;
+        }
+        AppiumDriver driver = sessions.get(deviceId);
+        if (driver == null) {
+            out.put("message", "挂接会话后仍没有 Appium driver");
+            return out;
+        }
+        List<String> tried = new ArrayList<>();
+        String typed = typeValue == null ? "" : typeValue;
+        H5ContextPages.Target page = null;
+        try {
+            Object raw = driver.executeScript("mobile: getContexts");
+            page = H5ContextPages.pick(H5ContextPages.parse(raw));
+        } catch (Exception e) {
+            tried.add("getContexts: " + e.getMessage());
+        }
+        if (page != null) {
+            out.put("url", page.url());
+        }
+        try {
+            try (H5CdpLink link = H5CdpLink.open(deviceId, page)) {
+                return finishH5Click(out, deviceId, page, link.wsUrl(), t, s, typed, "CDP");
+            }
+        } catch (Exception e) {
+            tried.add("CDP: " + e.getMessage());
+            log.info("H5 CDP 不可用，改试 WebView JS: {}", e.getMessage());
+        }
+        H5DomClick.Hit js = H5WebViewJs.run(driver, t, s, typed);
+        if (js.ok()) {
+            return finishH5Hit(out, deviceId, page, js, typed, "WebViewJS");
+        }
+        tried.add("WebViewJS: " + js.message());
+        dropSessionIfDead(deviceId, new IllegalStateException(String.join(" | ", tried)));
+        out.put("message", "当前页没有可用的 H5 通道，已自动试过 CDP / adb 调试口 / WebView JS。"
+                + "换页只改步骤里的地址和文案，不必加新关键字。详情: " + String.join("；", tried));
+        return out;
+    }
+
+    private Map<String, Object> finishH5Click(Map<String, Object> out, String deviceId,
+                                              H5ContextPages.Target page, String wsUrl,
+                                              String text, String css, String typed, String via)
+            throws Exception {
+        H5DomClick.Hit hit = H5DomClick.run(wsUrl, text, css, typed, Duration.ofSeconds(8));
+        if (!hit.ok()) {
+            out.put("message", "页上找不到：" + hit.message()
+                    + "（页面上的字=" + text + (css.isEmpty() ? "" : " css=" + css) + "）via " + via);
+            return out;
+        }
+        Map<String, Object> done = finishH5Hit(out, deviceId, page, hit, typed, via);
+        if (!typed.isEmpty() && Boolean.TRUE.equals(done.get("ok"))) {
+            H5DomClick.Hit again = H5DomClick.run(wsUrl, text, css, typed, Duration.ofSeconds(8));
+            if (!again.ok()) {
+                done.put("ok", false);
+                done.put("message", "已点到 " + hit.tag() + "，但写入失败：" + again.message());
+            }
+        }
+        return done;
+    }
+
+    private Map<String, Object> finishH5Hit(Map<String, Object> out, String deviceId,
+                                            H5ContextPages.Target page, H5DomClick.Hit hit,
+                                            String typed, String via) {
+        int x = H5ContextPages.tapX(page, hit.x(), hit.viewW());
+        int y = H5ContextPages.tapY(page, hit.y(), hit.viewH());
+        out.put("x", x);
+        out.put("y", y);
+        out.put("tag", hit.tag());
+        boolean tapped = click(deviceId, x, y);
+        out.put("ok", true);
+        String write = typed.isEmpty() ? "" : (" 已输入「" + typed + "」");
+        out.put("message", (tapped
+                ? ("H5 " + hit.tag() + " + 坐标(" + x + "," + y + ")" + write)
+                : ("H5 已操作 " + hit.tag() + write + "，坐标补点失败 (" + x + "," + y + ")"))
+                + " via " + via);
+        log.info("H5 点选: deviceId={} {} ({},{}) tap={} typed={} via={}",
+                deviceId, hit.tag(), x, y, tapped, !typed.isEmpty(), via);
+        return out;
     }
 
     /**

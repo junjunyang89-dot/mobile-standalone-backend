@@ -82,6 +82,7 @@ class StepRetryTest {
         List<KeywordHandler> shouldRetry = List.of(
                 new com.mobile.standalone.service.keyword.handlers.ClickHandler(),
                 new com.mobile.standalone.service.keyword.handlers.InputHandler(),
+                new com.mobile.standalone.service.keyword.handlers.InputEditTextHandler(),
                 new com.mobile.standalone.service.keyword.handlers.WaitElementHandler(),
                 new com.mobile.standalone.service.keyword.handlers.ScrollUntilHandler(),
                 new com.mobile.standalone.service.keyword.handlers.AssertTextHandler());

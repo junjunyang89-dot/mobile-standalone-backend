@@ -42,6 +42,8 @@ public class UiFlow {
      * 存量流程默认 ONLINE：它们本来就在线上回归里跑着，一条都不能掉出去。
      */
     private String releaseStage;
+    /** 核心流程：兼容性测试只跑这一批，每台机都要过 */
+    private Boolean core;
     private Boolean isComponent;
     /** JSON 数组字符串 */
     private String steps;

@@ -28,6 +28,7 @@ public class TaskDispatcher {
     private final DeviceMapper deviceMapper;
     private final FunctionalTestScenarioService scenarioService;
     private final TaskService taskService;
+    private final com.mobile.standalone.mapper.TaskMapper taskMapper;
 
     /**
      * 执行测试计划
@@ -63,7 +64,10 @@ public class TaskDispatcher {
                     continue;
                 }
                 if (device.getStatus() != Device.DeviceStatus.CONNECTED) {
-                    log.warn("设备未连接: {}", deviceId);
+                    // 只写一行 warn 的话，「定时回归昨晚没跑」在界面上完全没有痕迹。
+                    // 这里不建任务（还没建就没什么可标记的），但日志要说清是计划级的跳过
+                    log.warn("[定时计划] 设备未连接，本轮跳过该设备上的全部场景: planId={} deviceId={} status={}",
+                            planId, deviceId, device.getStatus());
                     continue;
                 }
                 for (String scenarioId : scenarioIds) {
@@ -127,7 +131,53 @@ public class TaskDispatcher {
             task.setConfig(plan.getScenarioConfig().trim());
         }
         Task created = taskService.createTask(task);
-        taskService.runTask(created.getId());
+        try {
+            taskService.runTask(created.getId());
+        } catch (Exception e) {
+            // 设备被占时 runTask 会抛 IllegalStateException。
+            //
+            // 原先这个异常被外层 catch 吞掉，只留一行 log.error，而任务已经建好了、
+            // 状态是 PENDING、device_id 也写死了 —— 于是它<b>既不在排队队列里</b>
+            // （队列条件是 device_id IS NULL），<b>也没人重试</b>，界面上不是失败也不是完成。
+            //
+            // 6 台设备被 50 个人占满是常态，所以这条路径几乎每次定时计划触发都会走到：
+            // 无人值守回归静默失效，而通过率报表上看不出任何异常。
+            //
+            // 记成 BLOCKED 是有意的：它不进通过率的分母（Task.TaskStatus.BLOCKED 的注释
+            // 解释了为什么），但会在任务列表里显示出来，人能看到「昨晚这条没跑成，原因是设备被占」。
+            blockTask(created, "定时计划触发时设备不可用：" + e.getMessage());
+            log.warn("[定时计划] 任务已记为 BLOCKED（设备不可用）: planId={} deviceId={} scenarioId={} taskId={} 原因={}",
+                    plan.getId(), device.getId(), scenarioId, created.getId(), e.getMessage());
+            return;
+        }
         log.info("定时计划已创建并提交任务: planId={}, deviceId={}, scenarioId={}, taskId={}", plan.getId(), device.getId(), scenarioId, created.getId());
+    }
+
+    /**
+     * 把任务记成 BLOCKED。
+     * <p>
+     * 和 {@code DeviceTaskScheduler.blockTask} 同一个意思：<b>没跑成不等于失败</b>。
+     * 这里只改任务状态、不写 task_executions —— 写执行记录需要 executionMapper，
+     * 而这条路径上任务压根没开始执行，一条「开始时间=结束时间」的空执行记录
+     * 反而会让人以为它跑过了。
+     */
+    private void blockTask(Task task, String reason) {
+        try {
+            task.setStatus(Task.TaskStatus.BLOCKED);
+            // Task 上没有存失败原因的字段，所以原因只能进任务名。
+            // 不好看，但比「状态是 BLOCKED，为什么不知道」有用 ——
+            // 人在任务列表里一眼能看到是设备被占，不用去翻日志。
+            // 真要做干净就得给 tasks 加一列 block_reason，那是 DDL，单独安排
+            String name = task.getName() == null ? "" : task.getName();
+            if (!name.contains("[未跑成]")) {
+                task.setName(name + " [未跑成：设备被占]");
+            }
+            task.setUpdatedAt(java.time.LocalDateTime.now());
+            taskMapper.update(task);
+        } catch (Exception e) {
+            // 连状态都写不进去时，至少把原因留在日志里，别让它彻底无声
+            log.error("[定时计划] 写 BLOCKED 状态失败，任务会停在 PENDING: taskId={} 原因={}",
+                    task.getId(), reason, e);
+        }
     }
 }

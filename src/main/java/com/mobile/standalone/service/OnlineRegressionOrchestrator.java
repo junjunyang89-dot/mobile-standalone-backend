@@ -14,6 +14,8 @@ import com.mobile.standalone.entity.Task;
 import com.mobile.standalone.entity.TaskExecution;
 import com.mobile.standalone.entity.UiFlow;
 import com.mobile.standalone.entity.UiApp;
+import com.mobile.standalone.service.compat.AndroidSystemSettings;
+import com.mobile.standalone.service.compat.DeviceSettingVariant;
 import com.mobile.standalone.util.RunTrack;
 import com.mobile.standalone.util.TestEnvironment;
 import com.mobile.standalone.mapper.ApplicationMapper;
@@ -180,7 +182,7 @@ public class OnlineRegressionOrchestrator {
             ids.remove(reset);
         }
         List<String> autoAdded = List.of();
-        if (RunTrack.isAutomation(track)) {
+        if (RunTrack.ordersByDependency(track)) {
             FlowDependencyResolver.Result r = FlowDependencyResolver.resolve(ids, uiFlowService::get);
             ids = new ArrayList<>(r.orderedIds());
             autoAdded = r.autoAdded();
@@ -220,7 +222,7 @@ public class OnlineRegressionOrchestrator {
         // 自动化轨道：先把没勾的前置补进来、按依赖排好，再校验——
         // 否则自动补入的前置会绕过校验，跑到一半才发现它压根不能进这条轨道
         List<String> autoAdded = List.of();
-        if (RunTrack.isAutomation(track)) {
+        if (RunTrack.ordersByDependency(track)) {
             FlowDependencyResolver.Result resolved =
                     FlowDependencyResolver.resolve(flowIds, uiFlowService::get);
             flowIds = resolved.orderedIds();
@@ -264,6 +266,8 @@ public class OnlineRegressionOrchestrator {
             if (d == null) throw new IllegalArgumentException("设备不存在: " + deviceId);
             devices.add(d);
         }
+        boolean compat = RunTrack.isCompatibility(track);
+        List<DeviceSettingVariant> variants = compat ? parseVariants(req.getDeviceSettings()) : List.of();
 
         String runId = "or-" + UUID.randomUUID();
         LocalDateTime now = LocalDateTime.now();
@@ -308,61 +312,94 @@ public class OnlineRegressionOrchestrator {
 
             for (int di = 0; di < appDevices.size(); di++) {
                 Device device = appDevices.get(di);
-                String endpoint = endpointOf(device.getPlatform());
                 String jobKey = appId + "__" + device.getId();
                 OnlineRegressionAccount account = accounts.isEmpty() ? null : accounts.get(di % accounts.size());
-
-                OnlineRegressionJob job = new OnlineRegressionJob();
-                job.setId("orj-" + UUID.randomUUID());
-                job.setRunId(runId);
-                job.setJobKey(jobKey);
-                job.setAppId(appId);
-                job.setAppName(appName);
-                job.setDeviceId(device.getId());
-                job.setDeviceName(device.getName());
-                job.setDevicePlatform(device.getPlatform() != null ? device.getPlatform().name() : "");
-                job.setEndpoint(endpoint);
-                job.setStatus(OnlineRegressionJob.Status.PENDING.name());
-                job.setProgress(0);
-                job.setCurrentStepLabel("排队中");
-                job.setAccountPhone(account != null ? account.getPhoneNumber() : null);
-                job.setCreatedAt(now);
-                job.setUpdatedAt(now);
-                jobMapper.insert(job);
-                jobs.add(job);
-                if (account != null) {
-                    log.info("线上回归账号分配: jobKey={}, phone={}", jobKey, maskPhone(account.getPhoneNumber()));
-                }
 
                 List<OrderedStepDto> jobSteps = withResetBetween(
                         filterFlowsForJob(validated, appId, device), resetStep);
                 if (jobSteps.isEmpty()) {
+                    // 兼容性测试一次勾很多台机，某个平台还没标核心流程很正常，跳过这台而不是整批报错
+                    if (compat) {
+                        log.info("兼容性测试：{} 没有匹配的核心流程，跳过", device.getName());
+                        continue;
+                    }
                     throw new IllegalArgumentException(
                             "APP「" + appName + "」× 设备「" + device.getName()
                                     + "」没有匹配的流程（请检查流程的 app_id / platform）");
                 }
-                int ord = 0;
-                for (OrderedStepDto s : jobSteps) {
-                    OnlineRegressionStep step = new OnlineRegressionStep();
-                    step.setId("ors-" + UUID.randomUUID());
-                    step.setJobId(job.getId());
-                    step.setStepId(s.getId());
-                    step.setStepLabel(s.getLabel());
-                    step.setSortOrder(ord++);
-                    step.setStatus(OnlineRegressionStep.Status.PENDING.name());
-                    step.setCreatedAt(now);
-                    step.setUpdatedAt(now);
-                    stepMapper.insert(step);
+                jobs.add(insertJob(runId, jobKey, appId, appName, device, null, account, jobSteps, now));
+                if (account != null) {
+                    log.info("线上回归账号分配: jobKey={}, phone={}", jobKey, maskPhone(account.getPhoneNumber()));
+                }
+                if (Device.isAndroidOrPogAndroid(device.getPlatform())) {
+                    for (DeviceSettingVariant v : variants) {
+                        jobs.add(insertJob(runId, v.jobKeyOf(jobKey), appId, appName, device, v,
+                                account, jobSteps, now));
+                    }
                 }
             }
         }
         if (jobs.isEmpty()) {
-            throw new IllegalArgumentException("APP×设备矩阵为空（请选择 Android/iOS 族设备）");
+            throw new IllegalArgumentException(compat
+                    ? "选中的设备都没有匹配的核心流程。先去流程编排把要跑的流程标成「核心」"
+                    : "APP×设备矩阵为空（请选择 Android/iOS 族设备）");
         }
 
         stopFlags.put(runId, new AtomicBoolean(false));
         scheduleExecuteRunAfterCommit(runId, req);
         return getRunDetail(runId);
+    }
+
+    private OnlineRegressionJob insertJob(String runId, String jobKey, String appId, String appName,
+                                          Device device, DeviceSettingVariant variant,
+                                          OnlineRegressionAccount account, List<OrderedStepDto> jobSteps,
+                                          LocalDateTime now) {
+        OnlineRegressionJob job = new OnlineRegressionJob();
+        job.setId("orj-" + UUID.randomUUID());
+        job.setRunId(runId);
+        job.setJobKey(jobKey);
+        job.setAppId(appId);
+        job.setAppName(appName);
+        job.setDeviceId(device.getId());
+        job.setDeviceName(variant == null ? device.getName() : device.getName() + " · " + variant.label());
+        job.setDevicePlatform(device.getPlatform() != null ? device.getPlatform().name() : "");
+        job.setEndpoint(endpointOf(device.getPlatform()));
+        job.setStatus(OnlineRegressionJob.Status.PENDING.name());
+        job.setProgress(0);
+        job.setCurrentStepLabel("排队中");
+        job.setAccountPhone(account != null ? account.getPhoneNumber() : null);
+        job.setCreatedAt(now);
+        job.setUpdatedAt(now);
+        jobMapper.insert(job);
+        int ord = 0;
+        for (OrderedStepDto s : jobSteps) {
+            OnlineRegressionStep step = new OnlineRegressionStep();
+            step.setId("ors-" + UUID.randomUUID());
+            step.setJobId(job.getId());
+            step.setStepId(s.getId());
+            step.setStepLabel(s.getLabel());
+            step.setSortOrder(ord++);
+            step.setStatus(OnlineRegressionStep.Status.PENDING.name());
+            step.setCreatedAt(now);
+            step.setUpdatedAt(now);
+            stepMapper.insert(step);
+        }
+        return job;
+    }
+
+    static List<DeviceSettingVariant> parseVariants(List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<DeviceSettingVariant> out = new LinkedHashSet<>();
+        for (String s : raw) {
+            DeviceSettingVariant v = DeviceSettingVariant.parse(s);
+            if (v == null) {
+                throw new IllegalArgumentException("不认识的系统设置：" + s);
+            }
+            out.add(v);
+        }
+        return new ArrayList<>(out);
     }
 
     private static String resetFlowIdOf(StartRunRequest req) {
@@ -513,6 +550,9 @@ public class OnlineRegressionOrchestrator {
         for (OnlineRegressionJob job : jobs) {
             byDevice.computeIfAbsent(job.getDeviceId() != null ? job.getDeviceId() : "", k -> new ArrayList<>()).add(job);
         }
+        // 设置变体作业必须排在同机基础作业之后：装包只在基础作业里做，而几条作业的 created_at 是同一刻
+        byDevice.values().forEach(list -> list.sort(Comparator.comparingInt(
+                j -> DeviceSettingVariant.ofJobKey(j.getJobKey()) == null ? 0 : 1)));
         List<Thread> workers = new ArrayList<>();
         for (Map.Entry<String, List<OnlineRegressionJob>> e : byDevice.entrySet()) {
             String deviceId = e.getKey();
@@ -551,7 +591,11 @@ public class OnlineRegressionOrchestrator {
         }
 
         // 汇总
-        int done = 0, ok = 0;
+        //
+        // done 是通过率的分母，只收「真的跑到断言了」的那些：SUCCESS / UNSTABLE / FAILED。
+        // BLOCKED（设备、会话、控件树、装包）单独计数——把它算进分母，
+        // 设备池一紧张通过率就掉，人会去查一个根本没执行过的用例。
+        int done = 0, ok = 0, blocked = 0;
         for (OnlineRegressionJob job : jobMapper.findByRunId(runId)) {
             for (OnlineRegressionStep st : stepMapper.findByJobId(job.getId())) {
                 // 复位是基础设施不是用例，算进通过率只会把指标冲淡
@@ -560,7 +604,9 @@ public class OnlineRegressionOrchestrator {
                 }
                 boolean passed = OnlineRegressionStep.Status.SUCCESS.name().equals(st.getStatus())
                         || OnlineRegressionStep.Status.UNSTABLE.name().equals(st.getStatus());
-                if (passed || OnlineRegressionStep.Status.FAILED.name().equals(st.getStatus())) {
+                if (OnlineRegressionStep.Status.BLOCKED.name().equals(st.getStatus())) {
+                    blocked++;
+                } else if (passed || OnlineRegressionStep.Status.FAILED.name().equals(st.getStatus())) {
                     done++;
                     // 不稳定的算通过：功能确实是好的。但状态保留 UNSTABLE，报告里能单独看到该治理哪些
                     if (passed) ok++;
@@ -576,6 +622,10 @@ public class OnlineRegressionOrchestrator {
             finished.setStatus(OnlineRegressionRun.Status.COMPLETED.name());
         }
         finished.setPassRate(done == 0 ? 0 : Math.round(ok * 100f / done));
+        if (blocked > 0) {
+            log.warn("[online-regression] run={} 有 {} 个步骤没跑成（BLOCKED，不计入通过率 {}%）——"
+                    + "这类是环境问题，去看设备池和 Appium，别查用例", runId, blocked, finished.getPassRate());
+        }
         finished.setFinishedAt(LocalDateTime.now());
         finished.setUpdatedAt(LocalDateTime.now());
         runMapper.update(finished);
@@ -584,17 +634,23 @@ public class OnlineRegressionOrchestrator {
         List<OnlineRegressionJob> finishedJobs = jobMapper.findByRunId(runId);
         // 人工停止不告警；有失败步骤/失败作业才推微信（含设备被占用导致全跳过）
         if (!OnlineRegressionRun.Status.STOPPED.name().equals(finished.getStatus())
-                && shouldAlertOnlineRegression(finished, finishedJobs, done, ok)) {
+                && shouldAlertOnlineRegression(finished, finishedJobs, done, ok, blocked)) {
             notifyOnlineRegressionFailure(finished, finishedJobs);
         }
     }
 
     private boolean shouldAlertOnlineRegression(OnlineRegressionRun run, List<OnlineRegressionJob> jobs,
-                                                int done, int ok) {
+                                                int done, int ok, int blocked) {
         if (OnlineRegressionRun.Status.FAILED.name().equals(run.getStatus())) {
             return true;
         }
         if (done > 0 && ok < done) {
+            return true;
+        }
+        // 没跑成也要报。把 BLOCKED 从通过率里摘出去是为了别冤枉用例，
+        // 不是为了让它安静消失——夜里设备掉线，第二天看到的是漂亮的 100%，
+        // 而实际上一条都没跑，这比通过率难看严重得多
+        if (blocked > 0) {
             return true;
         }
         if (jobs == null) {
@@ -796,7 +852,41 @@ public class OnlineRegressionOrchestrator {
         }
     }
 
+    /**
+     * 系统设置变体作业：先切设置，跑完不管成败都切回去。
+     * 切不过去就整条作业判失败——不能拿原设置跑出一份标着「深色模式」的结果。
+     */
     private void executeJob(String runId, OnlineRegressionJob job, StartRunRequest req) {
+        DeviceSettingVariant variant = DeviceSettingVariant.ofJobKey(job.getJobKey());
+        if (variant == null) {
+            executeJobSteps(runId, job, req, true);
+            return;
+        }
+        String previous;
+        try {
+            previous = AndroidSystemSettings.apply(job.getDeviceId(), variant);
+            log.info("[compat] {} 已切到{}", job.getDeviceName(), variant.label());
+        } catch (Exception e) {
+            String reason = "切换「" + variant.label() + "」失败：" + e.getMessage();
+            job.setStatus(OnlineRegressionJob.Status.FAILED.name());
+            job.setErrorMessage(reason);
+            job.setCurrentStepLabel("系统设置切换失败");
+            job.setUpdatedAt(LocalDateTime.now());
+            jobMapper.update(job);
+            for (OnlineRegressionStep st : stepMapper.findByJobId(job.getId())) {
+                skipOne(st, reason);
+            }
+            return;
+        }
+        try {
+            // 装包已经在同机的基础作业里做过，变体作业只换设置不重装
+            executeJobSteps(runId, job, req, false);
+        } finally {
+            AndroidSystemSettings.restore(job.getDeviceId(), variant, previous);
+        }
+    }
+
+    private void executeJobSteps(String runId, OnlineRegressionJob job, StartRunRequest req, boolean install) {
         job.setStatus(OnlineRegressionJob.Status.RUNNING.name());
         job.setUpdatedAt(LocalDateTime.now());
         jobMapper.update(job);
@@ -811,7 +901,7 @@ public class OnlineRegressionOrchestrator {
         // 装包在所有流程之前做一次，不作为流程步骤。
         // 它不是用例：跑通不说明任何功能是好的，混进步骤列表只会稀释通过率；
         // 而且「一批只装一次」靠这里保证，比靠人把安装流程排在第一条可靠得多
-        if (!prepareInstall(job, req)) {
+        if (install && !prepareInstall(job, req)) {
             job.setStatus(OnlineRegressionJob.Status.FAILED.name());
             job.setCurrentStepLabel("装包失败");
             job.setUpdatedAt(LocalDateTime.now());
@@ -894,6 +984,10 @@ public class OnlineRegressionOrchestrator {
                             ? OnlineRegressionStep.Status.UNSTABLE.name()
                             : OnlineRegressionStep.Status.SUCCESS.name());
                     step.setErrorMessage(retried ? result.message : null);
+                } else if (result.blocked) {
+                    // 重跑过还是没跑成，那就是真的环境问题，不是用例问题
+                    step.setStatus(OnlineRegressionStep.Status.BLOCKED.name());
+                    step.setErrorMessage(retried ? "重跑仍未跑成：" + result.message : result.message);
                 } else {
                     step.setStatus(OnlineRegressionStep.Status.FAILED.name());
                     step.setErrorMessage(retried ? "重跑仍失败：" + result.message : result.message);
@@ -922,7 +1016,7 @@ public class OnlineRegressionOrchestrator {
                 job.setProgress(Math.round((i + 1) * 100f / steps.size()));
                 job.setUpdatedAt(LocalDateTime.now());
 
-                if (!RunTrack.isAutomation(track)) {
+                if (!RunTrack.continuesOnFailure(track)) {
                     // 回归是一条线性的串：前一步没过，后面的前提就不成立了，整批到此为止
                     job.setStatus(OnlineRegressionJob.Status.FAILED.name());
                     jobMapper.update(job);
@@ -958,7 +1052,7 @@ public class OnlineRegressionOrchestrator {
         // 升级测试的后半程：流程已经把本地数据造出来了，现在覆盖装最新版。
         // 顺序不能反——先覆盖再跑，验的就是「空数据 + 新代码」，那是全新安装，
         // 而全新安装永远测不出库表升级、缓存格式变更这几类问题
-        if (!finishUpgradeInstall(job, req, anyFailed)) {
+        if (install && !finishUpgradeInstall(job, req, anyFailed)) {
             anyFailed = true;
         }
 
@@ -1166,6 +1260,10 @@ public class OnlineRegressionOrchestrator {
         if (finished.getStatus() == Task.TaskStatus.STOPPED) {
             return StepExecResult.skipped("已停止：" + step.getStepLabel(), created.getId(), shot);
         }
+        // 没跑成（设备/会话/控件树/装包）：不是这条用例的问题，别算进失败率
+        if (finished.getStatus() == Task.TaskStatus.BLOCKED) {
+            return StepExecResult.blocked(err, created.getId(), shot);
+        }
         return StepExecResult.fail(err, created.getId(), shot);
     }
 
@@ -1367,7 +1465,10 @@ public class OnlineRegressionOrchestrator {
             Task t = taskMapper.findById(taskId);
             if (t == null) return null;
             Task.TaskStatus s = t.getStatus();
-            if (s == Task.TaskStatus.COMPLETED || s == Task.TaskStatus.FAILED || s == Task.TaskStatus.STOPPED) {
+            // BLOCKED 也是终态。漏了它的话，环境问题会让这里空等到 TASK_WAIT_MS，
+            // 一轮回归被一台连不上的设备拖住十几分钟
+            if (s == Task.TaskStatus.COMPLETED || s == Task.TaskStatus.FAILED
+                    || s == Task.TaskStatus.STOPPED || s == Task.TaskStatus.BLOCKED) {
                 // 停止请求会立刻把状态写成 STOPPED，但执行线程可能还在收尾（当前步骤跑完才中断）。
                 // 此时设备仍被占用，必须等线程真正退出，否则下一步会和上一步抢同一台机。
                 awaitExecutionThreadExit(taskId, deadline);
@@ -1630,6 +1731,11 @@ public class OnlineRegressionOrchestrator {
          * 第一条用例前面<b>不</b>插复位：那时 APP 可能还没装，冷启动必挂。
          */
         private String resetFlowId;
+        /**
+         * 兼容性测试的系统设置差异：DARK_MODE / LARGE_FONT。
+         * 每项会让每台 Android 机在切到该设置后把核心流程再跑一遍，跑完还原。
+         */
+        private List<String> deviceSettings;
     }
 
     @Data
@@ -1680,6 +1786,8 @@ public class OnlineRegressionOrchestrator {
     private static class StepExecResult {
         boolean success;
         boolean skipped;
+        /** 没跑成，不是跑了没过。仍然会走重跑——会话失效这类抖动重跑一次往往就好了 */
+        boolean blocked;
         String message;
         String taskId;
         String screenshotPath;
@@ -1699,6 +1807,15 @@ public class OnlineRegressionOrchestrator {
         static StepExecResult fail(String msg, String taskId, String shot) {
             StepExecResult r = new StepExecResult();
             r.success = false;
+            r.message = msg;
+            r.taskId = taskId;
+            r.screenshotPath = shot;
+            return r;
+        }
+
+        static StepExecResult blocked(String msg, String taskId, String shot) {
+            StepExecResult r = new StepExecResult();
+            r.blocked = true;
             r.message = msg;
             r.taskId = taskId;
             r.screenshotPath = shot;

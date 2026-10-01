@@ -156,8 +156,12 @@ public class FailureDiagnosisRunner {
                 ctx.getFailedStep() == null ? null : ctx.getFailedStep().getStep(),
                 ctx.getFailedStep() == null ? null : ctx.getFailedStep().getElementKey(),
                 ctx.getFailedStep() == null ? null : ctx.getFailedStep().getMessage());
-        Verdict verdict = reuseRecent(signature);
-        if (verdict != null) {
+        // 抓到崩溃就不用问模型了。更要紧的是不能让它判成「环境问题」去自动重跑：
+        // 崩溃多半是偶现的，重跑一次过了，这个崩溃就被盖掉了
+        Verdict verdict = ctx.isAppCrashed() ? crashVerdict() : reuseRecent(signature);
+        if (ctx.isAppCrashed()) {
+            log.info("运行期间应用崩溃，直接判功能缺陷 taskId={}", taskId);
+        } else if (verdict != null) {
             log.info("复用近期同签名归因，跳过模型调用 taskId={}, signature={}", taskId, signature);
         } else {
             boolean withImages = maxImages > 0;
@@ -173,6 +177,17 @@ public class FailureDiagnosisRunner {
 
         TaskFailureDiagnosis saved = diagnosisService.save(taskId, verdict);
         applyActions(task, saved, standalone);
+    }
+
+    private static Verdict crashVerdict() {
+        Verdict v = new Verdict();
+        v.setCategory(Category.FUNCTION_BROKEN);
+        v.setConfidence(95);
+        v.setReason("运行期间 logcat 抓到被测应用崩溃（FATAL EXCEPTION / native 崩溃），见执行日志里的「应用崩溃」和堆栈");
+        v.setSuggestion("把崩溃标题和堆栈提给开发；步骤失败的话，很可能就是崩溃导致的");
+        v.setSource(com.mobile.standalone.dto.FailureDiagnosisDtos.Source.AI);
+        v.setModel("规则（logcat 崩溃）");
+        return v;
     }
 
     /**

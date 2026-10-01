@@ -8,6 +8,7 @@ import com.mobile.standalone.config.NodeIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -32,6 +33,7 @@ public class DeviceService {
     private final DeviceMapper deviceMapper;
     private final AppMapper appMapper;
     private final DeviceManager deviceManager;
+    private final JdbcTemplate jdbcTemplate;
     private final PlatformTransactionManager transactionManager;
     private final NodeIdentity nodeIdentity;
     
@@ -42,7 +44,25 @@ public class DeviceService {
         return deviceMapper.findAll().stream()
                 .filter(this::isValidDeviceRecord)
                 .filter(d -> !nodeIdentity.executesLocally() || belongsToThisNode(d))
+                .peek(this::hydrateEmulatorFlag)
                 .toList();
+    }
+
+    /**
+     * 列表给前端看的时候，把「列是空的、但序列号一看就是本地 AVD」补成模拟器。
+     * 只改返回值，不写库——写库仍走扫描，避免列表接口偷偷改设备档案。
+     * <p>
+     * 补的是升级前入库、还没被重新扫到的老记录：它们的 is_emulator 是 NULL，
+     * 界面上「模拟器」那一栏就会是 0，而人明明看得见一台 emulator-5554 在列表里。
+     */
+    private void hydrateEmulatorFlag(Device d) {
+        if (d == null || d.getEmulator() != null) {
+            return;
+        }
+        String id = d.getId() == null ? "" : d.getId().trim();
+        if (id.startsWith("emulator-")) {
+            d.setEmulator(true);
+        }
     }
 
     /**
@@ -441,6 +461,38 @@ public class DeviceService {
     
     private volatile long lastDevicePersistMs = 0;
 
+    /** 人工停用 / 恢复 */
+    public boolean setDisabled(String deviceId, boolean disabled) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return false;
+        }
+        return deviceMapper.setDisabled(deviceId.trim(), disabled) > 0;
+    }
+
+    /** 列不存在才加，免得每加一列就要人记着去跑一份 SQL */
+    @jakarta.annotation.PostConstruct
+    public void ensureDeviceColumns() {
+        ensureColumn("is_emulator", "TINYINT(1) NULL COMMENT '是否模拟器：由扫描读 getprop 定性'");
+        ensureColumn("last_used_at", "DATETIME NULL COMMENT '上次派活时间，设备池轮转用'");
+        ensureColumn("disabled", "TINYINT(1) NULL COMMENT '人工停用：坏了/维护中，不参与派发'");
+    }
+
+    private void ensureColumn(String column, String definition) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(1) FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' "
+                            + "AND COLUMN_NAME = ?",
+                    Integer.class, column);
+            if (n != null && n == 0) {
+                jdbcTemplate.execute("ALTER TABLE devices ADD COLUMN " + column + " " + definition);
+                log.info("[device] 已补充 devices.{} 列", column);
+            }
+        } catch (Exception e) {
+            log.warn("[device] devices.{} 列检查跳过: {}", column, e.getMessage());
+        }
+    }
+
     /**
      * 扫描设备（Android / iOS / HarmonyOS）。
      * <p>
@@ -505,17 +557,34 @@ public class DeviceService {
             existingDevice.setName(scannedDevice.getName());
             existingDevice.setVersion(scannedDevice.getVersion());
             existingDevice.setPlatform(scannedDevice.getPlatform());
+            existingDevice.setEmulator(scannedDevice.getEmulator());
             existingDevice.setStatus(status);
             existingDevice.setLastSeen(now);
             existingDevice.setWorkerId(nodeIdentity.id());
+            // 已经在库里、环境还空着的模拟器：同样不能默认成生产
+            if (Device.isEmulator(scannedDevice)
+                    && (existingDevice.getEnvironment() == null || existingDevice.getEnvironment().isBlank())) {
+                existingDevice.setEnvironment("TEST");
+            }
             deviceMapper.update(existingDevice);
             return;
         }
         scannedDevice.setStatus(status);
         scannedDevice.setLastSeen(now);
         scannedDevice.setWorkerId(nodeIdentity.id());
+        // 新模拟器默认落在测试环境。
+        //
+        // 这一行是有针对性的：环境为空时 TestEnvironment.normalize(null) 判成 PROD，
+        // 也就是说一台刚起的模拟器，第一次跑流程就会去取<b>生产</b>账号变量。
+        // 模拟器本来就是拿来调试的，默认值不该指向生产。
+        // 真机不动——真机的环境是人按「这台装的是哪个包」配的，替他猜反而会配错。
+        if (Device.isEmulator(scannedDevice)
+                && (scannedDevice.getEnvironment() == null || scannedDevice.getEnvironment().isBlank())) {
+            scannedDevice.setEnvironment("TEST");
+        }
         deviceMapper.insert(scannedDevice);
-        log.info("发现新设备: {} ({}) status={}", scannedDevice.getName(), scannedDevice.getId(), status);
+        log.info("发现新设备: {} ({}) status={}{}", scannedDevice.getName(), scannedDevice.getId(), status,
+                Device.isEmulator(scannedDevice) ? " [模拟器，已默认测试环境]" : "");
     }
     
     /**

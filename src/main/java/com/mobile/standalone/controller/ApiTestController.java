@@ -193,6 +193,20 @@ public class ApiTestController {
         return ResponseEntity.ok(collectionService.liveCasesOfProject(project, includeArchived));
     }
 
+    /** 生产：某 Controller 下的接口分页，每个接口带它的用例 */
+    @GetMapping("/projects/{project}/live-interfaces")
+    public ResponseEntity<?> projectLiveInterfaces(
+            @PathVariable String project,
+            @RequestParam(required = false) String controller,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String kind,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false, defaultValue = "false") boolean includeArchived) {
+        return ResponseEntity.ok(collectionService.liveInterfacePage(
+                project, includeArchived, controller, keyword, kind, page, size));
+    }
+
     /** 生成用例：项目 → 测试集合 级联（对应用例集合 · 测试环境） */
     @GetMapping("/collections/pickable-tree")
     public ResponseEntity<?> pickableTree(
@@ -337,16 +351,38 @@ public class ApiTestController {
             @RequestParam(required = false) String environment,
             @RequestParam(required = false) Boolean enabledOnly,
             @RequestParam(required = false) String keyword,
+            /** BRANCH / REGRESSION / UNCLASSIFIED；空＝不筛。认不出来的值返回 400，不会悄悄不筛 */
+            @RequestParam(required = false) String caseKind,
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size
     ) {
-        if (page != null) {
-            int p = page;
-            int s = size != null ? size : 20;
-            PageResult<ApiTestCase> result = caseService.listCasesPage(project, collectionId, environment, enabledOnly, keyword, p, s);
-            return ResponseEntity.ok(result);
+        try {
+            if (page != null) {
+                int p = page;
+                int s = size != null ? size : 20;
+                PageResult<ApiTestCase> result = caseService.listCasesPage(
+                        project, collectionId, environment, enabledOnly, keyword, caseKind, p, s);
+                return ResponseEntity.ok(result);
+            }
+            return ResponseEntity.ok(
+                    caseService.listCases(project, collectionId, environment, enabledOnly, keyword, caseKind));
+        } catch (IllegalArgumentException e) {
+            // caseKind 传了认不出来的值。不兜成「不筛」：那会让界面把全部用例
+            // 显示成某一类，人按这个去分诊
+            return ResponseEntity.badRequest().body(Map.of("error", String.valueOf(e.getMessage())));
         }
-        return ResponseEntity.ok(caseService.listCases(project, collectionId, environment, enabledOnly, keyword));
+    }
+
+    /**
+     * 待分诊队列的入口：分支用例按来源分支分组计数。
+     *
+     * <p>返回 {@code [{sourceBranch, cnt}]}。分支已经合进 master 而用例还是 BRANCH，
+     * 就是「该分诊但没分诊」——合没合进 master 由前端拿变更分析的结果比对，
+     * 这个端点只负责「哪个分支还挂着几条用例」。
+     */
+    @GetMapping("/cases/branch-groups")
+    public ResponseEntity<?> branchCaseGroups(@RequestParam(required = false) String project) {
+        return ResponseEntity.ok(caseService.branchCaseGroups(project));
     }
 
     @GetMapping("/cases/{id}")

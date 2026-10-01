@@ -220,13 +220,14 @@ public class ApiTestScheduleService {
             // 定时任务本身就是那次确认——人是特意建了这条任务的。
             // 再要一次交互式确认，等于这个功能没法用
             req.setConfirmProd(true);
+            req.setTrigger("SCHEDULE");
             if (s.getCollectionId() != null) {
                 req.setCollectionId(s.getCollectionId());
             } else {
                 req.setCaseIds(allEnabledCaseIds(s.getProject()));
             }
             result = runnerService.run(req);
-            status = result.isOk() ? "PASSED" : "FAILED";
+            status = scheduleStatus(result);
             message = result.getMessage();
         } catch (Exception e) {
             // 跑挂了要留痕。静默失败的定时任务比没有定时任务更糟：
@@ -253,6 +254,18 @@ public class ApiTestScheduleService {
             result.setMessage(message);
         }
         return result;
+    }
+
+    /**
+     * 一条断言都没挂、只是有用例没跑成（连不上 / 超时 / 登录失败）记 BLOCKED。
+     * 记成 FAILED 的话，服务挂了那天定时任务整条标红，人会去翻用例而不是去看服务。
+     * 有真失败时仍是 FAILED——那才是要人看的。
+     */
+    static String scheduleStatus(RunResult r) {
+        if (r.isOk()) {
+            return "PASSED";
+        }
+        return r.getFailed() == 0 && r.getBlocked() > 0 ? "BLOCKED" : "FAILED";
     }
 
     /** cron 被人改坏时不能让整个 tick 抛出去——那会连带别的任务一起不跑 */

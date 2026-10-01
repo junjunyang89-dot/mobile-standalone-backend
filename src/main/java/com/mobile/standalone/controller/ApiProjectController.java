@@ -18,6 +18,7 @@ import java.util.Map;
 public class ApiProjectController {
 
     private final ApiProjectService projectService;
+    private final com.mobile.standalone.service.ProjectRepoSync repoSync;
 
     @GetMapping
     public ResponseEntity<List<ApiProject>> list(
@@ -119,6 +120,16 @@ public class ApiProjectController {
             ApiProject updated = projectService.update(code, body);
             return updated == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(updated);
         } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /** 按 GitLab 地址同步代码：没有本地仓库就 clone 并回填路径，有就 fetch */
+    @PostMapping("/{code}/sync-repo")
+    public ResponseEntity<?> syncRepo(@PathVariable String code) {
+        try {
+            return ResponseEntity.ok(repoSync.sync(code));
+        } catch (IllegalArgumentException | IllegalStateException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
     }

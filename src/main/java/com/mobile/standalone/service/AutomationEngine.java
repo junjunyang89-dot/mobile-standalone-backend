@@ -7,6 +7,8 @@ import org.springframework.stereotype.Component;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 自动化测试引擎
@@ -181,13 +183,58 @@ public class AutomationEngine {
     
     // ========== Android/HarmonyOS 实现 ==========
     
+    /**
+     * {@code adb shell input} 的超时下限。
+     *
+     * <p>看着像「发个点击而已，3 秒还不够？」——不够。{@code input} 不是内核调用，
+     * 是一个要现拉起 JVM 的 app_process 程序，光启动就要一两秒；
+     * 模拟器只给了 1 个核（AVD 默认就是 {@code hw.cpu.ncore=1}）时，五六秒是常态。
+     *
+     * <p>超时的表现特别有误导性：进程被 destroyForcibly 掉，返回 false，
+     * 上层报「点击失败 / 滑动失败」——看起来像定位没命中或者手势没生效，
+     * 实际上命令根本没来得及跑完。为这个查错方向能白花一下午。
+     */
+    private static final long INPUT_CMD_TIMEOUT_MS = 20_000;
+
     private boolean clickAndroid(String deviceId, int x, int y) throws IOException, InterruptedException {
-        Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "tap", String.valueOf(x), String.valueOf(y))
-                .redirectErrorStream(true)
-                .start();
-        
-        int exitCode = process.waitFor();
-        return exitCode == 0;
+        return runInputCmd(deviceId, INPUT_CMD_TIMEOUT_MS,
+                "input", "tap", String.valueOf(x), String.valueOf(y));
+    }
+
+    /**
+     * 跑一条 {@code adb shell} 命令，超时和失败都把设备端的输出带出来。
+     * <p>以前失败只留一个 false，日志里什么都没有——「滑动失败」查不出是超时还是命令报错。
+     */
+    private boolean runInputCmd(String deviceId, long timeoutMs, String... args)
+            throws IOException, InterruptedException {
+        List<String> cmd = new ArrayList<>(List.of("adb", "-s", deviceId, "shell"));
+        cmd.addAll(List.of(args));
+        Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+        StringBuilder out = new StringBuilder();
+        Thread drain = new Thread(() -> {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = r.readLine()) != null) out.append(line).append('\n');
+            } catch (Exception ignored) {
+                // 超时杀进程时流会断，正常
+            }
+        }, "adb-input-drain");
+        drain.setDaemon(true);
+        drain.start();
+        if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            p.destroyForcibly();
+            drain.join(300);
+            log.warn("adb {} 超时 {}ms: deviceId={}——设备太慢（模拟器给的核数/内存偏低？），命令没跑完就被掐了。已输出: {}",
+                    String.join(" ", args), timeoutMs, deviceId, out.toString().trim());
+            return false;
+        }
+        drain.join(800);
+        if (p.exitValue() != 0) {
+            log.warn("adb {} 失败 exit={} deviceId={} out={}",
+                    String.join(" ", args), p.exitValue(), deviceId, out.toString().trim());
+            return false;
+        }
+        return true;
     }
     
     private boolean clickAndroidElement(String deviceId, String selector) throws IOException, InterruptedException {
@@ -304,46 +351,86 @@ public class AutomationEngine {
     }
     
     private boolean swipeAndroid(String deviceId, int x1, int y1, int x2, int y2, int duration) throws IOException, InterruptedException {
-        Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "swipe",
+        // 滑动本身要耗掉 duration 毫秒，超时必须把这段加上——
+        // 否则「滑得慢一点」和「设备卡」这两件事会一起把它顶穿
+        long timeout = Math.max(INPUT_CMD_TIMEOUT_MS, duration + 15_000L);
+        return runInputCmd(deviceId, timeout, "input", "swipe",
                 String.valueOf(x1), String.valueOf(y1),
                 String.valueOf(x2), String.valueOf(y2),
-                String.valueOf(duration))
-                .redirectErrorStream(true)
-                .start();
-        
-        int exitCode = process.waitFor();
-        return exitCode == 0;
+                String.valueOf(duration));
     }
     
     private boolean inputTextAndroid(String deviceId, String text) throws IOException, InterruptedException {
         // 先点击输入框（需要知道输入框位置或使用元素定位）
         // 然后输入文本
-        Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "input", "text", text)
-                .redirectErrorStream(true)
-                .start();
-        
-        int exitCode = process.waitFor();
-        return exitCode == 0;
+        // 走 adb input text，完全不碰设备上的软键盘——
+        // 模拟器上 Gboard 每敲一个数字都要重绘一次，1 核机上人肉输入卡到没法用，
+        // 而这条命令是一次性把整串塞进焦点控件的
+        return runInputCmd(deviceId, INPUT_CMD_TIMEOUT_MS, "input", "text", text);
     }
     
     private String takeScreenshotAndroid(String deviceId, String savePath) throws IOException, InterruptedException {
-        // 使用 screencap + pull，兼容性最好；顺序执行无竞争
         java.io.File outFile = new java.io.File(savePath);
         java.io.File parent = outFile.getParentFile();
         if (parent != null && !parent.exists()) {
             parent.mkdirs();
         }
-        String devicePath = "/sdcard/screenshot.png";
-        Process p1 = new ProcessBuilder("adb", "-s", deviceId, "shell", "screencap", "-p", devicePath)
-                .redirectErrorStream(true).start();
-        p1.waitFor();
-        Process p2 = new ProcessBuilder("adb", "-s", deviceId, "pull", devicePath, savePath)
-                .redirectErrorStream(true).start();
-        if (p2.waitFor() == 0 && outFile.exists() && outFile.length() > 0) {
+        if (screencapExecOut(deviceId, savePath) || screencapPull(deviceId, savePath)) {
+            com.mobile.standalone.service.inspect.CrushedScreenshotLift.liftIfNeeded(outFile.toPath());
             return savePath;
         }
         log.warn("ADB 截图失败: deviceId={} savePath={}", deviceId, savePath);
         return null;
+    }
+
+    /** 不落地设备文件。读流必须另开线程，否则 dump/screencap 卡住时永远走不到 waitFor。 */
+    private boolean screencapExecOut(String deviceId, String savePath) throws IOException, InterruptedException {
+        Process p = new ProcessBuilder("adb", "-s", deviceId, "exec-out", "screencap", "-p").start();
+        java.nio.file.Path dest = java.nio.file.Path.of(savePath);
+        Thread drain = new Thread(() -> {
+            try (var in = p.getInputStream(); var out = java.nio.file.Files.newOutputStream(dest)) {
+                in.transferTo(out);
+            } catch (Exception ignored) {
+                // 超时杀进程时流会断
+            }
+        }, "screencap-drain");
+        drain.setDaemon(true);
+        drain.start();
+        if (!p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)) {
+            p.destroyForcibly();
+            drain.join(500);
+            return false;
+        }
+        drain.join(1500);
+        java.io.File f = new java.io.File(savePath);
+        return p.exitValue() == 0 && f.length() > 100 && isPng(f);
+    }
+
+    private boolean screencapPull(String deviceId, String savePath) throws IOException, InterruptedException {
+        String devicePath = "/data/local/tmp/ms_screenshot.png";
+        Process p1 = new ProcessBuilder("adb", "-s", deviceId, "shell", "screencap", "-p", devicePath)
+                .redirectErrorStream(true).start();
+        if (!p1.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)) {
+            p1.destroyForcibly();
+            return false;
+        }
+        Process p2 = new ProcessBuilder("adb", "-s", deviceId, "pull", devicePath, savePath)
+                .redirectErrorStream(true).start();
+        if (!p2.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)) {
+            p2.destroyForcibly();
+            return false;
+        }
+        java.io.File f = new java.io.File(savePath);
+        return p2.exitValue() == 0 && f.length() > 100;
+    }
+
+    private static boolean isPng(java.io.File f) {
+        try (var in = java.nio.file.Files.newInputStream(f.toPath())) {
+            byte[] h = in.readNBytes(4);
+            return h.length == 4 && h[0] == (byte) 0x89 && h[1] == 'P' && h[2] == 'N' && h[3] == 'G';
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     private String getPageSourceAndroid(String deviceId) throws IOException, InterruptedException {

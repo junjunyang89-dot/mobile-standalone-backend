@@ -35,7 +35,10 @@ public final class PermissionRules {
             // 加不上任何请求头，拦下来的结果是所有报告的图全变成裂图。
             // 这些路径本身是不可猜的（任务 id + 时间戳），而真正要守的是接口那一层
             "/tmp/screenshots", "tmp/screenshots", "/ui-element-previews",
-            "/handbook-images", "/agent-uploads", "/bug-images", "/issue-images");
+            "/handbook-images", "/agent-uploads", "/bug-images", "/issue-images",
+            "/knowledge-note-images",
+            // 本机调试用的免登录查询。只放行 /open，列表/增删改仍要登录
+            "/debug-tests/open");
 
     /**
      * 任务步骤截图也是写进 &lt;img src&gt; 的，带不上 Authorization。
@@ -91,6 +94,32 @@ public final class PermissionRules {
             "/platform-users", "/worker-nodes");
 
     /**
+     * 用 POST 实现的<b>不可恢复</b>操作，提到 ADMIN。
+     * <p>
+     * 按 HTTP 方法分档有个漏洞：「DELETE 要 ADMIN」的前提是销毁都走 DELETE。
+     * 可实际上批量销毁常常写成 POST——{@code /reimport} 会先删光一批用例再重导，
+     * {@code /cleanup} 直接删文件。它们比很多 DELETE 更危险，却只要 TESTER。
+     * <p>
+     * 所以这份清单和 {@link #READ_ONLY_POST_SUFFIXES} 是对称的：那份把「其实只是读」的 POST 降到
+     * VIEWER，这份把「其实是销毁」的 POST 升到 ADMIN。新增批量销毁类接口时要记得往这里加一条。
+     */
+    private static final List<String> ADMIN_POST_SUFFIXES = List.of(
+            "/reimport", "/cleanup", "/clear", "/reset", "/truncate", "/purge");
+
+    /**
+     * 生产环境的写操作，一律提到 ADMIN。
+     * <p>
+     * 这些路径下改的是<b>所有人共用</b>的东西：生产 baseUrl、生产鉴权头、生产账号变量。
+     * 一个人为了调自己那条用例把 PROD 的 baseUrl 指到预发，全组的线上巡检结果就静默变成假阳性，
+     * 而且报表上看不出任何异常。
+     * <p>
+     * 更要命的是 secret：{@code EnvVariableService} 刻意不提供查看真值的接口，
+     * 所以<b>覆盖即永久丢失</b>——没人说得出旧值是什么。
+     */
+    private static final List<String> PROD_WRITE_MARKERS = List.of(
+            "/envs/prod", "/environments/prod");
+
+    /**
      * 路由 → 最低角色。前端菜单据此过滤。
      * <p>
      * 没列出来的路由默认 {@link PlatformRole#VIEWER}——菜单是给人找路的，
@@ -99,16 +128,21 @@ public final class PermissionRules {
     private static final Map<String, PlatformRole> ROUTE_MIN_ROLE = Map.ofEntries(
             Map.entry("/platform-users", PlatformRole.ADMIN),
             Map.entry("/devices", PlatformRole.TESTER),
+            Map.entry("/ui-recordings", PlatformRole.TESTER),
             Map.entry("/ui-apps", PlatformRole.TESTER),
+            Map.entry("/app-packs", PlatformRole.TESTER),
             Map.entry("/app-online-regression", PlatformRole.TESTER),
             Map.entry("/app-automation", PlatformRole.TESTER),
             Map.entry("/ui-flows", PlatformRole.TESTER),
+            Map.entry("/asr", PlatformRole.TESTER),
             Map.entry("/ui-elements", PlatformRole.TESTER),
             Map.entry("/ui-inspector-import", PlatformRole.TESTER),
             Map.entry("/api-environments", PlatformRole.TESTER),
             Map.entry("/api-schedules", PlatformRole.TESTER),
             // 抓包会改手机的代理设置，只读账号不该能碰真机
-            Map.entry("/packet-capture", PlatformRole.TESTER));
+            Map.entry("/packet-capture", PlatformRole.TESTER),
+            Map.entry("/status-monitor", PlatformRole.TESTER),
+            Map.entry("/incident-playbooks", PlatformRole.TESTER));
 
     /**
      * 路径里出现 {@code .} / {@code ..} 段、反斜杠、或解码后仍残留的 {@code %}——正常业务路径不会有，一律拒绝。
@@ -150,6 +184,25 @@ public final class PermissionRules {
      * 会自动继承 {@code /health}、{@code /platform-users} 的规则——前者变成免鉴权，后者可能反过来。
      * 这种口子加路由的人根本不会意识到自己开了它。
      */
+    /**
+     * 这条路径是不是在动生产环境的配置。
+     * <p>
+     * 用<b>包含</b>而不是前缀：真实路径是 {@code /api-tests/envs/PROD/variables}，
+     * 生产段夹在中间。大小写不敏感，因为 {@code TestEnvironment.normalize} 会把 prod/PROD 都归一。
+     */
+    static boolean isProdWritePath(String normalizedPath) {
+        if (normalizedPath == null) {
+            return false;
+        }
+        String lower = normalizedPath.toLowerCase(Locale.ROOT);
+        for (String marker : PROD_WRITE_MARKERS) {
+            if (lower.equals(marker) || lower.contains(marker + "/") || lower.endsWith(marker)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean matchesPrefix(String path, String prefix) {
         return path.equals(prefix) || path.startsWith(prefix + "/");
     }
@@ -179,14 +232,26 @@ public final class PermissionRules {
         if (ADMIN_ONLY_PREFIXES.stream().anyMatch(pre -> matchesPrefix(p, pre))) {
             return PlatformRole.ADMIN;
         }
+        // 写生产环境配置要 ADMIN。只拦写操作：读（含掩码后的变量列表）照旧
+        if (!"GET".equals(m) && !"HEAD".equals(m) && !"OPTIONS".equals(m)
+                && isProdWritePath(p)) {
+            return PlatformRole.ADMIN;
+        }
         return switch (m) {
             // OPTIONS 是浏览器的预检，带不上令牌；拦掉的话所有跨域请求都发不出去
             case "GET", "HEAD", "OPTIONS" -> PlatformRole.VIEWER;
             // 删除是唯一不可回退的操作：改错了能改回来，删掉的一批元素和用例没有回退
             case "DELETE" -> PlatformRole.ADMIN;
-            case "POST" -> READ_ONLY_POST_SUFFIXES.stream().anyMatch(p::endsWith)
-                    ? PlatformRole.VIEWER
-                    : PlatformRole.TESTER;
+            case "POST" -> {
+                // 先判销毁再判只读：两份清单万一将来撞上同一个后缀，
+                // 宁可误判成「要 ADMIN」也不能误判成「谁都能调」
+                if (ADMIN_POST_SUFFIXES.stream().anyMatch(p::endsWith)) {
+                    yield PlatformRole.ADMIN;
+                }
+                yield READ_ONLY_POST_SUFFIXES.stream().anyMatch(p::endsWith)
+                        ? PlatformRole.VIEWER
+                        : PlatformRole.TESTER;
+            }
             default -> PlatformRole.TESTER;
         };
     }

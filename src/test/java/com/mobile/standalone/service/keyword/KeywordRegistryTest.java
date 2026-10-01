@@ -57,9 +57,19 @@ class KeywordRegistryTest {
 
         assertSame(registry.find("SWIPE"), registry.find("SWIPE_IOS"));
         assertSame(registry.find("SCROLL_UNTIL"), registry.find("SCROLL_UNTIL_IOS"));
+        assertSame(registry.find("SCROLL_UNTIL"), registry.find("SCROLL_UNTIL_SHORT"));
         assertSame(registry.find("COLD_START"), registry.find("COLD_START_IOS"));
         assertSame(registry.find("HOT_START"), registry.find("HOT_START_IOS"));
         assertSame(registry.find("LAUNCH_APP"), registry.find("LAUNCH_APP_IOS"));
+    }
+
+    @Test
+    void EditText输入能按别名解析() {
+        KeywordRegistry registry = new KeywordRegistry(List.of(
+                new com.mobile.standalone.service.keyword.handlers.InputEditTextHandler()));
+
+        assertSame(registry.find("INPUT_EDITTEXT"), registry.find("EDITTEXT"));
+        assertEquals("INPUT_EDITTEXT", registry.find("edittext").code());
     }
 
     @Test

@@ -13,6 +13,7 @@
         <result property="environment" column="environment"/>
         <result property="envBound" column="env_bound"/>
         <result property="releaseStage" column="release_stage"/>
+        <result property="core" column="is_core"/>
         <result property="isComponent" column="is_component"/>
         <result property="steps" column="steps"/>
         <result property="dependsOn" column="depends_on"/>
@@ -31,6 +32,7 @@
             <if test="catalog != null and catalog != ''">AND catalog = #{catalog}</if>
             <if test="environment != null and environment != ''">AND COALESCE(environment, 'PROD') = #{environment}</if>
             <if test="componentOnly != null and componentOnly">AND is_component = 1</if>
+            <if test="coreOnly != null and coreOnly">AND is_core = 1</if>
             <if test="name != null and name != ''">AND name LIKE CONCAT('%', #{name}, '%')</if>
         </where>
         ORDER BY sort_order ASC, updated_at DESC
@@ -72,6 +74,7 @@
           <if test="onlineOnly">
               AND COALESCE(release_stage, 'ONLINE') = 'ONLINE'
           </if>
+          <if test="coreOnly">AND is_core = 1</if>
           AND (catalog = 'AUTOMATION'
                OR env_bound = 0
                OR COALESCE(environment, 'PROD') =
@@ -104,9 +107,9 @@
 
     <insert id="insert">
         INSERT INTO ui_flows
-        (id, name, description, app_id, platform, catalog, environment, env_bound, release_stage, is_component, steps, depends_on, enabled, sort_order, created_by, created_at, updated_at)
+        (id, name, description, app_id, platform, catalog, environment, env_bound, release_stage, is_core, is_component, steps, depends_on, enabled, sort_order, created_by, created_at, updated_at)
         VALUES
-        (#{id}, #{name}, #{description}, #{appId}, #{platform}, #{catalog}, #{environment}, #{envBound}, #{releaseStage}, #{isComponent}, #{steps}, #{dependsOn},
+        (#{id}, #{name}, #{description}, #{appId}, #{platform}, #{catalog}, #{environment}, #{envBound}, #{releaseStage}, #{core}, #{isComponent}, #{steps}, #{dependsOn},
          #{enabled}, #{sortOrder}, #{createdBy}, #{createdAt}, #{updatedAt})
     </insert>
 
@@ -120,6 +123,7 @@
             environment = #{environment},
             env_bound = #{envBound},
             release_stage = #{releaseStage},
+            is_core = #{core},
             is_component = #{isComponent},
             steps = #{steps},
             depends_on = #{dependsOn},

@@ -13,6 +13,9 @@
         <result property="config" column="config"/>
         <result property="environment" column="environment"/>
         <result property="workerId" column="worker_id"/>
+        <result property="emulator" column="is_emulator"/>
+        <result property="lastUsedAt" column="last_used_at"/>
+        <result property="disabled" column="disabled"/>
     </resultMap>
     
     <select id="findAll" resultMap="DeviceResultMap">
@@ -28,8 +31,8 @@
     </select>
     
     <insert id="insert">
-        INSERT INTO devices (id, name, platform, version, status, last_seen, config, environment, worker_id)
-        VALUES (#{id}, #{name}, #{platform}, #{version}, #{status}, #{lastSeen}, #{config}, #{environment}, #{workerId})
+        INSERT INTO devices (id, name, platform, version, status, last_seen, config, environment, worker_id, is_emulator)
+        VALUES (#{id}, #{name}, #{platform}, #{version}, #{status}, #{lastSeen}, #{config}, #{environment}, #{workerId}, #{emulator})
     </insert>
     
     <update id="update">
@@ -42,8 +45,21 @@
             config = #{config},
             <!-- 刷新设备时不传 environment，不能因此把人配好的环境清掉 -->
             environment = COALESCE(#{environment}, environment),
-            worker_id = COALESCE(#{workerId}, worker_id)
+            worker_id = COALESCE(#{workerId}, worker_id),
+            <!-- 同 environment：这一列由扫描定性，探测不出来时别把已知结论清成 NULL -->
+            is_emulator = COALESCE(#{emulator}, is_emulator),
+            <!-- 这两列由设备池维护，设备刷新不该动它们 -->
+            last_used_at = COALESCE(#{lastUsedAt}, last_used_at),
+            disabled = COALESCE(#{disabled}, disabled)
         WHERE id = #{id}
+    </update>
+
+    <update id="markUsed">
+        UPDATE devices SET last_used_at = #{usedAt} WHERE id = #{id}
+    </update>
+
+    <update id="setDisabled">
+        UPDATE devices SET disabled = #{disabled} WHERE id = #{id}
     </update>
     
     <delete id="deleteById">

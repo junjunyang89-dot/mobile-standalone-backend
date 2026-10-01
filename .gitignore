@@ -82,3 +82,6 @@ allure-results/
 patches/
 *.tmp
 *.bak
+
+# Cursor SDK bridge
+scripts/cursor-ask/node_modules/

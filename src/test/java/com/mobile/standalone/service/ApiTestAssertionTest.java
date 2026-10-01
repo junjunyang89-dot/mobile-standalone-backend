@@ -23,7 +23,7 @@ class ApiTestAssertionTest {
     @BeforeEach
     void setUp() {
         runner = new ApiTestRunnerService(null, null, null, null, null, null, null,
-                new com.mobile.standalone.service.apitest.DbAssertRunner(), null);
+                new com.mobile.standalone.service.apitest.DbAssertRunner(), null, null);
     }
 
     private boolean check(String assertions, int status, String body,

@@ -52,9 +52,23 @@ public class DeviceManager {
     @Autowired
     private HmdriverBridge hmdriverBridge;
 
+    @Autowired(required = false)
+    private com.mobile.standalone.service.pool.IosSimulatorCatalog iosSims;
+
+    @Autowired(required = false)
+    private com.mobile.standalone.service.pool.HarmonyEmulatorCatalog harmonyEmu;
+
     /** 每台设备常挂的 WDA xcodebuild / iproxy（不重装，仅 test-without-building） */
     private final ConcurrentHashMap<String, Process> iosWdaXcodeProcs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Process> iosWdaIproxyProcs = new ConcurrentHashMap<>();
+    /**
+     * 序列号 → 是不是模拟器。
+     * <p>
+     * 缓存是必须的，不是优化：设备扫描每 5 秒跑一次，而定性要 dump 一次 getprop。
+     * 同一个序列号的这个属性不会变，所以问一次就够。
+     */
+    private final ConcurrentHashMap<String, Boolean> emulatorFlags = new ConcurrentHashMap<>();
+
     /** 最近一次 WDA 拉起失败原因（供真机点选等接口回显） */
     private final ConcurrentHashMap<String, String> iosWdaLastError = new ConcurrentHashMap<>();
     /**
@@ -131,15 +145,18 @@ public class DeviceManager {
                             if (isErrorLikeVersion(version)) {
                                 version = null;
                             }
+                            boolean emulator = detectEmulator(deviceId);
                             Device device = new Device();
                             device.setId(deviceId);
                             device.setName(deviceName != null ? deviceName : "Android Device");
                             device.setPlatform(Device.Platform.ANDROID);
                             device.setVersion(version);
                             device.setStatus(Device.DeviceStatus.CONNECTED);
+                            device.setEmulator(emulator);
                             devices.add(device);
                             keepAndroidAwakeOnUsb(deviceId);
-                            log.info("发现 Android 设备: {} ({})", device.getName(), deviceId);
+                            log.info("发现 Android 设备: {} ({}){}", device.getName(), deviceId,
+                                    emulator ? " [模拟器]" : "");
                         }
                     }
                 }
@@ -349,8 +366,50 @@ public class DeviceManager {
         } catch (IOException | InterruptedException e) {
             log.debug("扫描 iOS 设备失败，可能未安装 libimobiledevice 或没有 iOS 设备连接: {}", e.getMessage());
         }
+
+        // idevice_id 只认 USB 真机。已经 Booted 的 Simulator 要单独从 simctl 收进来，
+        // 否则设备池永远只有安卓模拟器，iOS 自动化只能插真机。
+        appendBootedIosSimulators(devices);
         
         return devices;
+    }
+
+    private void appendBootedIosSimulators(List<Device> devices) {
+        if (iosSims == null) {
+            return;
+        }
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (Device d : devices) {
+            if (d.getId() != null) seen.add(d.getId());
+        }
+        try {
+            for (com.mobile.standalone.service.pool.IosSimulatorCatalog.SimInfo s : iosSims.list()) {
+                if (s == null || !s.booted() || s.udid() == null || seen.contains(s.udid())) continue;
+                Device device = new Device();
+                device.setId(s.udid());
+                device.setName(s.name() + "（模拟器）");
+                device.setPlatform(Device.Platform.IOS);
+                device.setVersion(s.runtime());
+                device.setStatus(Device.DeviceStatus.CONNECTED);
+                device.setEmulator(true);
+                devices.add(device);
+                seen.add(s.udid());
+                log.info("发现 iOS 模拟器: {} ({})", s.name(), s.udid());
+            }
+        } catch (Exception e) {
+            log.debug("扫描 iOS 模拟器失败: {}", e.getMessage());
+        }
+    }
+
+    /** 这台是不是已经 Booted 的 iOS Simulator（不是 USB 真机） */
+    public boolean isIosSimulator(String deviceId) {
+        if (deviceId == null || iosSims == null) return false;
+        try {
+            var s = iosSims.find(deviceId);
+            return s != null && s.booted();
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     /**
@@ -392,12 +451,24 @@ public class DeviceManager {
                     device.setName(name != null && !name.isBlank() ? name : "HarmonyOS Device");
                     device.setVersion(version);
                     device.setStatus(Device.DeviceStatus.CONNECTED);
-                    log.info("发现鸿蒙设备(hdc): {} ({})", device.getName(), deviceId);
+                    if (harmonyLooksLikeEmulator(deviceId, device.getName())) {
+                        device.setEmulator(true);
+                        if (!device.getName().endsWith("（模拟器）")) {
+                            device.setName(device.getName() + "（模拟器）");
+                        }
+                        log.info("发现鸿蒙模拟器(hdc): {} ({})", device.getName(), deviceId);
+                    } else {
+                        log.info("发现鸿蒙设备(hdc): {} ({})", device.getName(), deviceId);
+                    }
                 } else {
                     String reason = target.unauthorized() ? "请点允许USB调试" : "离线";
                     device.setName("鸿蒙设备(" + reason + ")");
                     device.setVersion(null);
                     device.setStatus(Device.DeviceStatus.DISCONNECTED);
+                    if (harmonyLooksLikeEmulator(deviceId, device.getName())) {
+                        device.setEmulator(true);
+                        device.setName("鸿蒙模拟器(" + reason + ")");
+                    }
                     log.info("发现鸿蒙设备(hdc未就绪): {} ({})", device.getName(), deviceId);
                 }
                 devices.add(device);
@@ -2228,17 +2299,24 @@ public class DeviceManager {
     }
     
     /**
-     * 校验是否为合法的 ADB 设备 ID（序列号），排除 adb 错误行被误解析
+     * 校验是否为合法的 ADB 设备 ID（序列号），排除 adb 错误行被误解析。
+     * <p>
+     * 必须收下 {@code 127.0.0.1:5555}：雷电 / 夜神是 {@code adb connect} 进来的，
+     * 只认 {@code [a-zA-Z0-9._-]} 会把整台模拟器从设备池里抹掉。
      */
-    private boolean isValidAdbDeviceId(String deviceId) {
+    static boolean isValidAdbDeviceId(String deviceId) {
         if (deviceId == null || deviceId.length() < 2) return false;
-        String lower = deviceId.toLowerCase();
+        String lower = deviceId.toLowerCase(Locale.ROOT);
         if (lower.contains("adb") || lower.contains("not found") || lower.contains("list")
                 || lower.contains("error") || deviceId.contains("'") || deviceId.contains("\"")) {
             return false;
         }
-        // 设备 ID 通常为字母数字、点、横线、下划线
-        return deviceId.matches("^[a-zA-Z0-9._-]+$");
+        if (deviceId.matches("^[a-zA-Z0-9._-]+$")) {
+            return true;
+        }
+        // host:port —— 本机模拟器、云真机桥
+        return deviceId.matches("^[a-zA-Z0-9._-]+:[0-9]{2,5}$")
+                || deviceId.matches("^[0-9]{1,3}(\\.[0-9]{1,3}){3}:[0-9]{2,5}$");
     }
 
     /**
@@ -2264,6 +2342,119 @@ public class DeviceManager {
         return null;
     }
     
+    /**
+     * 这台是不是模拟器。
+     *
+     * <p>不靠序列号前缀：{@code emulator-5554} 只覆盖本地 AVD，雷电/夜神/云真机
+     * 是以 {@code 127.0.0.1:5555} 连进来的，前缀一样也判不出来。所以读属性定性。
+     *
+     * <p>判错的两个方向代价不一样，所以这里的取舍是<b>宁可漏判</b>：
+     * 把模拟器当成真机，最坏是有人在模拟器上跑了一次生产巡检，看结果就知道不对；
+     * 把真机当成模拟器，那台手机会被拦得跑不了生产流程，而报错说的是「模拟器不能跑生产」——
+     * 人对着一台真手机看这句话，只会觉得平台坏了。所以只认几个明确的标志，不做模糊猜测。
+     */
+    private boolean detectEmulator(String deviceId) {
+        Boolean cached = emulatorFlags.get(deviceId);
+        if (cached != null) {
+            return cached;
+        }
+        String props = readAllProps(deviceId);
+        boolean result = looksLikeEmulator(deviceId, props);
+        // 只缓存「真的读到属性」的结论。
+        //
+        // 探测失败（设备刚上线还没就绪、adb 未授权、getprop 超时）时得到的是一个
+        // 靠序列号猜的兜底值，把它缓存下来等于把猜测钉死到进程结束：
+        // 一台通过 127.0.0.1:5555 连进来的雷电/夜神，只要第一次探测赶上没就绪，
+        // 就会永远被当成真机——而且没有任何现象提示你，只是模拟器那一栏一直是 0。
+        if (props != null && !props.isBlank()) {
+            emulatorFlags.put(deviceId, result);
+        }
+        return result;
+    }
+
+    /**
+     * 定性规则本体，单独抽出来是为了能不连设备直接测——
+     * 这个判断错了会让一台真手机跑不了生产流程，不该只靠肉眼 review。
+     *
+     * @param props {@code adb shell getprop} 的完整输出；null 表示没读到
+     */
+    /**
+     * 鸿蒙模拟器定性。宁可漏判，不能把 USB 真机标成模拟器——
+     * 标错了这台畅享就跑不了生产巡检。
+     * <p>
+     * 认这几条：DevEco 目录对上了；hdc 序列号是环回地址（本机 Emulator）；
+     * 产品名里写了「模拟器」。无线真机是局域网 IP，不是 127.0.0.1。
+     */
+    boolean harmonyLooksLikeEmulator(String serial, String productName) {
+        if (harmonyEmu != null && harmonyEmu.isRunningSerial(serial)) {
+            return true;
+        }
+        return looksLikeHarmonyEmulator(serial, productName);
+    }
+
+    static boolean looksLikeHarmonyEmulator(String serial, String productName) {
+        String id = serial == null ? "" : serial.trim();
+        if (id.startsWith("127.0.0.1:") || id.startsWith("localhost:")) {
+            return true;
+        }
+        String name = productName == null ? "" : productName.toLowerCase(Locale.ROOT);
+        return name.contains("模拟器") || name.contains("emulator");
+    }
+
+    static boolean looksLikeEmulator(String serial, String props) {
+        String id = serial == null ? "" : serial.trim();
+        if (props == null || props.isBlank()) {
+            // 属性读不到时只认最没有歧义的那一条：本地 AVD 的序列号形如 emulator-5554。
+            // 真机的序列号不长这样，所以这一条不会误伤
+            return id.startsWith("emulator-");
+        }
+        String p = props.toLowerCase(Locale.ROOT);
+        if (p.contains("[ro.kernel.qemu]: [1]")) return true;
+        if (p.contains("[ro.boot.qemu]: [1]")) return true;
+        if (p.contains("[ro.build.characteristics]: [") && characteristicsHasEmulator(p)) return true;
+        // goldfish / ranchu 是 AOSP 模拟器的内核；vbox86 / android_x86 / ttvm 是雷电夜神这一类
+        for (String hw : new String[]{"goldfish", "ranchu", "vbox86", "android_x86", "ttvm"}) {
+            if (p.contains("[ro.hardware]: [" + hw)) return true;
+        }
+        return id.startsWith("emulator-");
+    }
+
+    /**
+     * 只看 ro.build.characteristics 这一行里有没有 emulator。
+     * <p>
+     * 不能在整份 getprop 里搜 "emulator"——真机上装个模拟器类 APP、
+     * 或者某个属性值里带这个词，就会把真机判成模拟器。
+     */
+    private static boolean characteristicsHasEmulator(String lowerProps) {
+        int i = lowerProps.indexOf("[ro.build.characteristics]: [");
+        if (i < 0) return false;
+        int end = lowerProps.indexOf(']', i + "[ro.build.characteristics]: [".length());
+        if (end < 0) return false;
+        return lowerProps.substring(i, end).contains("emulator");
+    }
+
+    /** dump 全部系统属性；失败返回 null（区别于「拿到了但没有模拟器标志」） */
+    private String readAllProps(String deviceId) {
+        try {
+            Process process = new ProcessBuilder("adb", "-s", deviceId, "shell", "getprop")
+                    .redirectErrorStream(true)
+                    .start();
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append('\n');
+                }
+            }
+            process.waitFor();
+            return sb.toString();
+        } catch (IOException | InterruptedException e) {
+            log.debug("读取设备属性失败 {}: {}", deviceId, e.getMessage());
+            return null;
+        }
+    }
+
     /**
      * 获取 Android 设备版本
      */

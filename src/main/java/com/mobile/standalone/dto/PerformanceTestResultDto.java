@@ -45,6 +45,25 @@ public class PerformanceTestResultDto {
      * 也可能在任务结束时已写入 result_data）。
      */
     private Object metricKitSummary;
+
+    /**
+     * 冷启动耗时（中位数，毫秒）。
+     *
+     * <p>量到<b>第一帧画出来</b>为止，不是「首页数据加载完、能用了」。
+     * 一个先画骨架屏再请求数据的版本在这个数字上会显得很快——
+     * 要量「真正能用」得在代码里埋点，别把这个当成那个。
+     */
+    private Double coldStartMs;
+
+    /** 冷启动各轮原始值 + 丢弃原因。给人自己判断这次波动大不大 */
+    private Object coldStartDetail;
+
+    /**
+     * 内存泄漏分析结论。流程里没打过 MEMORY_CHECKPOINT 时为 null。
+     * <p>
+     * null 表示<b>没测</b>，不是「没泄漏」——前端要把这两种显示成不同的样子。
+     */
+    private Object memoryLeak;
     /** 资源采样序列（时间点 + CPU/内存），用于画曲线 */
     private List<ResourceSample> resourceSamples;
     /** 操作明细（步骤索引、类型、耗时、关联资源），用于操作详情与峰值步骤 */

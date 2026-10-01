@@ -114,6 +114,41 @@ public class AndroidDriver implements PlatformDriver {
         return automationEngine.getPageSource(deviceId, com.mobile.standalone.entity.Device.Platform.ANDROID);
     }
 
+    /**
+     * 当前前台应用的包名（拿不到返回 null）。
+     * <p>专给失败诊断用：元素找不到时，最常见的原因是应用压根不在前台
+     * （流程缺了「启动应用」这一步、上一步把应用退到后台了、崩溃了）。
+     * 不查这一下的话，报错永远停在「点击失败: xxx」，看不出是找错了还是根本没打开。
+     */
+    public String getForegroundPackage(String deviceId) {
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell",
+                    "dumpsys", "window", "windows")
+                    .redirectErrorStream(true)
+                    .start();
+            String out = new String(p.getInputStream().readAllBytes());
+            if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            int idx = out.indexOf("mCurrentFocus=");
+            if (idx < 0) return null;
+            int end = out.indexOf('}', idx);
+            String seg = end > idx ? out.substring(idx, end) : out.substring(idx);
+            // ... u0 com.pkg.name/com.pkg.name.MainActivity
+            int slash = seg.lastIndexOf('/');
+            if (slash < 0) return null;
+            String head = seg.substring(0, slash);
+            int sp = head.lastIndexOf(' ');
+            String pkg = sp >= 0 ? head.substring(sp + 1) : head;
+            pkg = pkg.trim();
+            return pkg.isEmpty() || !pkg.contains(".") ? null : pkg;
+        } catch (Exception e) {
+            log.trace("获取前台包名失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
     @Override
     public String getCurrentActivity(String deviceId) {
         try {

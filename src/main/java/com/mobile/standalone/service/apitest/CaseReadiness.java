@@ -53,6 +53,13 @@ public final class CaseReadiness {
      *                       要能在这里面找到，否则跑起来是一条带字面量花括号的 URL
      */
     public static Result check(ApiTestCase c, Set<String> knownVariables) {
+        return check(c, knownVariables, false);
+    }
+
+    /**
+     * @param authCovered 登录态不用用例自己管：源码看出这个接口不要登录，或项目配了自动登录
+     */
+    public static Result check(ApiTestCase c, Set<String> knownVariables, boolean authCovered) {
         List<String> todos = new ArrayList<>();
         if (c == null) {
             return new Result(false, List.of("用例不存在"));
@@ -60,7 +67,7 @@ public final class CaseReadiness {
         if (!hasMeaningfulBody(c)) {
             todos.add("请求体是空的，补一个真实的入参");
         }
-        if (!hasAuthReference(c)) {
+        if (!authCovered && !hasAuthReference(c)) {
             todos.add("没带登录态，补 Authorization 或 token 头（可以引用 {{token}}）");
         }
         List<String> missing = missingPathVars(c.getPath(), knownVariables);

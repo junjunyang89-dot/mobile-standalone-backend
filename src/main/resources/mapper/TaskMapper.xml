@@ -62,6 +62,23 @@
         SELECT * FROM tasks WHERE id = #{id}
     </select>
     
+    <!--
+        排队中的任务：状态还是 PENDING、且没分到设备。
+        「没分到设备」用 device_id 判断，而不是另加一个 queued 标志位——
+        标志位和真实状态迟早会不一致，而这里的 device_id 本来就是权威。
+    -->
+    <select id="findQueued" resultMap="TaskResultMap">
+        SELECT * FROM tasks
+        WHERE status = 'PENDING' AND (device_id IS NULL OR device_id = '')
+        ORDER BY created_at ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countQueued" resultType="int">
+        SELECT COUNT(1) FROM tasks
+        WHERE status = 'PENDING' AND (device_id IS NULL OR device_id = '')
+    </select>
+
     <select id="findByStatus" resultMap="TaskResultMap">
         SELECT * FROM tasks WHERE status = #{status} ORDER BY created_at DESC
     </select>

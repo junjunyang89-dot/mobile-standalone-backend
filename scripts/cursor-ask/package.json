@@ -1,0 +1,10 @@
+{
+  "name": "cursor-ask-bridge",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Java 后端调用的 Cursor SDK 本机桥：stdin JSON → stdout JSON",
+  "dependencies": {
+    "@cursor/sdk": "^1.0.31"
+  }
+}

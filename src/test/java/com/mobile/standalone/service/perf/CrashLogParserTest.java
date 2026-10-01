@@ -119,6 +119,50 @@ class CrashLogParserTest {
         assertTrue(CrashLogParser.parse("一切正常\n没有崩溃", PKG).isEmpty());
     }
 
+    /** 下面三段取自小米 10 真机：am crash 打到 WebView 渲染进程后，整个应用跟着退出 */
+    private static final String STEAM = "com.pwrd.steam.esports";
+    private static final String EVENTS_WEBVIEW_DEATH = """
+            09-29 19:21:22.008  2068  4411 I am_proc_died: [0,29282,com.google.android.webview:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0,0,12]
+            09-29 19:21:26.201  2068  4903 I am_proc_died: [0,28817,com.pwrd.steam.esports,0,12]
+            """;
+    private static final String MAIN_WEBVIEW_DEATH = """
+            09-29 19:21:22.102 28817 28817 F chromium: [FATAL:crashpad_client_linux.cc(732)] Render process (29282)'s crash wasn't handled by all associated  webviews, triggering application crash.
+            """;
+    private static final String EVENTS_FORCE_STOP = """
+            09-29 19:22:16.605  2068  2621 I am_kill : [0,10203,com.pwrd.steam.esports,0,stop com.pwrd.steam.esports due to from process:11078]
+            09-29 19:22:16.700  2068  2621 I am_proc_died: [0,10203,com.pwrd.steam.esports,0,12]
+            """;
+
+    @Test
+    void 崩溃被SDK截走时_靠进程死亡认出来_并点明是WebView连带() {
+        List<CrashLogParser.Incident> out =
+                CrashLogParser.unexpectedDeaths(EVENTS_WEBVIEW_DEATH, MAIN_WEBVIEW_DEATH, STEAM);
+
+        assertEquals(1, out.size(), "渲染进程自己的死亡不算，只算主进程");
+        assertEquals("PROCESS_DIED", out.get(0).getType());
+        assertTrue(out.get(0).getTitle().contains("WebView 渲染进程崩溃没人处理"), out.get(0).getTitle());
+        assertTrue(out.get(0).getTitle().contains("28817"));
+    }
+
+    @Test
+    void 没有WebView线索时只说意外退出() {
+        List<CrashLogParser.Incident> out = CrashLogParser.unexpectedDeaths(EVENTS_WEBVIEW_DEATH, "", STEAM);
+
+        assertTrue(out.get(0).getTitle().startsWith("应用进程意外退出"), out.get(0).getTitle());
+    }
+
+    @Test
+    void 测试主动force_stop的不算意外退出() {
+        assertTrue(CrashLogParser.unexpectedDeaths(EVENTS_FORCE_STOP, "", STEAM).isEmpty());
+    }
+
+    @Test
+    void 子进程死亡不算主进程退出() {
+        String sub = "09-29 19:21:26.201  2068  4903 I am_proc_died: [0,5555,com.pwrd.steam.esports:push,0,12]";
+
+        assertTrue(CrashLogParser.unexpectedDeaths(sub, "", STEAM).isEmpty());
+    }
+
     @Test
     void 去掉logcat前缀只留正文() {
         assertEquals("FATAL EXCEPTION: main",

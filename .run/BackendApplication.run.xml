@@ -2,11 +2,16 @@
   <configuration default="false" name="BackendApplication" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
     <module name="mobile-standalone-backend" />
     <option name="SPRING_BOOT_MAIN_CLASS" value="com.mobile.standalone.BackendApplication" />
-    <option name="VM_PARAMETERS" value="-Djava.net.useSystemProxies=false -DsocksProxyHost= -Dhttp.nonProxyHosts=localhost|127.*|192.168.*|[::1]" />
+    <!-- 不要写 -DsocksProxyHost=（空值也会走 SocksSocketImpl，连库 Connection refused） -->
+    <option name="VM_PARAMETERS" value="-Djava.net.useSystemProxies=false -Dhttp.nonProxyHosts=localhost|127.*|192.168.*|[::1]|118.25.144.133 -DsocksNonProxyHosts=localhost|127.*|192.168.*|[::1]|118.25.144.133 -Dhttps.proxyHost= -Dhttp.proxyHost=" />
     <envs>
       <env name="ALL_PROXY" value="" />
       <env name="all_proxy" value="" />
       <env name="SOCKS_PROXY" value="" />
+      <env name="HTTPS_PROXY" value="" />
+      <env name="HTTP_PROXY" value="" />
+      <env name="https_proxy" value="" />
+      <env name="http_proxy" value="" />
     </envs>
     <method v="2">
       <option name="Make" enabled="true" />

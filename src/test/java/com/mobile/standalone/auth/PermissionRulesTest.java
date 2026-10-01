@@ -70,8 +70,13 @@ class PermissionRulesTest {
         assertThat(PermissionRules.isPublic("/ui-element-previews/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/bug-images/2026-09-04/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/issue-images/2026-09-04/a.png")).isTrue();
+        assertThat(PermissionRules.isPublic("/knowledge-note-images/2026-09-07/a.png")).isTrue();
         assertThat(PermissionRules.isPublic("/auth/login")).isTrue();
         assertThat(PermissionRules.isPublic("/health")).isTrue();
+        assertThat(PermissionRules.isPublic("/debug-tests/open")).isTrue();
+        assertThat(PermissionRules.isPublic("/debug-tests")).isFalse();
+        assertThat(PermissionRules.isPublic("/debug-tests/ping")).isFalse();
+        assertThat(PermissionRules.isPublic("/debug-tests/1")).isFalse();
         // 业务接口一律不公开
         assertThat(PermissionRules.isPublic("/ui-flows")).isFalse();
         assertThat(PermissionRules.isPublic("/devices")).isFalse();
@@ -103,6 +108,8 @@ class PermissionRulesTest {
     void 路由权限按角色下发() {
         assertThat(PermissionRules.minRoleForRoute("/platform-users")).isEqualTo(PlatformRole.ADMIN);
         assertThat(PermissionRules.minRoleForRoute("/app-online-regression")).isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.minRoleForRoute("/app-packs")).isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.minRoleForRoute("/incident-playbooks")).isEqualTo(PlatformRole.TESTER);
         assertThat(PermissionRules.minRoleForRoute("/app-automation")).isEqualTo(PlatformRole.TESTER);
         // 没列出来的默认可见——菜单是给人找路的，默认藏起来只会让人以为功能没了
         assertThat(PermissionRules.minRoleForRoute("/reports")).isEqualTo(PlatformRole.VIEWER);
@@ -176,5 +183,86 @@ class PermissionRulesTest {
         // 管理员前缀同理，不能因为开头像就误判
         assertThat(PermissionRules.required("GET", "/platform-users-export"))
                 .isNotEqualTo(PlatformRole.ADMIN);
+    }
+
+    // ================= 50 人共用带来的提权 =================
+
+    /**
+     * 「DELETE 要 ADMIN」的前提是销毁都走 DELETE，可实际上批量销毁常写成 POST。
+     * reimport 会先删光一批用例再重导，比很多 DELETE 更危险。
+     */
+    @Test
+    void 用POST实现的批量销毁要管理员() {
+        assertThat(PermissionRules.required("POST", "/api-tests/cases/reimport"))
+                .isEqualTo(PlatformRole.ADMIN);
+        assertThat(PermissionRules.required("POST", "/screenshot-storage/cleanup"))
+                .isEqualTo(PlatformRole.ADMIN);
+        assertThat(PermissionRules.required("POST", "/some-module/reset"))
+                .isEqualTo(PlatformRole.ADMIN);
+        assertThat(PermissionRules.required("POST", "/some-module/purge"))
+                .isEqualTo(PlatformRole.ADMIN);
+    }
+
+    /** 普通的写操作不能被上面那份清单带上去，否则测试同学寸步难行 */
+    @Test
+    void 普通写操作仍然是测试档() {
+        assertThat(PermissionRules.required("POST", "/ui-flows")).isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.required("POST", "/api-tests/cases")).isEqualTo(PlatformRole.TESTER);
+        // 「cleanup」出现在中间段而不是结尾，不算销毁接口
+        assertThat(PermissionRules.required("POST", "/cleanup-report/preview"))
+                .isEqualTo(PlatformRole.VIEWER);
+    }
+
+    /**
+     * 改生产环境配置要 ADMIN。
+     * <p>
+     * 这里改的是所有人共用的生产 baseUrl / 鉴权头 / 账号变量，而 secret 覆盖之后
+     * 没有任何接口能读回旧值——覆盖即永久丢失。
+     */
+    @Test
+    void 写生产环境配置要管理员() {
+        assertThat(PermissionRules.required("PUT", "/api-tests/envs/PROD"))
+                .isEqualTo(PlatformRole.ADMIN);
+        assertThat(PermissionRules.required("PUT", "/api-tests/envs/PROD/variables"))
+                .isEqualTo(PlatformRole.ADMIN);
+        assertThat(PermissionRules.required("POST", "/api-tests/envs/prod/variables"))
+                .as("大小写不能绕过——normalize 会把 prod/PROD 都归一")
+                .isEqualTo(PlatformRole.ADMIN);
+        assertThat(PermissionRules.required("DELETE", "/api-tests/envs/PROD/variables/token"))
+                .isEqualTo(PlatformRole.ADMIN);
+    }
+
+    /** 只拦写。读生产配置（变量值已掩码）不该被挡住，否则查问题都查不了 */
+    @Test
+    void 读生产环境配置不提权() {
+        assertThat(PermissionRules.required("GET", "/api-tests/envs/PROD"))
+                .isEqualTo(PlatformRole.VIEWER);
+        assertThat(PermissionRules.required("GET", "/api-tests/envs/PROD/variables"))
+                .isEqualTo(PlatformRole.VIEWER);
+    }
+
+    /** 测试环境的写操作不受影响，不然日常工作全卡住 */
+    @Test
+    void 写测试环境配置仍是测试档() {
+        assertThat(PermissionRules.required("PUT", "/api-tests/envs/TEST"))
+                .isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.required("PUT", "/api-tests/envs/TEST/variables"))
+                .isEqualTo(PlatformRole.TESTER);
+    }
+
+    /**
+     * 名字里带 prod 的普通路径不能被误判。
+     * <p>
+     * 用包含匹配是因为生产段夹在路径中间，但不能因此把 product / production-report 这类也提权——
+     * 那样只读用户会莫名其妙点不开页面，而且没人查得出为什么。
+     */
+    @Test
+    void 名字里带prod的普通路径不被误判() {
+        assertThat(PermissionRules.required("PUT", "/products/p-1"))
+                .isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.required("POST", "/production-report"))
+                .isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.isProdWritePath("/products/p-1")).isFalse();
+        assertThat(PermissionRules.isProdWritePath("/api-tests/envs/PROD")).isTrue();
     }
 }

@@ -124,6 +124,17 @@ class FakeDriver implements PlatformDriver {
         return true;
     }
 
+    String lastFocusedSelector;
+    String lastFocusedText;
+    boolean focusedInputOk = true;
+
+    @Override
+    public boolean inputTextToFocusedEditText(String deviceId, String selector, String text) {
+        lastFocusedSelector = selector;
+        lastFocusedText = text;
+        return focusedInputOk;
+    }
+
     @Override
     public String takeScreenshot(String deviceId, String savePath) {
         return savePath;

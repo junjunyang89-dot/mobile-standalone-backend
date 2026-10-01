@@ -8,5 +8,5 @@ spring:
 app:
   node:
     role: WORKER
-    control-plane-url: ${CONTROL_PLANE_URL:http://127.0.0.1:3000/api}
+    control-plane-url: ${CONTROL_PLANE_URL:http://127.0.0.1:3080/api}
     advertise-url: ${APP_NODE_ADVERTISE_URL:http://127.0.0.1:3001/api}

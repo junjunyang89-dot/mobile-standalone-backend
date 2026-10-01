@@ -4,6 +4,7 @@ import com.mobile.standalone.entity.Device;
 import com.mobile.standalone.mapper.DeviceMapper;
 import com.mobile.standalone.service.driver.PlatformRouter;
 import com.mobile.standalone.service.inspect.LocatorMatcher;
+import com.mobile.standalone.service.inspect.LocatorRepairSuggester;
 import com.mobile.standalone.service.inspect.UiHierarchyBuilder;
 import jakarta.annotation.PostConstruct;
 import lombok.Data;
@@ -47,6 +48,18 @@ public class UiElementHealthService {
     private final JdbcTemplate jdbcTemplate;
     private final DeviceMapper deviceMapper;
     private final PlatformRouter platformRouter;
+
+    /**
+     * 失败现场的控件树存在它下面的任务子目录里（见 UiFlowExecutor.dumpPageSourceOnFailure）。
+     *
+     * <p>默认值必须和 {@code UiFlowExecutor} / {@code ScreenshotRetentionService} 写的<b>完全一致</b>。
+     * 不一致的后果特别隐蔽：配置没显式设时，这里会去另一个（不存在的）目录找，
+     * 于是离线体检永远报「没有找到失败现场」——看起来像「还没积累到数据」，
+     * 而实际上现场一直都在，只是找错了地方。
+     */
+    @org.springframework.beans.factory.annotation.Value(
+            "${app.screenshot-dir:${user.home}/.mobile-standalone/screenshots}")
+    private String screenshotDir;
 
     /** 一次流程执行里某个元素的使用记录，执行结束后一次性落库 */
     public record ElementUsage(String appId, String platform, String nameEn, boolean ok, String note) {
@@ -242,6 +255,217 @@ public class UiElementHealthService {
                 ? platform
                 : (device.getPlatform() != null ? device.getPlatform().name() : null);
         return probe(xml, appId, plat, pageId);
+    }
+
+    // ==================== 第三层：拿已经存下来的失败现场离线体检 ====================
+
+    /**
+     * 扫最近保存的失败现场控件树，对元素库做一次离线体检。
+     *
+     * <p><b>原料是免费的。</b>每次执行失败都会在 {@code screenshots/{taskId}/pagesource-*.xml}
+     * 存一份当时的控件树。不需要设备在线、不需要人走到那一页、不需要往流程里挂关键字——
+     * 这是三层里唯一<b>完全被动</b>的一层。
+     *
+     * <h3>它刻意不判「失效」</h3>
+     *
+     * 这一点是整个设计里最要紧的。一个元素在这些现场里一次都没出现，有两种可能：
+     * <ol>
+     *   <li>它的定位真的废了</li>
+     *   <li>这些现场压根不是它该出现的页面</li>
+     * </ol>
+     * 而离线体检<b>分不出这两者</b>——它不知道每份 xml 是哪一页。
+     * 所以它只报它能证明的事：
+     *
+     * <ul>
+     *   <li><b>还活着</b>：某个现场里命中恰好 1 个 → 这条定位此刻是好的，铁证</li>
+     *   <li><b>不唯一</b>：命中多个 → 回放只取第 1 个，「找到了、点了、没反应」的来源，
+     *       这是定时炸弹，而且<b>现在没有任何一层会发现它</b></li>
+     *   <li><b>没覆盖到</b>：一次都没命中 → <b>不下结论</b></li>
+     * </ul>
+     *
+     * <p>「失效」交给第一层：那里知道是哪个元素在哪一步挂的，{@code fail_count} 才是够格的证据。
+     * 两层各报自己能证明的，合起来才不会冤枉人——而误报一个「失效」的代价是：
+     * 人去改一条本来好好的定位。
+     *
+     * @param maxScenes 最多读几份现场。从新到旧，避免一次扫穿几个月的历史
+     */
+    public OfflineResult probeSavedScenes(String appId, String platform, int maxScenes) {
+        OfflineResult r = new OfflineResult();
+        r.setAppId(appId);
+        r.setPlatform(platform);
+
+        List<java.nio.file.Path> files = recentSceneFiles(Math.max(1, maxScenes));
+        r.setScenesScanned(files.size());
+        if (files.isEmpty()) {
+            r.getNotes().add("没有找到保存下来的失败现场控件树。"
+                    + "它们只在执行失败时才产生，而且跟着截图的保留策略清理（默认 7 天）");
+            return r;
+        }
+
+        List<org.w3c.dom.Document> docs = new ArrayList<>();
+        for (java.nio.file.Path f : files) {
+            try {
+                docs.add(UiHierarchyBuilder.parseDocument(java.nio.file.Files.readString(f)));
+            } catch (Exception e) {
+                log.debug("[element-health] 现场解析失败 {}: {}", f.getFileName(), e.getMessage());
+            }
+        }
+        r.setScenesParsed(docs.size());
+        if (docs.isEmpty()) {
+            r.getNotes().add("找到了 " + files.size() + " 份现场，但一份都没解析成功");
+            return r;
+        }
+
+        StringBuilder sql = new StringBuilder(
+                "SELECT id, name_en, name_zh, locator_type, locator_value, page_id"
+                        + " FROM ui_elements WHERE status = 'ACTIVE'");
+        List<Object> args = new ArrayList<>();
+        if (appId != null && !appId.isBlank()) {
+            sql.append(" AND app_id = ?");
+            args.add(appId);
+        }
+        if (platform != null && !platform.isBlank()) {
+            sql.append(" AND platform = ?");
+            args.add(platform);
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), args.toArray());
+        r.setTotal(rows.size());
+
+        for (Map<String, Object> row : rows) {
+            String type = str(row.get("locator_type"));
+            String value = str(row.get("locator_value"));
+            if (value == null || value.contains("${") || RANDOM_INDEX.matcher(value).find()) {
+                r.setSkipped(r.getSkipped() + 1);
+                continue;
+            }
+            int best = LocatorMatcher.UNKNOWN;
+            for (org.w3c.dom.Document doc : docs) {
+                int n = LocatorMatcher.count(doc, type, value);
+                if (n == LocatorMatcher.UNKNOWN) {
+                    continue;
+                }
+                // 命中 1 是铁证，见到就可以收手；否则留下见过的最大命中数
+                if (n == 1) {
+                    best = 1;
+                    break;
+                }
+                best = Math.max(best, n);
+            }
+            if (best == LocatorMatcher.UNKNOWN) {
+                r.setSkipped(r.getSkipped() + 1);
+                continue;
+            }
+            if (best == 1) {
+                r.setAlive(r.getAlive() + 1);
+                markProbe(str(row.get("id")), 1);
+                continue;
+            }
+            if (best == 0) {
+                // 不下结论。这些现场只是没覆盖到它而已
+                r.setNotCovered(r.getNotCovered() + 1);
+                continue;
+            }
+            r.setAmbiguous(r.getAmbiguous() + 1);
+            markProbe(str(row.get("id")), best);
+            Map<String, Object> p = new LinkedHashMap<>();
+            p.put("id", row.get("id"));
+            p.put("nameEn", row.get("name_en"));
+            p.put("nameZh", row.get("name_zh"));
+            p.put("pageId", row.get("page_id"));
+            p.put("locatorType", type);
+            p.put("locatorValue", value);
+            p.put("matchCount", best);
+            p.put("verdict", "定位不唯一（命中 " + best + " 个）：回放只会点第 1 个");
+            p.put("suggestions", suggestFor(docs, type, value, str(row.get("name_zh"))));
+            r.getProblems().add(p);
+        }
+
+        r.getNotes().add("「没覆盖到」不等于失效——这些现场只是没有它该出现的那一页。"
+                + "真的失效看报表里的「可疑」，那一栏有 fail_count 做证据");
+        log.info("[element-health] 离线体检 app={} platform={}：读现场 {}/{}，元素 {}，"
+                        + "确认还活着 {}，不唯一 {}，没覆盖到 {}，跳过 {}",
+                appId, platform, r.getScenesParsed(), r.getScenesScanned(), r.getTotal(),
+                r.getAlive(), r.getAmbiguous(), r.getNotCovered(), r.getSkipped());
+        return r;
+    }
+
+    /** 在能找到候选的第一份现场上给建议。机械办法找不出来才轮到人（或模型） */
+    private List<Map<String, Object>> suggestFor(List<org.w3c.dom.Document> docs,
+                                                 String type, String value, String nameZh) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (org.w3c.dom.Document doc : docs) {
+            LocatorRepairSuggester.Suggestion s =
+                    LocatorRepairSuggester.suggest(doc, type, value, nameZh);
+            if (s.empty()) {
+                continue;
+            }
+            for (LocatorRepairSuggester.Candidate c : s.candidates()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("locatorType", c.locatorType());
+                m.put("locatorValue", c.locatorValue());
+                m.put("matchCount", c.matchCount());
+                m.put("why", c.why());
+                out.add(m);
+            }
+            return out;
+        }
+        return out;
+    }
+
+    /** 失败现场文件，按修改时间从新到旧 */
+    private List<java.nio.file.Path> recentSceneFiles(int max) {
+        java.nio.file.Path root = java.nio.file.Path.of(
+                screenshotDir == null || screenshotDir.isBlank() ? "screenshots" : screenshotDir);
+        if (!java.nio.file.Files.isDirectory(root)) {
+            return List.of();
+        }
+        try (java.util.stream.Stream<java.nio.file.Path> walk =
+                     java.nio.file.Files.walk(root, 2)) {
+            return walk.filter(java.nio.file.Files::isRegularFile)
+                    .filter(f -> {
+                        String n = f.getFileName().toString();
+                        return n.startsWith("pagesource-") && n.endsWith(".xml");
+                    })
+                    .sorted((a, b) -> Long.compare(mtime(b), mtime(a)))
+                    .limit(max)
+                    .toList();
+        } catch (Exception e) {
+            log.warn("[element-health] 扫失败现场目录失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static long mtime(java.nio.file.Path p) {
+        try {
+            return java.nio.file.Files.getLastModifiedTime(p).toMillis();
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
+    /**
+     * 离线体检结果。
+     *
+     * <p>字段名刻意写成「确认还活着 / 不唯一 / 没覆盖到」而不是「健康 / 异常 / 失效」——
+     * 前者说的是证据强度，后者是结论。这一层<b>没有资格下失效的结论</b>。
+     */
+    @Data
+    public static class OfflineResult {
+        private String appId;
+        private String platform;
+        private int scenesScanned;
+        private int scenesParsed;
+        private int total;
+        /** 某个现场里命中恰好 1 个：铁证，这条定位此刻是好的 */
+        private int alive;
+        /** 命中多个：回放只取第 1 个，定时炸弹 */
+        private int ambiguous;
+        /** 一次都没命中：<b>不下结论</b>，这些现场没覆盖到它 */
+        private int notCovered;
+        /** 含变量或随机下标，静态求值没有意义 */
+        private int skipped;
+        private List<Map<String, Object>> problems = new ArrayList<>();
+        private List<String> notes = new ArrayList<>();
     }
 
     /** 与 LocatorTemplate 的随机下标写法对齐：[X] 或 [X:1-5] */

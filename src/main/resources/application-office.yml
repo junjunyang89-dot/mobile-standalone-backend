@@ -1,11 +1,17 @@
-# 公司共享库：Mini 局域网 3306。不要写 127.0.0.1:3307（隧道写库会和扫设备抢锁）。
+# 公司共享库：公网直连（与 application.yml 同一条）。
 # 切换：./scripts/use-db.sh office
 spring:
   datasource:
-    url: jdbc:mysql://${OFFICE_DB_HOST:192.168.10.5}:${OFFICE_DB_PORT:3306}/${DB_NAME:mobile_standalone}?useUnicode=true&characterEncoding=UTF-8&sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true&connectionCollation=utf8mb4_unicode_ci
+    url: jdbc:mysql://192.168.10.5:3306/mobile_standalone?useUnicode=true&characterEncoding=UTF-8&sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true&connectionCollation=utf8mb4_unicode_ci
     hikari:
       maximum-pool-size: 8
       minimum-idle: 2
       connection-timeout: 15000
       validation-timeout: 5000
       keepalive-time: 300000
+
+# 商城 H5（news.wmpvp.com/gameMall）依赖 appengine；MITM 解密时 OPTIONS/GET 会 502，页面一直转圈。
+# 透传不解密，页面才能开；壳和静态资源仍可从 news.wmpvp.com 抓到。
+app:
+  capture:
+    passthrough-hosts: pogpog.gg,unpkg.com,appengine.wmpvp.com

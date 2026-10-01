@@ -56,8 +56,9 @@ public class ReleaseMailService {
         String readyPhrase = hasDb
                 ? "相关发布及DB变更内容已准备就绪"
                 : "相关发布内容已准备就绪";
+        String sqlDeadlinePhrase = hasDb ? buildSqlDeadlinePhrase(title) : null;
 
-        String html = buildHtmlBody(title, datePhrase, readyPhrase, wikiUrl, rows, hasDb);
+        String html = buildHtmlBody(title, datePhrase, readyPhrase, wikiUrl, rows, hasDb, sqlDeadlinePhrase);
 
         MailDraftResult out = new MailDraftResult();
         out.setSubject("【发版通知】" + title);
@@ -116,9 +117,39 @@ public class ReleaseMailService {
     }
 
     String buildDatePhrase(String title) {
+        LocalDate target = parseReleaseDate(title);
+        if (target == null) {
+            return "近期";
+        }
+        String base = target.getMonthValue() + "月" + target.getDayOfMonth() + "日";
+        LocalDate today = LocalDate.now(ZONE);
+        if (target.equals(today)) return base + "（今天）";
+        if (target.equals(today.plusDays(1))) return base + "（明天）";
+        return base;
+    }
+
+    /**
+     * DB SQL 需在发版前一日执行完毕。例：发版 9月17日 →「麻烦何政于9月16日（发版前一日）执行完毕」。
+     * 标题解析不出日期时，退回笼统提醒。
+     */
+    String buildSqlDeadlinePhrase(String title) {
+        LocalDate release = parseReleaseDate(title);
+        if (release == null) {
+            return "麻烦何政于发版前一日执行完毕";
+        }
+        LocalDate deadline = release.minusDays(1);
+        return "麻烦何政于" + deadline.getMonthValue() + "月" + deadline.getDayOfMonth()
+                + "日（发版前一日）执行完毕";
+    }
+
+    /** 从标题「M月D日」解析发版日；跨年按「距今超过半年则视为下一年」。 */
+    LocalDate parseReleaseDate(String title) {
+        if (title == null || title.isBlank()) {
+            return null;
+        }
         Matcher m = TITLE_DATE.matcher(title);
         if (!m.find()) {
-            return "近期";
+            return null;
         }
         int month = Integer.parseInt(m.group(1));
         int day = Integer.parseInt(m.group(2));
@@ -128,16 +159,12 @@ public class ReleaseMailService {
         try {
             target = LocalDate.of(year, month, day);
         } catch (Exception e) {
-            return month + "月" + day + "日";
+            return null;
         }
-        // 标题跨年：若日期已过很久且距今超过半年，视为下一年
         if (target.isBefore(today.minusMonths(6))) {
             target = LocalDate.of(year + 1, month, day);
         }
-        String base = month + "月" + day + "日";
-        if (target.equals(today)) return base + "（今天）";
-        if (target.equals(today.plusDays(1))) return base + "（明天）";
-        return base;
+        return target;
     }
 
     /** 正文产品名：去掉标题开头的「M月D日」，避免与「于M月D日更新」重复 */
@@ -163,7 +190,8 @@ public class ReleaseMailService {
     }
 
     String buildHtmlBody(String title, String datePhrase, String readyPhrase,
-                         String wikiUrl, List<IssueRow> rows, boolean hasDb) {
+                         String wikiUrl, List<IssueRow> rows, boolean hasDb,
+                         String sqlDeadlinePhrase) {
         // Outlook 常压缩默认 p margin，用显式间距
         final String p0 = "margin:0;padding:0;";
         final String gap = "<p style=\"margin:0;padding:0;line-height:16px;height:16px;font-size:16px;\">&nbsp;</p>";
@@ -196,7 +224,12 @@ public class ReleaseMailService {
         if (hasDb) {
             sb.append(gap);
             sb.append("<p style=\"").append(p0).append("\"><b>二、DB变更执行（@何政）</b></p>");
-            sb.append("<p style=\"margin:8px 0 8px 0;padding:0;\">以下为本版本全部DB变更汇总（与上文中各需求项中 SQL 一致，便于一次性执行）：</p>");
+            String deadline = (sqlDeadlinePhrase == null || sqlDeadlinePhrase.isBlank())
+                    ? "麻烦何政于发版前一日执行完毕"
+                    : sqlDeadlinePhrase.trim();
+            sb.append("<p style=\"margin:8px 0 8px 0;padding:0;\">以下为本版本全部DB变更汇总（与上文各需求项 SQL 一致，便于一次性执行），")
+                    .append(esc(deadline))
+                    .append("。</p>");
             for (IssueRow r : rows) {
                 if (!isMeaningfulDb(r.getDbChanges())) continue;
                 sb.append("<pre style=\"margin:0 0 12px 0;white-space:pre-wrap;font-family:Consolas,monospace;font-size:12px;")

@@ -30,6 +30,9 @@ public class FunctionalTestExecutionResult {
     /** 提前返回的提示文案，用于任务/回归报告展示原因 */
     private String earlyReturnMessage;
 
+    /** MEMORY_CHECKPOINT 打下的内存点（PSS KB），供内存泄漏分析用；没打点则为空 */
+    private List<Long> memoryCheckpoints;
+
     public FunctionalTestExecutionResult(String reportPath, List<ExecutionLogEntryDto> executionLog,
                                          Map<String, String> executionVariables) {
         this.reportPath = reportPath;

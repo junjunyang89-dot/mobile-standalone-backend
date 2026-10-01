@@ -2,6 +2,7 @@ package com.mobile.standalone.service;
 
 import com.mobile.standalone.entity.ApiProject;
 import com.mobile.standalone.mapper.ApiProjectMapper;
+import com.mobile.standalone.service.apitest.ApiProjectCatalog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -11,7 +12,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -95,8 +95,7 @@ public class ProjectTreeService {
     }
 
     private static String categoryOf(ApiProject p) {
-        String c = p.getCategory();
-        return c == null || c.isBlank() ? "OTHER" : c.trim().toUpperCase(Locale.ROOT);
+        return ApiProjectCatalog.resolveCategoryKey(p.getCode(), p.getCategory());
     }
 
     private Map<String, Object> categoryNode(String key, String label, List<Map<String, Object>> children) {

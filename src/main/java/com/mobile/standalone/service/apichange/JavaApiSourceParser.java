@@ -54,6 +54,29 @@ public final class JavaApiSourceParser {
             "@(?:Resource|Autowired)[^;]*?private\\s+(?:final\\s+)?"
                     + "([A-Za-z_$][\\w$]*)\\s+([a-zA-Z_$][\\w$]*)\\s*;");
 
+    /**
+     * Lombok 构造器注入：类上有 {@code @RequiredArgsConstructor}，字段写成
+     * {@code private final XxxService xxx;}，<b>没有任何注入注解</b>。
+     * <p>
+     * 只认注解式注入的后果，是这类 Controller 的 {@code usedServices} 恒为空 →
+     * 依赖解析返回空 Deps → <b>读写表、Redis key、并发风险、IMPL 档全部归零</b>，
+     * 而报告上看着是「这个接口很干净」。这是最坏的一种失败：不报错，只是悄悄少了半份分析。
+     * <p>
+     * 实测被测后端 app-engine：75 个 Controller 里 7 个用的是这种写法。
+     */
+    private static final Pattern LOMBOK_CTOR_ANNO = Pattern.compile(
+            "@(?:RequiredArgsConstructor|AllArgsConstructor)\\b");
+
+    /**
+     * {@code private final 类型 名字;}——<b>不带等号</b>。
+     * <p>
+     * 带初始值的 {@code private final String PREFIX = "x";} 不是注入，是常量。
+     * 不排掉的话每个 Controller 都会多出一堆假的「依赖」，
+     * 而依赖清单一旦有噪音，后面基于它的表/并发分析就全跟着脏。
+     */
+    private static final Pattern FINAL_FIELD = Pattern.compile(
+            "private\\s+final\\s+([A-Z][\\w$]*(?:\\s*<[^;=]*>)?)\\s+([a-zA-Z_$][\\w$]*)\\s*;");
+
     /** 入参上的注解：@RequestParam / @PathVariable / @RequestBody */
     private static final Pattern PARAM_ANNO = Pattern.compile(
             "@(RequestParam|PathVariable|RequestBody|RequestHeader)"
@@ -155,7 +178,12 @@ public final class JavaApiSourceParser {
         return last;
     }
 
-    /** 控制器里注入的 Service：字段名 -> 类型名 */
+    /**
+     * 控制器里注入的 Service：字段名 -> 类型名。
+     * <p>
+     * 两种注入方式都认：注解式（{@code @Resource}/{@code @Autowired}）和
+     * Lombok 构造器式（类上 {@code @RequiredArgsConstructor} + {@code private final}）。
+     */
     static Map<String, String> injectedFields(String source) {
         Map<String, String> out = new java.util.LinkedHashMap<>();
         if (source == null) {
@@ -165,8 +193,46 @@ public final class JavaApiSourceParser {
         while (m.find()) {
             out.put(m.group(2), m.group(1));
         }
+        // 只有类上确实有 Lombok 构造器注解时才把 private final 当注入。
+        // 不加这个前提的话，任何类里的 final 字段都会被当成依赖
+        if (LOMBOK_CTOR_ANNO.matcher(source).find()) {
+            Matcher lm = FINAL_FIELD.matcher(source);
+            while (lm.find()) {
+                String type = lm.group(1).trim();
+                String name = lm.group(2);
+                if (looksLikeDependency(type)) {
+                    // 注解式优先：同一个字段两种写法都命中时，以注解那次为准
+                    out.putIfAbsent(name, type);
+                }
+            }
+        }
         return out;
     }
+
+    /**
+     * 这个 final 字段像不像一个被注入的依赖。
+     * <p>
+     * 排掉常量和值对象类型。放进来的噪音会一路脏到读写表和并发风险分析，
+     * 而那两处的错误都不会报错，只会让报告看起来更「全」。
+     */
+    private static boolean looksLikeDependency(String type) {
+        if (type == null || type.isBlank()) {
+            return false;
+        }
+        String bare = type.replaceAll("<.*>", "").trim();
+        if (NOT_DEPENDENCY_TYPES.contains(bare)) {
+            return false;
+        }
+        // 全大写（EnumSet 之类的常量类型）和单字母泛型参数都不是依赖
+        return bare.length() > 1 && Character.isUpperCase(bare.charAt(0));
+    }
+
+    /** 常见的非依赖类型。列出来比用「名字以 Service 结尾」宽松——Mapper/Client/Manager 也是依赖 */
+    private static final Set<String> NOT_DEPENDENCY_TYPES = Set.of(
+            "String", "Integer", "Long", "Double", "Float", "Boolean", "Byte", "Short",
+            "Character", "BigDecimal", "BigInteger", "Object", "Class", "Pattern",
+            "List", "Map", "Set", "Collection", "Optional", "Duration", "LocalDate",
+            "LocalDateTime", "Date", "UUID", "Logger");
 
     /**
      * 方法体里用到了哪些注入的 Service。
@@ -548,6 +614,26 @@ public final class JavaApiSourceParser {
     private static final Pattern SQL_TABLE = Pattern.compile(
             "(?i)\\b(?:from|join|into|update)\\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?");
 
+    /**
+     * 带动词的表引用，用来分清这张表是<b>读</b>还是<b>写</b>。
+     * <p>
+     * <b>{@code delete\s+from} 这个分支不能少。</b>少了的话，{@code DELETE FROM t} 里的
+     * {@code from} 会被当成查询命中，<b>一条删除语句被判成只读</b>——
+     * 而这个判据正是用来决定「能不能拿到生产上跑」的，判错的代价是在生产上删数据。
+     * <p>
+     * 顺带纠正一个容易想当然的地方：<b>分支的先后顺序在这里不影响结果</b>。
+     * 正则引擎是按<b>位置</b>从左往右扫的，在 {@code DELETE} 那个位置上 {@code from} 根本匹配不上，
+     * 只有 {@code delete\s+from} 能匹配，两个分支不会在同一位置竞争。
+     * （这条是实测出来的——原先这里写的是「顺序不能动，左优先」，听着有道理，但不成立。）
+     */
+    private static final Pattern SQL_TABLE_REF = Pattern.compile(
+            "(?i)\\b(delete\\s+from|replace\\s+into|insert\\s+into|into|update|from|join)"
+                    + "\\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?");
+
+    /** 这些动词是写 */
+    private static final Set<String> WRITE_VERBS = Set.of(
+            "delete from", "replace into", "insert into", "into", "update");
+
     /** SQL 关键字后面跟的未必是表；这些一看就不是，滤掉免得清单里全是噪音 */
     private static final Set<String> NOT_TABLE = Set.of(
             "select", "set", "where", "values", "dual", "id", "on", "as", "and", "or", "if",
@@ -574,6 +660,55 @@ public final class JavaApiSourceParser {
             out.add(lower);
         }
         return out;
+    }
+
+    /** 读的表和写的表分开 */
+    public record TableUse(Set<String> read, Set<String> write) {
+
+        public boolean writesAnything() {
+            return write != null && !write.isEmpty();
+        }
+
+        /** 一条 SQL 都没扫到。这和「只读」不是一回事——见 WriteEffect */
+        public boolean sawNothing() {
+            return (read == null || read.isEmpty()) && (write == null || write.isEmpty());
+        }
+    }
+
+    /**
+     * 从 SQL 文本里分别抽出读的表和写的表。
+     * <p>
+     * 同一张表可以同时出现在两边（{@code UPDATE t SET x=(SELECT ... FROM t)}），
+     * 这是事实，不做去重——判「会不会写」时只看 write 那边。
+     */
+    public static TableUse parseTableUse(String content) {
+        Set<String> read = new LinkedHashSet<>();
+        Set<String> write = new LinkedHashSet<>();
+        if (content == null || content.isBlank()) {
+            return new TableUse(read, write);
+        }
+        Matcher m = SQL_TABLE_REF.matcher(content);
+        while (m.find()) {
+            String verb = m.group(1).toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+            String lower = m.group(2).toLowerCase(Locale.ROOT);
+            if (NOT_TABLE.contains(lower) || lower.length() < 3) {
+                continue;
+            }
+            // ON DUPLICATE KEY UPDATE col = ... —— 这里的 update 后面跟的是列不是表。
+            // 不排掉的话，每条 upsert 都会凭空多出一张「写表」
+            if ("update".equals(verb) && precededByDuplicateKey(content, m.start())) {
+                continue;
+            }
+            (WRITE_VERBS.contains(verb) ? write : read).add(lower);
+        }
+        return new TableUse(read, write);
+    }
+
+    /** 往前看一小段，判断这个 update 是不是 ON DUPLICATE KEY UPDATE 的一部分 */
+    private static boolean precededByDuplicateKey(String content, int at) {
+        int from = Math.max(0, at - 40);
+        String before = content.substring(from, at).toLowerCase(Locale.ROOT);
+        return before.contains("duplicate key") || before.endsWith("key ");
     }
 
     /** 注释里的 @GetMapping 之类会被当成真接口，先剥掉 */

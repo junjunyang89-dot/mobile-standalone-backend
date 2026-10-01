@@ -86,6 +86,32 @@ class LocatorVariableTest {
         assertTrue(LocatorTemplate.variablesIn(null).isEmpty());
     }
 
+    @Test
+    void 文案变量可填固定数或随机区间() {
+        String tpl = "//*[@text=\"${expandNo}\"]";
+
+        assertEquals("//*[@text=\"3\"]",
+                LocatorTemplate.expandVariables(tpl, Map.of("expandNo", "3")));
+        assertEquals("//*[@text=\"2\"]",
+                LocatorTemplate.expandVariables(tpl, Map.of("expandNo", "2-2")));
+        assertEquals("//*[@text=\"4\"]",
+                LocatorTemplate.expandVariables(tpl, Map.of("expandNo", "[X:4-4]")));
+        assertEquals("//*[@text=\"没毛病\"]",
+                LocatorTemplate.expandVariables(tpl, Map.of("expandNo", "没毛病")));
+        assertEquals("//*[@text=\"0\"]",
+                LocatorTemplate.expandVariables(tpl, Map.of("expandNo", "0-0")));
+    }
+
+    @Test
+    void 文案变量随机落在区间内() {
+        String tpl = "//*[@text=\"${expandNo}\"]";
+        for (int i = 0; i < 20; i++) {
+            String out = LocatorTemplate.expandVariables(tpl, Map.of("expandNo", "1-5"));
+            int n = Integer.parseInt(out.substring(out.indexOf('"') + 1, out.lastIndexOf('"')));
+            assertTrue(n >= 1 && n <= 5, out);
+        }
+    }
+
     /** 随机下标是既有能力，两者要能共存 */
     @Test
     void 变量与随机下标互不干扰() {

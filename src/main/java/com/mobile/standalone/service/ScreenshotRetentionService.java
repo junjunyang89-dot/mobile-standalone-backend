@@ -10,6 +10,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import com.mobile.standalone.util.RetentionPlanner;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -46,16 +47,24 @@ public class ScreenshotRetentionService {
     private boolean cleanupEnabled;
 
     /** 失败任务的截图保留天数：事后排查往往要翻好几天前的 */
-    @Value("${app.screenshot.retain-days-failed:90}")
+    @Value("${app.screenshot.retain-days-failed:7}")
     private int retainDaysFailed;
 
     /** 其余任务（成功/跳过/停止）的保留天数 */
-    @Value("${app.screenshot.retain-days-default:14}")
+    @Value("${app.screenshot.retain-days-default:7}")
     private int retainDaysDefault;
 
     /** 真机点选临时图的保留天数 */
     @Value("${app.screenshot.retain-days-inspect:2}")
     private int retainDaysInspect;
+
+    /** {@code logs/} 下散落的调试 xml 目录 */
+    @Value("${app.screenshot.stray-dump-dir:logs}")
+    private String strayDumpDir;
+
+    /** 那些调试 xml 留几天。跟日志同寿命即可——它们都是查当场问题用的 */
+    @Value("${app.screenshot.retain-days-stray-dump:2}")
+    private int retainDaysStrayDump;
 
     /** 总量上限（MB）；仍超出时按最旧优先删 */
     @Value("${app.screenshot.max-total-mb:20480}")
@@ -94,6 +103,7 @@ public class ScreenshotRetentionService {
         if (inspect != null) {
             cleanupInspectFiles(inspect, result, dryRun);
         }
+        cleanupStrayDebugDumps(result, dryRun);
         result.setRemainingBytes(dirSize(root) + dirSize(inspect));
         return result;
     }
@@ -171,23 +181,129 @@ public class ScreenshotRetentionService {
         return retainDaysDefault;
     }
 
-    /** 按天数清理真机点选的临时图（扁平文件，不按任务分目录） */
+    /**
+     * 按天数清理临时截图目录。<b>递归</b>。
+     * <p>
+     * 原先这里是 {@code Files.list(dir)} + {@code filter(isRegularFile)}——不递归，
+     * 而且注释写着「扁平文件，不按任务分目录」。那句在写的时候是对的，
+     * 后来性能测试开始往 {@code perf_<taskId>/} 写、兼容性测试往 {@code compatibility_<taskId>/} 写，
+     * <b>假设过期了，代码却不会因此报错</b>：那些子目录里的图一张都不清，只增不减。
+     * 6 台设备 × 50 人跑性能任务（每次约 120 张），量级和单人调试完全不是一回事。
+     * <p>
+     * 判定交给 {@link RetentionPlanner}——那里能单测，
+     * 尤其是「目录不能按自己的 mtime 判断」这条：一个看起来很旧的目录里
+     * 可能躺着今天刚生成、报告正在引用的图。
+     */
     private void cleanupInspectFiles(Path dir, CleanupResult result, boolean dryRun) {
+        List<RetentionPlanner.Entry> entries = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(dir)) {
+            for (Path p : walk.toList()) {
+                if (p.equals(dir)) {
+                    continue; // 根目录自己永远不删
+                }
+                boolean isDir = Files.isDirectory(p);
+                entries.add(new RetentionPlanner.Entry(
+                        dir.relativize(p).toString().replace(java.io.File.separatorChar, '/'),
+                        isDir,
+                        lastModified(p),
+                        isDir ? 0 : fileSize(p)));
+            }
+        } catch (IOException e) {
+            log.warn("清理临时截图失败（遍历阶段）: {}", e.getMessage());
+            return;
+        }
+
+        // 顶层用 inspect 的短保留期，子目录用默认保留期。
+        //
+        // 这个目录下混着两类性质完全不同的东西：
+        //   顶层扁平文件 = 真机点选的临时图，看完就没用；
+        //   perf_<taskId>/ 和 compatibility_<taskId>/ = <b>任务报告的证据</b>，
+        //   路径被写进了报告 JSON，报告页面正指着它们。
+        //
+        // 递归之前这些子目录一张都不清（所以"报告能一直看到"，代价是磁盘只增不减）。
+        // 修好递归之后如果还用 2 天的 inspect 保留期，就等于把一个磁盘问题
+        // 换成了一个数据丢失问题——人打开上周的性能报告看到一片破图，
+        // 只会觉得"报告坏了"，不会想到是清理干的。
+        RetentionPlanner.Plan plan = RetentionPlanner.plan(
+                entries, System.currentTimeMillis(), retainDaysInspect, retainDaysDefault);
+        if (plan.keptUnknown() > 0) {
+            // 拿不到修改时间的文件一直存在，说明这个目录有问题，别默默留着
+            log.warn("临时截图目录里有 {} 个文件拿不到修改时间，本轮跳过它们: {}",
+                    plan.keptUnknown(), dir);
+        }
+
+        for (String rel : plan.deletePaths()) {
+            boolean isDir = rel.endsWith("/");
+            Path target = dir.resolve(isDir ? rel.substring(0, rel.length() - 1) : rel);
+            if (dryRun) {
+                if (!isDir) {
+                    result.setDeletedFiles(result.getDeletedFiles() + 1);
+                }
+                continue;
+            }
+            if (isDir) {
+                // 空目录删不掉不算错（可能刚被别人写进新文件），跳过就行
+                deleteEmptyDir(dir, target);
+                continue;
+            }
+            if (!deleteSingle(dir, target)) {
+                continue;
+            }
+            result.setDeletedFiles(result.getDeletedFiles() + 1);
+        }
+        // dryRun 和真删都报同一个预计释放量：dryRun 的意义就是「先看看会删多少」
+        result.setFreedBytes(result.getFreedBytes() + plan.freedBytes());
+    }
+
+    /** 删空目录。越界检查和 deleteSingle 一致，防止配置写错时删到目录外 */
+    private void deleteEmptyDir(Path root, Path target) {
+        if (!isInside(root, target)) {
+            log.error("拒绝删除截图目录外的目录: {}", target);
+            return;
+        }
+        try {
+            Files.deleteIfExists(target);
+        } catch (IOException e) {
+            // 非空（并发写入）或权限问题，下一轮再说
+            log.debug("删除空目录失败: {}", target);
+        }
+    }
+
+    /**
+     * {@code logs/} 下那些调试用的 xml。
+     *
+     * <p>{@code dumpAllContextsForDebug} 之类会往 {@code logs/} 直接写
+     * {@code cs_debug_*.xml}、{@code window_dump.xml}，<b>从来没人清</b>——
+     * 实测里躺着大半年前的文件。它们不归 logback 管（logback 只轮转自己那个 .log），
+     * 所以得单独扫一遍。
+     *
+     * <p>只删认得出的那几种命名，<b>绝不碰 .log / .gz</b>：
+     * 日志轮转是 logback 的事，两边都去删同一批文件迟早出岔子。
+     */
+    private void cleanupStrayDebugDumps(CleanupResult result, boolean dryRun) {
+        Path dir = safeRoot(strayDumpDir);
+        if (dir == null) {
+            return;
+        }
         try (Stream<Path> files = Files.list(dir)) {
-            for (Path file : files.filter(Files::isRegularFile).toList()) {
-                long modified = lastModified(file);
-                if (modified <= 0 || ageDays(modified) <= retainDaysInspect) {
+            for (Path f : files.filter(Files::isRegularFile).toList()) {
+                String name = f.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                if (!name.endsWith(".xml")) {
                     continue;
                 }
-                long size = fileSize(file);
-                if (!dryRun && !deleteSingle(dir, file)) {
+                long modified = lastModified(f);
+                if (modified <= 0 || ageDays(modified) <= retainDaysStrayDump) {
+                    continue;
+                }
+                long size = fileSize(f);
+                if (!dryRun && !deleteSingle(dir, f)) {
                     continue;
                 }
                 result.setDeletedFiles(result.getDeletedFiles() + 1);
                 result.setFreedBytes(result.getFreedBytes() + size);
             }
         } catch (IOException e) {
-            log.warn("清理点选临时截图失败: {}", e.getMessage());
+            log.warn("清理 logs 下的调试 xml 失败: {}", e.getMessage());
         }
     }
 

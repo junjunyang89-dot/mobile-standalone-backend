@@ -21,6 +21,34 @@ public class TaskController {
     private final FunctionalTestScenarioService scenarioService;
 
     /**
+     * 设备池排队情况：还没分到设备的任务，按先到先得排好。
+     * <p>
+     * 单独一个接口而不是让前端去 {@code GET /tasks?status=PENDING} 里筛：
+     * PENDING 里还有「已经分到设备、正等着起跑」的那一批，混在一起数出来的
+     * 「前面还有几个」是错的，而排队界面上这个数字错了比不显示更糟。
+     */
+    @GetMapping("/queue")
+    public ResponseEntity<?> queue() {
+        List<Task> queued = taskService.listQueued(50);
+        List<Map<String, Object>> items = new java.util.ArrayList<>();
+        int pos = 0;
+        for (Task t : queued) {
+            Map<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("position", ++pos);
+            m.put("taskId", t.getId());
+            m.put("name", t.getName());
+            m.put("flowId", t.getFlowId());
+            m.put("platform", t.getPlatform() == null ? null : t.getPlatform().name());
+            m.put("runTrack", t.getRunTrack());
+            m.put("createdAt", t.getCreatedAt());
+            m.put("waitedSeconds", t.getCreatedAt() == null ? 0
+                    : java.time.Duration.between(t.getCreatedAt(), java.time.LocalDateTime.now()).getSeconds());
+            items.add(m);
+        }
+        return ResponseEntity.ok(Map.of("total", taskService.countQueued(), "items", items));
+    }
+
+    /**
      * 获取任务列表。支持分页与筛选。
      * 返回的每条任务均带 scenarioKey、scenarioName（展示名由 scenarioKey+platform 解析），供前端「测试场景」列展示。
      * 传 page、size 时返回分页结果（content、totalElements、totalPages、page、size）；

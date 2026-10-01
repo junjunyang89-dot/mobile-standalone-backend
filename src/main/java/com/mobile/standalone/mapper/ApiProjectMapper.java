@@ -19,6 +19,8 @@ public interface ApiProjectMapper {
 
     int update(ApiProject row);
 
+    int updateRepoPath(@Param("code") String code, @Param("repoPath") String repoPath);
+
     int deleteByCode(@Param("code") String code);
 
     long countAll();

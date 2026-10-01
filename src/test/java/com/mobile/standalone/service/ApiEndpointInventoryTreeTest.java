@@ -72,14 +72,7 @@ class ApiEndpointInventoryTreeTest {
                 .findFirst()
                 .orElseThrow();
         assertThat(dc.get("total")).isEqualTo(1);
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> rails = (List<Map<String, Object>>) dc.get("rails");
-        assertThat(rails).isNotEmpty();
-        assertThat(rails.get(0).get("type")).isEqualTo("branch");
-        assertThat(String.valueOf(rails.get(0).get("label"))).contains("本分支必测");
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> controllers = (List<Map<String, Object>>) rails.get(0).get("controllers");
-        assertThat(controllers.get(0).get("name")).isEqualTo("AiController");
+        assertThat(dc.containsKey("rails")).isFalse();
     }
 
     @SuppressWarnings("unchecked")
@@ -88,10 +81,8 @@ class ApiEndpointInventoryTreeTest {
                 contains("api_project_categories"),
                 ArgumentMatchers.<RowMapper<Map<String, Object>>>any()))
                 .thenReturn(List.of(
-                        categoryRow("APP", "APP 后端", 10),
-                        categoryRow("PVP", "PVP · 客户端", 20),
-                        categoryRow("WEB", "WEB", 30),
-                        categoryRow("OTHER", "其他", 40)));
+                        categoryRow("APP", "电竞APP", 10),
+                        categoryRow("POGPOG", "POGPOG", 100)));
     }
 
     private static Map<String, Object> categoryRow(String key, String label, int sortOrder) {

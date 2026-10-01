@@ -15,6 +15,12 @@ public interface TaskMapper {
     
     List<Task> findByStatus(@Param("status") String status);
 
+    /** 排队中：已创建、还没分到设备。按先到先得取 */
+    List<Task> findQueued(@Param("limit") int limit);
+
+    /** 排队总数，给界面显示「前面还有几个」 */
+    int countQueued();
+
     /**
      * 某条流程最近一次执行。
      * <p>

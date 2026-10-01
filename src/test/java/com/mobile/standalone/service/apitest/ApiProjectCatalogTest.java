@@ -3,53 +3,37 @@ package com.mobile.standalone.service.apitest;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ApiProjectCatalogTest {
 
     @Test
-    void category_appBackends() {
+    void 没手动分类的都归电竞APP() {
         assertEquals("APP", ApiProjectCatalog.categoryKeyOf("app-seckill"));
-        assertEquals("APP", ApiProjectCatalog.categoryKeyOf("app-data-center"));
         assertEquals("APP", ApiProjectCatalog.categoryKeyOf("data-center"));
-        assertEquals("APP", ApiProjectCatalog.categoryKeyOf("app_esports_api"));
-    }
-
-    @Test
-    void category_pvpClients() {
-        assertEquals("PVP", ApiProjectCatalog.categoryKeyOf("android-domestic-esports"));
-        assertEquals("PVP", ApiProjectCatalog.categoryKeyOf("ios-domestic-esports"));
-        assertEquals("PVP", ApiProjectCatalog.categoryKeyOf("harmonyos-domestic-esports"));
-    }
-
-    @Test
-    void category_web() {
-        assertEquals("WEB", ApiProjectCatalog.categoryKeyOf("app-steam-web"));
-        assertEquals("WEB", ApiProjectCatalog.categoryKeyOf("steam-web"));
-    }
-
-    @Test
-    void category_other() {
-        // 平台自己的初始化服务和对比分析的演练项目，不该混进「APP 后端」业务树
-        assertEquals("OTHER", ApiProjectCatalog.categoryKeyOf("auth-bootstrap"));
-        assertEquals("OTHER", ApiProjectCatalog.categoryKeyOf("debug-tests"));
-        assertEquals("OTHER", ApiProjectCatalog.categoryKeyOf("debug-compat"));
-    }
-
-    @Test
-    void 别名项目也认得出是APP后端() {
-        // comment-service 在 api_projects 里叫 app_comment-service，是货真价实的 APP 后端。
-        // 早先这条被断言成 OTHER，是把「编码没带 app- 前缀」当成了「不是 APP」
         assertEquals("APP", ApiProjectCatalog.categoryKeyOf("comment-service"));
-        assertEquals("APP", ApiProjectCatalog.categoryKeyOf("data-center"));
+        assertEquals("APP", ApiProjectCatalog.categoryKeyOf("ios-domestic-esports"));
+        assertEquals("APP", ApiProjectCatalog.categoryKeyOf("debug-tests"));
+    }
+
+    @Test
+    void 已下线的PVP_WEB_其他不再是分类() {
+        assertEquals("APP", ApiProjectCatalog.resolveCategoryKey("app-seckill", "OTHER"));
+        assertEquals("APP", ApiProjectCatalog.resolveCategoryKey("steam-web", "web"));
+        assertEquals("APP", ApiProjectCatalog.resolveCategoryKey("ios-domestic-esports", "PVP"));
+        assertFalse(ApiProjectCatalog.isBuiltinCategory("PVP"));
+        assertFalse(ApiProjectCatalog.isBuiltinCategory("OTHER"));
+        assertTrue(ApiProjectCatalog.isBuiltinCategory("APP"));
     }
 
     @Test
     void resolveCategoryKey_manualOverride() {
-        assertEquals("APP", ApiProjectCatalog.resolveCategoryKey("ios-domestic-esports", "APP"));
-        assertEquals("OTHER", ApiProjectCatalog.resolveCategoryKey("app-seckill", "OTHER"));
-        assertEquals("PVP", ApiProjectCatalog.resolveCategoryKey("ios-domestic-esports", null));
+        assertEquals("APP", ApiProjectCatalog.resolveCategoryKey("ios-domestic-esports", "app"));
+        assertEquals("POGPOG", ApiProjectCatalog.resolveCategoryKey("pogpog-api", "POGPOG"));
         assertEquals("中间件", ApiProjectCatalog.resolveCategoryKey("app-seckill", "中间件"));
         assertEquals("中间件", ApiProjectCatalog.categoryDisplayLabel("中间件"));
+        assertEquals("电竞APP", ApiProjectCatalog.categoryDisplayLabel("APP"));
     }
 
     @Test

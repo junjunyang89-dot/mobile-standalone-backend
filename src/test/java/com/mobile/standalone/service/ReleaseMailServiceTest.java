@@ -52,6 +52,8 @@ class ReleaseMailServiceTest {
         assertFalse(draft.getHtmlBody().contains(">7月20日 PogPog"));
         assertTrue(draft.getHtmlBody().contains("相关发布及DB变更内容已准备就绪"));
         assertTrue(draft.getHtmlBody().contains("二、DB变更执行（@何政）"));
+        assertTrue(draft.getHtmlBody().contains("以下为本版本全部DB变更汇总（与上文各需求项 SQL 一致，便于一次性执行），"));
+        assertTrue(draft.getHtmlBody().contains("麻烦何政于7月19日（发版前一日）执行完毕"));
         assertTrue(draft.getHtmlBody().contains("CREATE TABLE t"));
         assertTrue(draft.getHtmlBody().contains("谢谢"));
         assertTrue(draft.getHtmlBody().contains("杨俊俊"));
@@ -59,6 +61,14 @@ class ReleaseMailServiceTest {
         assertFalse(draft.getHtmlBody().contains("祝各位"));
         assertEquals("yangjunjun@pwrd.com", draft.getDefaultTo());
         assertEquals("【发版通知】7月20日 PogPog H5&服务端版本", draft.getSubject());
+    }
+
+    @Test
+    void sqlDeadlineIsDayBeforeRelease() {
+        assertEquals("麻烦何政于9月16日（发版前一日）执行完毕",
+                svc().buildSqlDeadlinePhrase("9月17日 PogPog H5&服务端版本"));
+        assertEquals("麻烦何政于发版前一日执行完毕",
+                svc().buildSqlDeadlinePhrase("无日期标题"));
     }
 
     @Test

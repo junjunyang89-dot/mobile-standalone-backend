@@ -22,6 +22,8 @@ public class ApiProject {
     private String kind;
     /** 所属分类：APP / PVP / WEB / OTHER；留空则按编码自动归类 */
     private String category;
+    /** GitLab 仓库地址（clone 用的那个）；本地仓库没配时按它 clone */
+    private String gitUrl;
     /** 本地 git 仓库绝对路径；填了才能做接口变更分析 */
     private String repoPath;
     /** 对比基线分支，留空按 master */

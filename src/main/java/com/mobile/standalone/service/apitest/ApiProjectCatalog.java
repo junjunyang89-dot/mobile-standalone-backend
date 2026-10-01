@@ -8,9 +8,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 项目管理页顶部分类：APP / PVP / WEB / 其他。
+ * 项目管理页分类。内置只有「电竞APP」（key 仍是 APP，库里和各处查询都按这个 key）；
+ * POGPOG 等是在分类管理里建的自定义分类。
  * <p>
- * APP＝GitLab {@code app-*} 后端微服务；PVP＝电竞客户端（Android/iOS/鸿蒙）；WEB＝Web/H5 相关后端。
+ * 早先还有 PVP / WEB / 其他 三个内置分类，已下线。库里残留的这三个值一律当成 APP，
+ * 否则项目上挂着旧值时，树会把已删掉的分类又原样渲染出来。
  */
 public final class ApiProjectCatalog {
 
@@ -20,66 +22,16 @@ public final class ApiProjectCatalog {
     public record Category(String key, String label) {
     }
 
-    public static final Category APP = new Category("APP", "APP 后端");
-    public static final Category PVP = new Category("PVP", "PVP · 客户端");
-    public static final Category WEB = new Category("WEB", "WEB");
-    public static final Category OTHER = new Category("OTHER", "其他");
+    public static final Category APP = new Category("APP", "电竞APP");
 
-    private static final List<Category> ORDER = List.of(APP, PVP, WEB, OTHER);
+    private static final List<Category> ORDER = List.of(APP);
 
-    /** 客户端 / 电竞端项目编码 */
-    private static final Set<String> PVP_CODES = Set.of(
-            "android-domestic-esports",
-            "ios-domestic-esports",
-            "harmonyos-domestic-esports",
-            "android-overseas-pogpog",
-            "ios-overseas-pogpog");
+    /** 已下线的内置分类 key */
+    public static final Set<String> RETIRED_CATEGORY_KEYS = Set.of("PVP", "WEB", "OTHER");
 
-    /** Web / H5 相关 */
-    private static final Set<String> WEB_CODES = Set.of(
-            "app-steam-web",
-            "steam-web",
-            "steam-admin",
-            "pogpog-h5",
-            "overseas_service_host_and_tool_url");
-
-    /**
-     * 项目编码 → APP / PVP / WEB / OTHER。
-     * APP 后端优先走 {@link ApiAppCatalog} 的 GitLab 清单与别名归一。
-     */
+    /** 没有手动分类的项目一律归到电竞APP */
     public static String categoryKeyOf(String projectCode) {
-        if (projectCode == null || projectCode.isBlank()) {
-            return OTHER.key();
-        }
-        String raw = projectCode.trim();
-        String lower = raw.toLowerCase(Locale.ROOT);
-
-        if (PVP_CODES.contains(lower)) {
-            return PVP.key();
-        }
-        if (WEB_CODES.contains(lower)) {
-            return WEB.key();
-        }
-
-        // debug-* 是对比分析的演练项目，auth-* 是平台自己的初始化服务。
-        // 这一段必须排在 APP 判断<b>前面</b>：canonicalCode 会把它们归一成
-        // app-xxx，于是下面那个 APP 分支先命中，这一段永远执行不到——
-        // 结果是平台自己的东西混进了「APP 后端」业务树，而代码里明明写着不该
-        if (lower.startsWith("debug-") || lower.startsWith("auth-")) {
-            return OTHER.key();
-        }
-
-        String canon = ApiAppCatalog.canonicalCode(raw);
-        if ("wmpvp".equals(ApiAppCatalog.appKeyOfProject(canon))
-                || lower.startsWith("app-")
-                || lower.startsWith("app_")
-                || canon.startsWith("app-")) {
-            return APP.key();
-        }
-        if (lower.contains("esports") && (lower.contains("android") || lower.contains("ios"))) {
-            return PVP.key();
-        }
-        return OTHER.key();
+        return APP.key();
     }
 
     public static Category categoryOf(String projectCode) {
@@ -88,14 +40,17 @@ public final class ApiProjectCatalog {
 
     public static Category categoryOf(String projectCode, String storedCategory) {
         String key = resolveCategoryKey(projectCode, storedCategory);
-        return ORDER.stream().filter(c -> c.key().equals(key)).findFirst().orElse(OTHER);
+        return ORDER.stream().filter(c -> c.key().equals(key)).findFirst().orElse(APP);
     }
 
-    /** 手动分类优先；未配置时按编码规则推断 */
+    /** 手动分类优先；未配置或是已下线的旧值时归到电竞APP */
     public static String resolveCategoryKey(String projectCode, String storedCategory) {
         if (storedCategory != null && !storedCategory.isBlank()) {
             String k = storedCategory.trim();
             String upper = k.toUpperCase(Locale.ROOT);
+            if (RETIRED_CATEGORY_KEYS.contains(upper)) {
+                return APP.key();
+            }
             for (Category c : ORDER) {
                 if (c.key().equals(upper)) {
                     return c.key();
@@ -117,7 +72,7 @@ public final class ApiProjectCatalog {
     /** 树节点展示名：内置分类用中文标签，自定义分类原样展示 */
     public static String categoryDisplayLabel(String categoryKey) {
         if (categoryKey == null || categoryKey.isBlank()) {
-            return OTHER.label();
+            return APP.label();
         }
         String upper = categoryKey.trim().toUpperCase(Locale.ROOT);
         for (Category c : ORDER) {
@@ -145,16 +100,6 @@ public final class ApiProjectCatalog {
         List<String> slots = new ArrayList<>(ApiAppCatalog.groups().get(0).projectCodes());
         slots.add("app-global-data");
         return slots;
-    }
-
-    /** PVP 客户端占位（树里固定展示） */
-    public static List<String> pvpProjectSlots() {
-        return List.copyOf(PVP_CODES);
-    }
-
-    /** WEB 相关占位（树里固定展示） */
-    public static List<String> webProjectSlots() {
-        return List.copyOf(WEB_CODES);
     }
 
     /**
@@ -193,17 +138,11 @@ public final class ApiProjectCatalog {
         if (APP.key().equals(categoryKey)) {
             return appProjectSlots();
         }
-        if (PVP.key().equals(categoryKey)) {
-            return pvpProjectSlots();
-        }
-        if (WEB.key().equals(categoryKey)) {
-            return webProjectSlots();
-        }
         return List.of();
     }
 
     /**
-     * 把 flat 项目列表分成四类；APP 内按 catalog 顺序 + 其余字母序。
+     * 把 flat 项目列表按分类分桶；APP 内按 catalog 顺序 + 其余字母序。
      */
     public static Map<String, List<Map<String, Object>>> bucketProjects(
             List<Map<String, Object>> projectRows) {

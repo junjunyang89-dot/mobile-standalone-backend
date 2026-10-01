@@ -40,13 +40,49 @@ public class CrashMonitor {
      * @param packageName 只关心这个包的
      */
     public List<CrashLogParser.Incident> collect(String deviceId, String packageName) {
-        StringBuilder all = new StringBuilder();
+        return collectSince(deviceId, packageName, null);
+    }
+
+    /**
+     * 记下设备此刻的时间，收尾时用 {@link #collectSince} 只取这之后的。
+     * <p>
+     * 流程用例一天跑几十次，每次都 {@code logcat -c} 会把开发正要看的日志一起清掉；
+     * 按时间切则什么都不删。取的是<b>设备</b>时钟，不是本机的——两边差几分钟很常见。
+     *
+     * @return logcat {@code -T} 认的格式 {@code MM-dd HH:mm:ss.000}；读不到返回 null
+     */
+    public String mark(String deviceId) {
+        // 整条命令必须是一个参数且带引号：adb shell 会把参数拼成一串交给设备 shell 重新按空格拆，
+        // 格式串里的空格会把它拆成两个参数，结果只剩「09-29」
+        String out = exec(new String[]{"adb", "-s", deviceId, "shell", "date '+%m-%d %H:%M:%S'"}, 5).trim();
+        return out.matches("\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}") ? out + ".000" : null;
+    }
+
+    /**
+     * @param since {@link #mark} 的返回值；null 表示不按时间切（调用方应已 {@link #start} 清过缓冲）
+     */
+    public List<CrashLogParser.Incident> collectSince(String deviceId, String packageName, String since) {
+        List<String> window = since == null ? List.of() : List.of("-T", since);
         // crash 缓冲区拿 Java/native 崩溃，main 缓冲区拿 ANR（ActivityManager 打在 main 里）
-        all.append(exec(new String[]{"adb", "-s", deviceId, "logcat", "-b", "crash", "-d"}, 20));
-        all.append('\n');
-        all.append(exec(new String[]{"adb", "-s", deviceId, "logcat", "-b", "main", "-d",
-                "-s", "ActivityManager:E", "AndroidRuntime:E"}, 20));
-        return CrashLogParser.parse(all.toString(), packageName);
+        String crash = exec(logcat(deviceId, window, "-b", "crash", "-d"), 20);
+        String main = exec(logcat(deviceId, window, "-b", "main", "-d",
+                "-s", "ActivityManager:E", "AndroidRuntime:E", "chromium:F"), 20);
+        List<CrashLogParser.Incident> out = new java.util.ArrayList<>(
+                CrashLogParser.parse(crash + "\n" + main, packageName));
+        // events 不会被 logcat -c 清掉，没有时间窗就会把历史上的进程死亡全算进来
+        boolean alreadyCrashed = out.stream().anyMatch(i -> !"ANR".equals(i.getType()));
+        if (since != null && !alreadyCrashed) {
+            String events = exec(logcat(deviceId, window, "-b", "events", "-d"), 20);
+            out.addAll(CrashLogParser.unexpectedDeaths(events, main, packageName));
+        }
+        return out;
+    }
+
+    private static String[] logcat(String deviceId, List<String> window, String... args) {
+        List<String> cmd = new java.util.ArrayList<>(List.of("adb", "-s", deviceId, "logcat"));
+        cmd.addAll(List.of(args));
+        cmd.addAll(window);
+        return cmd.toArray(String[]::new);
     }
 
     private String exec(String[] cmd, int timeoutSeconds) {

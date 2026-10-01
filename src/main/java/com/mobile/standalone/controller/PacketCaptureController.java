@@ -1,7 +1,9 @@
 package com.mobile.standalone.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.mobile.standalone.service.apitest.CaptureCatalogService;
 import com.mobile.standalone.service.apitest.RequirementEndpointService;
+import com.mobile.standalone.service.capture.CaptureResourceKind;
 import com.mobile.standalone.service.capture.PacketCaptureService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,6 +38,7 @@ public class PacketCaptureController {
     private final com.mobile.standalone.service.apitest.ApiEndpointService endpointService;
     private final com.mobile.standalone.service.ApiTestCaseService caseService;
     private final com.mobile.standalone.service.capture.CaptureStore captureStore;
+    private final CaptureCatalogService catalogService;
 
     @PostMapping("/start")
     public ResponseEntity<?> start(@RequestBody Map<String, Object> body) {
@@ -163,6 +166,30 @@ public class PacketCaptureController {
                 "fieldsExtracted", fieldsExtracted));
     }
 
+    /**
+     * 抓到的接口收进接口清单（不挂需求单）。
+     * body: {sessionId, project, flows: [{seq, method, path, query}]}，project 只给认不出归属的接口兜底。
+     */
+    @PostMapping("/save-endpoints")
+    public ResponseEntity<?> saveEndpoints(@RequestBody Map<String, Object> body) {
+        List<CaptureCatalogService.FlowRef> flows = new ArrayList<>();
+        if (body.get("flows") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> m && str(m.get("path")) != null) {
+                    flows.add(new CaptureCatalogService.FlowRef(intOrNull(m.get("seq")),
+                            str(m.get("method")), str(m.get("path")), str(m.get("query"))));
+                }
+            }
+        }
+        if (flows.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "没有可收录的接口"));
+        }
+        List<Map<String, Object>> rows = catalogService.save(
+                str(body.get("sessionId")), str(body.get("project")), flows);
+        long saved = rows.stream().filter(r -> r.get("endpointId") != null).count();
+        return ResponseEntity.ok(Map.of("saved", saved, "unresolved", rows.size() - saved, "items", rows));
+    }
+
     @GetMapping("/current")
     public ResponseEntity<?> current() {
         var s = captureService.current();
@@ -234,10 +261,17 @@ public class PacketCaptureController {
             d.put("bodyNote", r.path("bodyNote").asText(""));
             d.put("hasDetail", r.path("hasDetail").asBoolean(true));
             d.put("calls", callCounts.getOrDefault(method + " " + path, 1));
+            String respKind = String.valueOf(d.get("respKind"));
+            String kind = CaptureResourceKind.of(path,
+                    respKind.isBlank() ? r.path("respContentType").asText("") : respKind);
+            d.put("kind", kind);
             distinct.add(d);
-            links.add(new RequirementEndpointService.Link(
-                    null, method, path, r.path("host").asText(""), null, null,
-                    r.path("seq").asInt(), "last"));
+            // JS/CSS/图片不是接口，挂上去会把需求单的涉及接口刷成静态资源清单
+            if (CaptureResourceKind.isApi(kind)) {
+                links.add(new RequirementEndpointService.Link(
+                        null, method, path, r.path("host").asText(""), null, null,
+                        r.path("seq").asInt(), "last"));
+            }
         }
 
         int linked = 0;
@@ -250,6 +284,9 @@ public class PacketCaptureController {
             // 根本没有默认值。没有它，边界用例连一个能跑的请求都拼不出来
             if (project != null && !project.isBlank()) {
                 for (Map<String, Object> d : distinct) {
+                    if (!CaptureResourceKind.isApi(String.valueOf(d.get("kind")))) {
+                        continue;
+                    }
                     endpointService.applyCaptureRequest(project,
                             String.valueOf(d.get("method")), String.valueOf(d.get("path")),
                             String.valueOf(d.get("query")),

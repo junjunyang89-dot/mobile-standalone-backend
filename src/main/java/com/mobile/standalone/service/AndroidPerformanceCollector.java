@@ -196,6 +196,57 @@ public class AndroidPerformanceCollector {
         return pss;
     }
 
+    /**
+     * 取一次<b>新鲜</b>的内存值，绕过节流缓存。
+     *
+     * <p>内存打点专用。走 {@link #getMemoryPssKb} 的话可能命中 2 秒节流缓存，
+     * 于是相邻两轮拿到同一个数——趋势线被抹平成「没泄漏」，
+     * <b>而且没有任何迹象</b>。泄漏分析宁可多花一次 adb 调用。
+     */
+    public Long getMemoryPssKbFresh(String deviceId, String packageName) {
+        if (deviceId == null || packageName == null) {
+            return null;
+        }
+        Long pss = fetchMemoryPssKb(deviceId, packageName);
+        // 顺手刷新缓存，免得紧接着的常规采样又拉一次
+        if (pss != null) {
+            memCache.put(deviceId + "\0" + packageName, new CachedMem(System.currentTimeMillis(), pss));
+        }
+        return pss;
+    }
+
+    /**
+     * 催一次 GC。
+     *
+     * <p>用 {@code am send-trim-memory <pid> RUNNING_CRITICAL}——这是 framework 通知应用
+     * 「内存吃紧，赶紧放」的正规途径，应用会走 {@code onTrimMemory} 并触发回收。
+     *
+     * <p><b>它是异步的</b>：命令返回不代表回收做完了，调用方必须等一会儿再取值。
+     *
+     * <p>催不动（进程没起来、设备不支持）返回 false，让调用方能在报告里说明
+     * 这批数据的噪声更大，而不是默默拿一个偏高的值去做趋势。
+     */
+    public boolean requestGc(String deviceId, String packageName) {
+        Integer pid = getPid(deviceId, packageName);
+        if (pid == null) {
+            return false;
+        }
+        try {
+            Process p = new ProcessBuilder("adb", "-s", deviceId, "shell",
+                    "am", "send-trim-memory", String.valueOf(pid), "RUNNING_CRITICAL")
+                    .redirectErrorStream(true)
+                    .start();
+            String out = readOutput(p, ADB_TIMEOUT_MS);
+            // am 失败时会把 Error/Exception 打到 stdout 而不是给非零退出码，
+            // 只看退出码会把失败当成成功
+            return out != null && !out.toLowerCase().contains("error")
+                    && !out.contains("Exception");
+        } catch (Exception e) {
+            log.debug("requestGc 失败: deviceId={}, package={}", deviceId, packageName, e);
+            return false;
+        }
+    }
+
     private Long fetchMemoryPssKb(String deviceId, String packageName) {
         try {
             Process p = new ProcessBuilder("adb", "-s", deviceId, "shell", "dumpsys", "meminfo", packageName)

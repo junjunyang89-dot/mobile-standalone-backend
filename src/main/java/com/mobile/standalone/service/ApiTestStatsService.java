@@ -52,8 +52,8 @@ public class ApiTestStatsService {
         long prevFailed = asLong(prev, "failed");
         Double prevAvg = asDouble(prev, "avgLatencyMs");
 
-        Double passRate = curTotal > 0 ? round1(100.0 * curPassed / curTotal) : null;
-        Double prevPassRate = prevTotal > 0 ? round1(100.0 * prevPassed / prevTotal) : null;
+        Double passRate = passRate(curPassed, curTotal, asLong(cur, "blocked"));
+        Double prevPassRate = passRate(prevPassed, prevTotal, asLong(prev, "blocked"));
         out.setPassRate(passRate);
         if (passRate != null && prevPassRate != null) {
             out.setPassRateDelta(round1(passRate - prevPassRate));
@@ -95,17 +95,21 @@ public class ApiTestStatsService {
             c.setProject(project);
             c.setName(project);
             c.setCaseCount(asLong(row, "caseCount"));
-            long runCount = asLong(row, "runCount");
-            long passed = asLong(row, "passed");
-            if (runCount > 0) {
-                c.setPassRate(round1(100.0 * passed / runCount));
-            } else {
-                c.setPassRate(null);
-            }
+            c.setPassRate(passRate(asLong(row, "passed"), asLong(row, "runCount"), asLong(row, "blocked")));
             collections.add(c);
         }
         out.setCollections(collections);
         return out;
+    }
+
+    /**
+     * 通过率。没跑成（BLOCKED）的不进分母：服务挂了那批压根没走到断言，
+     * 算进去的话「通过率 40%」会让人去查用例，而真实原因是服务没起来。
+     * 全部没跑成时返回 null（显示「—」），而不是 0%。
+     */
+    static Double passRate(long passed, long total, long blocked) {
+        long ran = total - blocked;
+        return ran > 0 ? round1(100.0 * passed / ran) : null;
     }
 
     private static long asLong(Map<String, Object> map, String key) {

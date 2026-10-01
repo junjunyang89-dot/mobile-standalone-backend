@@ -26,7 +26,22 @@ public class DeviceLockService {
     public enum Kind {
         TASK("测试任务"),
         REGRESSION("线上回归"),
-        INSPECT("元素采集");
+        INSPECT("元素采集"),
+        /**
+         * 有人把这台借走手动用。
+         * <p>
+         * 走同一把锁而不是另起一套「预约」字段，是因为它要挡的东西完全一样：
+         * 借走的设备不能再被派任务，跑着任务的设备也不能被借走。
+         * 同一件事用两套机制表达，迟早会出现「两边都认为自己拿到了」的情况。
+         */
+        MANUAL("人工借用"),
+        /**
+         * 正在录制流程。
+         * <p>
+         * 不占住的话调度器会往这台派任务，两边同时操作同一台手机——
+         * 录出来的步骤里会混进别人点的东西，而且现象是「录的跟我点的对不上」，很难往这上面想。
+         */
+        RECORD("流程录制");
 
         private final String displayName;
 
@@ -170,6 +185,39 @@ public class DeviceLockService {
             log.debug("设备释放: deviceId={}, refId={}", key, refId);
         }
         return released[0];
+    }
+
+    /**
+     * 续期：把持有时间的起点重置到现在，持有者不变。
+     * <p>
+     * 借用有 {@link #MAX_HOLD} 的上限，到点会被当成失效占用抢走——这个上限是必要的
+     * （不然一次忘记归还就等于永久占用），但人还在用的时候得能续。
+     * <p>
+     * 做成一个原子操作，而不是「先释放再重新占用」：那中间有个窗口，
+     * 调度器正好在这一瞬间扫过就会把设备派给别人，而借的人毫不知情，
+     * 两边同时操作同一台手机——这种问题查起来极其痛苦，不值得为省十行代码去冒。
+     *
+     * @return 续上了返回 true；不是你持有的返回 false
+     */
+    public boolean renew(String deviceId, String refId) {
+        String key = normalize(deviceId);
+        if (key == null || refId == null || refId.isBlank()) {
+            return false;
+        }
+        boolean[] renewed = new boolean[1];
+        holders.computeIfPresent(key, (k, current) -> {
+            if (!refId.equals(current.refId())) {
+                return current;
+            }
+            renewed[0] = true;
+            return new Holder(current.kind(), current.refId(), current.label(), LocalDateTime.now());
+        });
+        return renewed[0];
+    }
+
+    /** 占用上限，供界面提示「最长能借多久」 */
+    public static Duration maxHold() {
+        return MAX_HOLD;
     }
 
     /** 强制释放（设备断开、人工解锁等），不校验持有者 */

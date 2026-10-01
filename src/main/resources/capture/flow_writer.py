@@ -17,9 +17,11 @@ import json
 import os
 import time
 
-# 单条 body 的上限。超过就截断——真要看几 MB 的响应，那是下载文件不是读接口，
-# 而把它整个读进浏览器只会让页面卡死
-MAX_BODY = 256 * 1024
+try:
+    import api_override
+except Exception:  # noqa: BLE001
+    # 改写是附加功能，抓包是主业。这个模块出任何问题都不能让抓包起不来
+    api_override = None
 
 # 只存文本类。图片/视频/protobuf 存下来也是一堆乱码，白占地方
 TEXT_HINTS = ("json", "text", "xml", "javascript", "x-www-form-urlencoded", "html")
@@ -60,10 +62,17 @@ class FlowWriter:
         self.failed = {}
         # 给每条流水一个序号，页面靠它回来取 body
         self.seq = 0
+        # 响应改写
+        self.override_path = None
+        self.override_rules = []
+        # 已经改写过哪些。**必须留痕**：人看到一个诡异的响应时，
+        # 第一个该能回答的问题是「这是不是平台改的」
+        self.overridden = {}
 
     def load(self, loader):
         loader.add_option("out", str, "", "输出的 jsonl 路径")
         loader.add_option("hosts", str, "", "只抓这些域名，逗号分隔；留空＝全抓")
+        loader.add_option("overrides", str, "", "响应改写规则文件（JSON）；留空＝不改写")
 
     def configure(self, updates):
         if "out" in updates:
@@ -71,6 +80,9 @@ class FlowWriter:
         if "hosts" in updates:
             raw = ctx.options.hosts or ""
             self.hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
+        if "overrides" in updates:
+            self.override_path = ctx.options.overrides or None
+            self._load_overrides()
 
     def _wanted(self, host):
         if not self.hosts:
@@ -130,10 +142,9 @@ class FlowWriter:
 
             body = ""
             if self._is_text(flow.response.headers):
+                # 全文留下：对局详情这种几 MB 的 JSON 截断后既对不上字段，
+                # 也解析不成树，等于没抓到。二进制仍不进 body。
                 raw = flow.response.raw_content or b""
-                if len(raw) > MAX_BODY:
-                    info["respTruncated"] = True
-                    raw = raw[:MAX_BODY]
                 body = raw.decode("utf-8", errors="replace")
             else:
                 info["bodyNote"] = "%s 是二进制内容，不留响应体" % (info["respKind"] or "该类型")
@@ -158,7 +169,75 @@ class FlowWriter:
         if not self._is_text(flow.request.headers):
             return ""
         raw = flow.request.raw_content or b""
-        return raw[:MAX_BODY].decode("utf-8", errors="replace")
+        return raw.decode("utf-8", errors="replace")
+
+    def _load_overrides(self):
+        """规则在会话开始时读一次。
+
+        不做热加载是有意的：一次执行中途规则变了，前半段和后半段测的是不同的东西，
+        而报告上看不出来。规则要改就重开一次会话。
+        """
+        self.override_rules = []
+        if not self.override_path or api_override is None:
+            return
+        rules, problems = api_override.load_rules(self.override_path)
+        self.override_rules = rules
+        for why in problems:
+            ctx.log.warn("[override] " + why)
+            self._note_override("(规则未生效)", why)
+        if rules:
+            ctx.log.info("[override] 已加载 %d 条响应改写规则" % len(rules))
+
+    def _note_override(self, rid, detail):
+        """写到 .overrides 文件，让平台能把它显示在执行日志里。
+
+        只写日志是不够的——没人会去翻 mitmdump 的 stdout，
+        而一次被悄悄改写过的执行，它的结论是不能信的。
+        """
+        key = "%s：%s" % (rid, detail)
+        self.overridden[key] = self.overridden.get(key, 0) + 1
+        if not self.out_path:
+            return
+        try:
+            with open(self.out_path + ".overrides", "w", encoding="utf-8") as f:
+                json.dump(self.overridden, f, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _apply_override(self, flow):
+        """改写这条响应。任何异常都吞掉——改写坏了不能连累抓包。"""
+        if not self.override_rules or api_override is None:
+            return
+        try:
+            path_only = flow.request.path.split("?")[0]
+            body = ""
+            try:
+                body = (flow.response.raw_content or b"").decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                body = ""
+            res = api_override.apply_overrides(
+                self.override_rules, flow.request.method, flow.request.pretty_host,
+                path_only, flow.response.status_code, body)
+
+            for why in res.problems:
+                ctx.log.warn("[override] " + why)
+                self._note_override("(改写失败)", why)
+            if not res.changed:
+                return
+            if res.delay_ms > 0:
+                time.sleep(res.delay_ms / 1000.0)
+            flow.response.status_code = res.status
+            if res.body is not None and res.body != body:
+                flow.response.text = res.body
+            # 让被改写的响应自己带个标记，排查时从手机抓包也能看出来
+            try:
+                flow.response.headers["x-qa-override"] = ",".join(res.applied)
+            except Exception:  # noqa: BLE001
+                pass
+            for rid in res.applied:
+                self._note_override(rid, "%s %s" % (flow.request.method, path_only))
+        except Exception as e:  # noqa: BLE001
+            ctx.log.warn("[override] 改写异常，按原样放行: %s" % e)
 
     def request(self, flow):
         """请求一到就记一笔。
@@ -211,6 +290,9 @@ class FlowWriter:
             pass
 
     def response(self, flow):
+        # 改写放在白名单过滤<b>之前</b>：抓包白名单是为了让清单好看，
+        # 而要改写的接口未必在那张白名单里。两件事的范围本来就不该绑在一起
+        self._apply_override(flow)
         if not self.out_path:
             return
         # 不在这儿记 seen：request 钩子已经记过一次，

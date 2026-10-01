@@ -85,6 +85,16 @@ public class TaskService {
         return taskMapper.findLatestByFlowId(flowId.trim());
     }
 
+    /** 排队中（还没分到设备）的任务，按先到先得 */
+    public List<Task> listQueued(int limit) {
+        return taskMapper.findQueued(Math.max(1, Math.min(200, limit)));
+    }
+
+    /** 排队总数 */
+    public int countQueued() {
+        return taskMapper.countQueued();
+    }
+
     /** 试跑轨的最近一次 */
     public Task findLatestDebugByFlowId(String flowId) {
         if (flowId == null || flowId.isBlank()) {
@@ -393,6 +403,13 @@ public class TaskService {
         return true;
     }
     
+    /** 三类性能任务共用一套采集，模拟器上一律没有参考价值 */
+    private static boolean isPerformanceTask(Task.TaskType type) {
+        return type == Task.TaskType.PERFORMANCE_BASELINE_TEST
+                || type == Task.TaskType.SCENARIO_PERFORMANCE_TEST
+                || type == Task.TaskType.PERFORMANCE_QUALITY_TEST;
+    }
+
     /**
      * 停止任务：下发取消标记让执行线程在下一步中断，同时销毁外部进程（若有）。
      * <p>
@@ -435,6 +452,18 @@ public class TaskService {
         Device device = deviceMapper.findById(task.getDeviceId());
         if (device == null) {
             throw new RuntimeException("设备不存在: " + task.getDeviceId());
+        }
+
+        // 性能任务不能落在模拟器上。
+        //
+        // 帧率、冷启动耗时、内存占用，在模拟器上量到的是宿主机的数字，不是手机的。
+        // 而且报告会照常生成、每一栏都有值、看着一切正常——这种「安静地给出一份
+        // 一个结论都不能用的数据」比直接失败危险得多，所以宁可在这里挡住。
+        if (Device.isEmulator(device) && isPerformanceTask(task.getTaskType())) {
+            String who = device.getName() != null && !device.getName().isBlank()
+                    ? device.getName() : device.getId();
+            throw new IllegalStateException("「" + who + "」是模拟器，性能测试不能在模拟器上跑——"
+                    + "量到的是宿主机的性能，不是手机的。请换一台真机。");
         }
         
         String reportPath = null;
@@ -611,11 +640,19 @@ public class TaskService {
             }
             // 用户主动停止不是失败：状态归 STOPPED，避免污染通过率统计
             boolean cancelled = e instanceof UiFlowCancelledException || cancelRegistry.isCancelled(task.getId());
-            task.setStatus(cancelled ? Task.TaskStatus.STOPPED : Task.TaskStatus.FAILED);
+            // 没跑成（设备/会话/控件树/装包）和跑了没过是两件事，落成两个状态。
+            // 取消优先：人主动停的，不该因为停的那一刻恰好在等设备就被记成环境问题
+            boolean blocked = !cancelled && ExecutionBlockers.isBlocked(e);
+            if (blocked) {
+                log.warn("[task] 判定为 BLOCKED（没跑成，不计入通过率）: taskId={}, 原因={}",
+                        task.getId(), e.getMessage());
+            }
+            task.setStatus(cancelled ? Task.TaskStatus.STOPPED
+                    : blocked ? Task.TaskStatus.BLOCKED : Task.TaskStatus.FAILED);
             task.setUpdatedAt(LocalDateTime.now());
             taskMapper.update(task);
-            execution.setStatus(cancelled
-                    ? TaskExecution.ExecutionStatus.STOPPED
+            execution.setStatus(cancelled ? TaskExecution.ExecutionStatus.STOPPED
+                    : blocked ? TaskExecution.ExecutionStatus.BLOCKED
                     : TaskExecution.ExecutionStatus.FAILED);
             execution.setEndTime(LocalDateTime.now());
             execution.setErrorMessage(e.getMessage());

@@ -118,6 +118,7 @@ public class FailureDiagnosisService {
             }
         }
 
+        ctx.setAppCrashed(com.mobile.standalone.service.perf.FlowCrashGuard.appCrashed(logs));
         int failedIndex = lastFailedIndex(logs);
         if (failedIndex < 0) {
             ctx.getGaps().add("执行日志中没有失败步骤"
@@ -196,7 +197,8 @@ public class FailureDiagnosisService {
     private int lastFailedIndex(List<ExecutionLogEntryDto> logs) {
         for (int i = logs.size() - 1; i >= 0; i--) {
             ExecutionLogEntryDto e = logs.get(i);
-            if (e != null && "fail".equalsIgnoreCase(e.getStatus())) {
+            if (e != null && "fail".equalsIgnoreCase(e.getStatus())
+                    && !com.mobile.standalone.service.perf.FlowCrashGuard.isCrashEntry(e)) {
                 return i;
             }
         }

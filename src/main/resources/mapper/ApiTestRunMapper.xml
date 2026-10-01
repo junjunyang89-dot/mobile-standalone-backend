@@ -5,21 +5,42 @@
 
     <insert id="insertRun">
         INSERT INTO api_test_runs
-        (id, environment, collection_id, total, passed, failed, duration_ms, ok, message, created_by, created_at)
+        (id, environment, collection_id, total, passed, failed, blocked, skipped, duration_ms, ok, message,
+         trigger_type, created_by, created_at)
         VALUES
-        (#{id}, #{environment}, #{collectionId}, #{total}, #{passed}, #{failed}, #{durationMs}, #{ok}, #{message},
-         #{createdBy}, #{createdAt})
+        (#{id}, #{environment}, #{collectionId}, #{total}, #{passed}, #{failed}, #{blocked}, #{skipped}, #{durationMs},
+         #{ok}, #{message}, #{triggerType}, #{createdBy}, #{createdAt})
     </insert>
 
     <insert id="insertRunCase">
         INSERT INTO api_test_run_cases
         (id, run_id, case_id, name, method, path, url, status, http_status, duration_ms, error,
-         assertion_results, body_preview, req_headers, req_body, resp_headers, created_at)
+         case_kind, assertion_results, body_preview, req_headers, req_body, resp_headers, created_at)
         VALUES
         (#{id}, #{runId}, #{caseId}, #{name}, #{method}, #{path}, #{url}, #{status},
          #{httpStatus}, #{durationMs}, #{error},
+         #{caseKind},
          #{assertionResults}, #{bodyPreview}, #{reqHeaders}, #{reqBody}, #{respHeaders}, #{createdAt})
     </insert>
+
+    <!--
+      一次运行的结果按种类分组。只做 GROUP BY，不在 SQL 里判桶：
+      分桶规则留在 ApiCaseKind.passRateBucket() 一个地方，
+      写成 CASE WHEN case_kind='BRANCH' 的话就有了两份会漂的实现，
+      改一边忘另一边，报表和界面会对不上。折叠见 RunPassRateBuckets.fold()。
+
+      case_kind 为空的行自己成一组（GROUP BY 里 NULL 是一组），
+      折叠时归到 UNRECORDED —— 那是「没记录」，不是「未分类」。
+    -->
+    <select id="countByCaseKind" resultType="java.util.Map">
+        SELECT case_kind AS caseKind,
+               COUNT(1) AS total,
+               SUM(CASE WHEN status = 'PASSED'  THEN 1 ELSE 0 END) AS passed,
+               SUM(CASE WHEN status = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked
+        FROM api_test_run_cases
+        WHERE run_id = #{runId}
+        GROUP BY case_kind
+    </select>
 
     <select id="findRecentCases" resultType="com.mobile.standalone.entity.ApiTestRunCase">
         SELECT id, run_id AS runId, case_id AS caseId, name, method, path, url, status,
@@ -40,6 +61,7 @@
             COUNT(1) AS total,
             SUM(CASE WHEN status = 'PASSED' THEN 1 ELSE 0 END) AS passed,
             SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN status = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked,
             AVG(duration_ms) AS avgLatencyMs
         FROM api_test_run_cases
         WHERE created_at &gt;= #{since}
@@ -54,7 +76,8 @@
             COUNT(DISTINCT c.id) AS caseCount,
             COUNT(r.id) AS runCount,
             SUM(CASE WHEN r.status = 'PASSED' THEN 1 ELSE 0 END) AS passed,
-            SUM(CASE WHEN r.status = 'FAILED' THEN 1 ELSE 0 END) AS failed
+            SUM(CASE WHEN r.status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN r.status = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked
         FROM api_test_cases c
         LEFT JOIN api_test_run_cases r
             ON r.case_id = c.id
@@ -66,7 +89,7 @@
     <!-- 带上集合名，报告列表才是「XX 集合」而不是一串 id -->
     <select id="findRuns" resultType="java.util.Map">
         SELECT r.id, r.environment, r.collection_id AS collectionId, c.name AS collectionName,
-               r.total, r.passed, r.failed, r.duration_ms AS durationMs,
+               r.total, r.passed, r.failed, r.blocked, r.duration_ms AS durationMs,
                r.ok, r.message, r.created_by AS createdBy, r.created_at AS createdAt
         FROM api_test_runs r
         LEFT JOIN api_test_collections c ON c.id = r.collection_id
@@ -81,8 +104,9 @@
         SELECT r.id, r.environment, r.collection_id AS collectionId, c.name AS collectionName,
                c.project AS collectionProject, c.requirement_no AS requirementNo,
                c.source_branch AS sourceBranch, c.scope AS collectionScope,
-               r.total, r.passed, r.failed, r.duration_ms AS durationMs,
-               r.ok, r.message, r.created_by AS createdBy, r.created_at AS createdAt
+               r.total, r.passed, r.failed, r.blocked, r.skipped, r.duration_ms AS durationMs,
+               r.ok, r.message, r.trigger_type AS triggerType,
+               r.created_by AS createdBy, r.created_at AS createdAt
         FROM api_test_runs r
         LEFT JOIN api_test_collections c ON c.id = r.collection_id
         ORDER BY r.created_at DESC
@@ -94,7 +118,13 @@
                NULLIF(TRIM(tc.project), '') AS caseProject,
                NULLIF(TRIM(col.project), '') AS collectionProject,
                rc.method AS method,
-               rc.path AS path
+               rc.path AS path,
+               COUNT(1) AS caseCount,
+               SUM(CASE WHEN rc.status IN ('PASSED', 'BLOCKED') THEN 0 ELSE 1 END) AS failedCount,
+               SUM(CASE WHEN rc.status = 'BLOCKED' THEN 1 ELSE 0 END) AS blockedCount,
+               MAX(CASE WHEN rc.status = 'PASSED' THEN NULL ELSE rc.error END) AS error,
+               COALESCE(MAX(CASE WHEN rc.status = 'PASSED' THEN NULL ELSE rc.http_status END),
+                        MAX(rc.http_status)) AS httpStatus
         FROM api_test_run_cases rc
         LEFT JOIN api_test_cases tc ON tc.id = rc.case_id
         LEFT JOIN api_test_runs r ON r.id = rc.run_id
@@ -125,9 +155,17 @@
     </delete>
 
     <select id="findRunById" resultType="com.mobile.standalone.entity.ApiTestRun">
-        SELECT id, environment, collection_id AS collectionId, total, passed, failed,
-               duration_ms AS durationMs, ok, message, created_by AS createdBy, created_at AS createdAt
-        FROM api_test_runs WHERE id = #{id}
+        SELECT r.id, r.environment, r.collection_id AS collectionId, r.total, r.passed, r.failed,
+               r.blocked, r.skipped, r.duration_ms AS durationMs, r.ok, r.message,
+               r.trigger_type AS triggerType, r.created_by AS createdBy, r.created_at AS createdAt,
+               c.name AS collectionName,
+               CASE WHEN r.collection_id IS NULL THEN NULL ELSE
+                   (SELECT COUNT(1) FROM api_test_runs r2
+                     WHERE r2.collection_id = r.collection_id AND r2.created_at &lt;= r.created_at)
+               END AS seqNo
+        FROM api_test_runs r
+        LEFT JOIN api_test_collections c ON c.id = r.collection_id
+        WHERE r.id = #{id}
     </select>
 
     <!-- 失败的排前面：打开一份报告，人要看的永远是挂了哪几条 -->
