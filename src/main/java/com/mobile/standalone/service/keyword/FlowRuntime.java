@@ -67,6 +67,14 @@ public interface FlowRuntime {
     String resolvePackage(String uiAppId, String platform, Map<String, Object> stepParams,
                           Map<String, String> execParams);
 
+    /**
+     * 失败时补一句「应用是不是根本没在前台」。不适用或查不出来时返回 null。
+     * <p>只在已经失败的路径上调用——它要跑一次 adb dumpsys，不该出现在正常路径上。
+     */
+    String foregroundMismatchHint(PlatformDriver driver, String deviceId, String platform,
+                                  String uiAppId, Map<String, Object> stepParams,
+                                  Map<String, String> execParams);
+
     /** 按方向滑动（默认大约半屏，容易把目标划过去） */
     boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction, int durationMs);
 

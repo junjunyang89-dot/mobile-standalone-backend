@@ -925,6 +925,44 @@ public class UiFlowExecutor implements FlowRuntime {
         return pkg.trim();
     }
 
+    /**
+     * 元素类步骤失败时，回答一个最常被忽略的问题：应用真的在前台吗。
+     * <p>
+     * 「点击失败」和「定位写错了」在报错上长得一样，但方向完全相反：
+     * 应用没打开得补「启动应用」，定位错了得改元素。不把这句话打出来，
+     * 人只能盯着模拟器才发现自己在看桌面。
+     */
+    @Override
+    public String foregroundMismatchHint(PlatformDriver driver, String deviceId, String platform,
+                                         String uiAppId, Map<String, Object> stepParams,
+                                         Map<String, String> execParams) {
+        if (!(driver instanceof com.mobile.standalone.service.driver.AndroidDriver android)) {
+            return null;
+        }
+        String expected;
+        try {
+            expected = resolvePackage(uiAppId, platform, stepParams, execParams);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (expected == null || expected.isBlank()) return null;
+        String actual = android.getForegroundPackage(deviceId);
+        if (actual == null || actual.isBlank()) return null;
+        if (actual.equals(expected)) return null;
+        return "当前前台是 " + actual + describeKnownPackage(actual)
+                + "，不是被测应用 " + expected
+                + "——应用没在前台，元素当然找不到。"
+                + "多半是这条流程缺了「启动应用」这一步（录制时应用已经开着，那一步没被记进来）";
+    }
+
+    private static String describeKnownPackage(String pkg) {
+        String p = pkg.toLowerCase(Locale.ROOT);
+        if (p.contains("launcher") || p.contains("home")) return "（桌面）";
+        if (p.startsWith("com.android.systemui")) return "（系统界面 / 弹窗）";
+        if (p.contains("packageinstaller")) return "（安装器 / 权限弹窗）";
+        return "";
+    }
+
     @Override
     public boolean directionalSwipe(PlatformDriver driver, String deviceId, String direction, int durationMs) {
         return directionalSwipe(driver, deviceId, direction, durationMs, 0);

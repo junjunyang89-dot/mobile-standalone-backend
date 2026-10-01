@@ -713,7 +713,6 @@ public class DeviceInspectService {
                 + "旧树会安安静静地认出别的界面的控件。等一下再点，或先点「刷新截图」。"));
         return result;
     }
-    }
 
     /** 坐标方案追加到末尾，不抢默认首选 */
     private static List<HitCandidate> appendCoordinateCandidate(List<HitCandidate> hits, int px, int py,
