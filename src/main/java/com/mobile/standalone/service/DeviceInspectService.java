@@ -3247,6 +3247,17 @@ public class DeviceInspectService {
         return n != null && n.className != null && n.className.startsWith("XCUIElementType");
     }
 
+    /**
+     * Android 的 id+text 组合 xpath，带元素类型（和 Appium Inspector 一致）：
+     * {@code //android.widget.TextView[@resource-id="..." and @text="..."]}。
+     * 带类型比 {@code //*} 更精确——复用 id（tv_text 等）靠 id+text 消歧时尤其需要。
+     */
+    private static String combinedIdTextXpath(HitNode n, String rid, String label) {
+        String type = n.className != null && !n.className.isBlank() ? n.className.trim() : "*";
+        return "//" + type + "[@resource-id=" + xpathLiteral(rid)
+                + " and @text=" + xpathLiteral(label) + "]";
+    }
+
     /** 平台正确的「按文案」xpath：iOS 用 {@code //类型[@name=..]}，Android 用 {@code //*[@text=..]}。 */
     private static String labelXpath(HitNode n, String label) {
         if (isIosNode(n)) {
@@ -3445,8 +3456,7 @@ public class DeviceInspectService {
                 // @resource-id + @text 是 Android 属性组合；iOS 用 @name xpath
                 HitCandidate xp = baseCandidate(n, ownLabel);
                 xp.setLocatorType("xpath");
-                xp.setLocatorValue("//*[@resource-id=" + xpathLiteral(n.resourceId.trim())
-                        + " and @text=" + xpathLiteral(ownLabel) + "]");
+                xp.setLocatorValue(combinedIdTextXpath(n, n.resourceId.trim(), ownLabel));
                 applySuggestedNames(xp, ownLabel, n);
                 xp.setVisualHint(strategyHint("xpath@id+text", n, ownLabel));
                 list.add(xp);
@@ -4406,8 +4416,7 @@ public class DeviceInspectService {
         String txt = n.text;
         if (rid == null || rid.isBlank() || "null".equalsIgnoreCase(rid)) return;
         if (txt == null || txt.isBlank() || txt.length() > 40) return;
-        String xp = "//*[@resource-id=" + xpathLiteral(rid.trim())
-                + " and @text=" + xpathLiteral(txt.trim()) + "]";
+        String xp = combinedIdTextXpath(n, rid.trim(), txt.trim());
         for (HitCandidate c : list) {
             if (xp.equals(c.getLocatorValue())) return;
         }
@@ -4415,7 +4424,7 @@ public class DeviceInspectService {
         c.setLocatorType("xpath");
         c.setLocatorValue(xp);
         applySuggestedNames(c, txt, n);
-        c.setVisualHint("xpath(id+text) · 属性组合，页面结构变也不受影响");
+        c.setVisualHint("xpath(类型+id+text) · 属性组合，页面结构变也不受影响");
         list.add(c);
     }
 
