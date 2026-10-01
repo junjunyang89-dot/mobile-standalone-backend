@@ -3241,6 +3241,21 @@ public class DeviceInspectService {
         return c;
     }
 
+    /** iOS 节点：className 是 XCUIElementTypeXxx。iOS 树没有 text/clickable/resource-id 属性，
+     *  文案在 name/label/value，xpath 要用 @name + 元素类型（和 Appium Inspector 一致）。 */
+    private static boolean isIosNode(HitNode n) {
+        return n != null && n.className != null && n.className.startsWith("XCUIElementType");
+    }
+
+    /** 平台正确的「按文案」xpath：iOS 用 {@code //类型[@name=..]}，Android 用 {@code //*[@text=..]}。 */
+    private static String labelXpath(HitNode n, String label) {
+        if (isIosNode(n)) {
+            String type = n.className != null && !n.className.isBlank() ? n.className.trim() : "*";
+            return "//" + type + "[@name=" + xpathLiteral(label) + "]";
+        }
+        return "//*[@text=" + xpathLiteral(label) + "]";
+    }
+
     /**
      * 同一命中控件展开多种定位方案，供用户自选：id / text / xpath / className / accessibilityId 等。
      */
@@ -3353,25 +3368,30 @@ public class DeviceInspectService {
             list.add(c);
         }
 
+        boolean ios = isIosNode(n);
         if (ownLabel != null && ownLabel.length() <= 40) {
             // 已知 Tab 文案不推裸 text（二级页也可能有「赛事/动态」）
             if (!isKnownStripTabLabel(ownLabel)) {
-                HitCandidate c = baseCandidate(n, ownLabel);
-                c.setLocatorType("text");
-                c.setLocatorValue(ownLabel);
-                applySuggestedNames(c, ownLabel, n);
-                c.setVisualHint(strategyHint("text", n, ownLabel));
-                list.add(c);
+                // text 策略是 Android 专有；iOS 没有 @text 属性，靠下面的 @name xpath + accessibilityId
+                if (!ios) {
+                    HitCandidate c = baseCandidate(n, ownLabel);
+                    c.setLocatorType("text");
+                    c.setLocatorValue(ownLabel);
+                    applySuggestedNames(c, ownLabel, n);
+                    c.setVisualHint(strategyHint("text", n, ownLabel));
+                    list.add(c);
+                }
 
                 HitCandidate xp = baseCandidate(n, ownLabel);
                 xp.setLocatorType("xpath");
-                xp.setLocatorValue("//*[@text=" + xpathLiteral(ownLabel) + "]");
+                xp.setLocatorValue(labelXpath(n, ownLabel));
                 applySuggestedNames(xp, ownLabel, n);
-                xp.setVisualHint(strategyHint("xpath@text", n, ownLabel));
+                xp.setVisualHint(strategyHint(ios ? "xpath@name" : "xpath@text", n, ownLabel));
                 list.add(xp);
             }
 
-            if (n.clickable || findClickableAncestor(n) != null) {
+            // @clickable 是 Android 属性；iOS 树没有，跳过这条祖先 xpath
+            if (!ios && (n.clickable || findClickableAncestor(n) != null)) {
                 HitCandidate xpClick = baseCandidate(n, ownLabel);
                 xpClick.setLocatorType("xpath");
                 xpClick.setLocatorValue("//*[@text=" + xpathLiteral(ownLabel)
@@ -3381,12 +3401,15 @@ public class DeviceInspectService {
                 list.add(xpClick);
             }
         } else if (nestedLabel != null && nestedLabel.length() <= 40 && (!hasId || unstableId || nearMine != null || nearBottom != null)) {
-            // 可点父节点无自身文案时，用子文案生成 text/xpath（底栏/复用 id 也走这里）
+            // 可点父节点无自身文案时，用子文案生成 xpath（底栏/复用 id 也走这里）
             if (!isKnownStripTabLabel(nestedLabel)) {
                 HitCandidate xp = baseCandidate(n, nestedLabel);
                 xp.setLocatorType("xpath");
-                xp.setLocatorValue("//*[@text=" + xpathLiteral(nestedLabel)
-                        + "]/ancestor-or-self::*[@clickable=\"true\"][1]");
+                // iOS：子文案在后代节点上，按 @name 找后代（不带 @clickable 祖先，iOS 无此属性）
+                xp.setLocatorValue(ios
+                        ? "//*[@name=" + xpathLiteral(nestedLabel) + "]"
+                        : "//*[@text=" + xpathLiteral(nestedLabel)
+                                + "]/ancestor-or-self::*[@clickable=\"true\"][1]");
                 applySuggestedNames(xp, nestedLabel, n);
                 xp.setVisualHint(strategyHint("xpath@子文案", n, nestedLabel));
                 list.add(xp);
@@ -3418,7 +3441,8 @@ public class DeviceInspectService {
             applySuggestedNames(c, displayName, n);
             c.setVisualHint("id(页面复用，慎用) · " + shortResourceId(n.resourceId));
             list.add(c);
-            if (ownLabel != null) {
+            if (ownLabel != null && !ios) {
+                // @resource-id + @text 是 Android 属性组合；iOS 用 @name xpath
                 HitCandidate xp = baseCandidate(n, ownLabel);
                 xp.setLocatorType("xpath");
                 xp.setLocatorValue("//*[@resource-id=" + xpathLiteral(n.resourceId.trim())
@@ -3429,8 +3453,10 @@ public class DeviceInspectService {
             }
         }
 
-        // 已拆 H5 筛选段时不要再推整条栏 bounds（红框会罩满）
-        if (!h5FilterSplit) {
+        // 已拆 H5 筛选段时不要再推整条栏 bounds（红框会罩满）。
+        // iOS 树没有 @bounds 属性，这条 xpath 在 iOS 上匹配不到——iOS 靠 @name xpath +
+        // accessibilityId + 位置式绝对 xpath，不需要也不能用 @bounds。
+        if (!h5FilterSplit && !ios) {
             HitCandidate bounds = baseCandidate(n, displayName);
             bounds.setLocatorType("xpath");
             String cls = n.className != null ? n.className : "*";
@@ -4374,6 +4400,8 @@ public class DeviceInspectService {
      */
     private void addCombinedIdTextXpath(List<HitCandidate> list, HitNode n) {
         if (list == null || n == null) return;
+        // iOS 没有 @resource-id / @text 属性，这种组合 xpath 在 iOS 上匹配不到；iOS 用 @name xpath
+        if (isIosNode(n)) return;
         String rid = n.resourceId;
         String txt = n.text;
         if (rid == null || rid.isBlank() || "null".equalsIgnoreCase(rid)) return;

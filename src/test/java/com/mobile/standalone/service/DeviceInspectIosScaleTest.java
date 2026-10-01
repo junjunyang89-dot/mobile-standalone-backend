@@ -50,10 +50,21 @@ class DeviceInspectIosScaleTest {
                 svc, PAGE, 49, 164, Device.Platform.IOS, null, new ArrayList<String>());
 
         assertThat(hits).isNotEmpty();
-        // 首选应是周边商城这个小 StaticText，而不是 y=234 的大 Cell
+        // 命中的是周边商城这个小 StaticText，而不是 y=234 的大 Cell
         assertThat(hits.get(0).getText()).isEqualTo("周边商城");
         var box = hits.get(0).getBounds();
         assertThat(box.get("top")).isEqualTo(156);
         assertThat(box.get("bottom")).isEqualTo(172);
+
+        // iOS 的 xpath 必须用 @name + 元素类型，不能用 Android 的 @text / @clickable（iOS 树里没有）
+        var xpaths = hits.stream()
+                .filter(c -> "xpath".equals(c.getLocatorType()))
+                .map(DeviceInspectService.HitCandidate::getLocatorValue)
+                .toList();
+        assertThat(xpaths).anyMatch(v -> v.contains("XCUIElementTypeStaticText[@name='周边商城']"));
+        assertThat(xpaths).noneMatch(v -> v.contains("@text=") || v.contains("@clickable") || v.contains("@bounds="));
+        // 也应给出 accessibilityId（iOS 上最稳）
+        assertThat(hits).anyMatch(c -> "accessibilityId".equals(c.getLocatorType())
+                && "周边商城".equals(c.getLocatorValue()));
     }
 }
