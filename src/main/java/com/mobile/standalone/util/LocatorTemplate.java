@@ -32,6 +32,13 @@ public final class LocatorTemplate {
     /** ${变量名}：字母数字下划线，不含花括号 */
     private static final Pattern NAMED_VAR = Pattern.compile("\\$\\{([A-Za-z0-9_]+)}");
 
+    /** 变量值里的数字区间：{@code 1-5} 或 {@code [X:1-5]}。锚定纯数字，
+     *  免得把 {@code APP-9083}、{@code 2026-09-01} 这类带横杠的文案误当区间。 */
+    private static final Pattern VALUE_RANGE_WRAPPED = Pattern.compile(
+            "^\\[(?:X|x|RAND|rand)[:：](\\d+)\\s*-\\s*(\\d+)]$");
+    private static final Pattern VALUE_RANGE_BARE = Pattern.compile(
+            "^(\\d+)\\s*-\\s*(\\d+)$");
+
     private LocatorTemplate() {
     }
 
@@ -81,7 +88,7 @@ public final class LocatorTemplate {
                 }
                 out.append(m.group());
             } else {
-                out.append(value);
+                out.append(resolveValue(value));
             }
             last = m.end();
         }
@@ -90,6 +97,36 @@ public final class LocatorTemplate {
             throw new MissingVariableException(missing);
         }
         return out.toString();
+    }
+
+    /**
+     * 解析变量值：数字区间（{@code 1-5} 或 {@code [X:1-5]}）取区间内随机整数，
+     * 固定数字与普通文案原样返回。让同一个变量既能填死值、又能填随机区间。
+     */
+    static String resolveValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        String v = value.trim();
+        Matcher wrapped = VALUE_RANGE_WRAPPED.matcher(v);
+        Matcher bare = VALUE_RANGE_BARE.matcher(v);
+        int min;
+        int max;
+        if (wrapped.matches()) {
+            min = parseBound(wrapped.group(1), 1);
+            max = parseBound(wrapped.group(2), 1);
+        } else if (bare.matches()) {
+            min = parseBound(bare.group(1), 1);
+            max = parseBound(bare.group(2), 1);
+        } else {
+            return value; // 固定数字、纯文案：原样
+        }
+        if (min > max) {
+            int t = min;
+            min = max;
+            max = t;
+        }
+        return String.valueOf(ThreadLocalRandom.current().nextInt(min, max + 1));
     }
 
     /** 变量没填。带上变量名，让人一眼知道该填什么，而不是去查为什么元素找不到 */

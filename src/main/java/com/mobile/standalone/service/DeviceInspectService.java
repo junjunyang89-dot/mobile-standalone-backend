@@ -1555,6 +1555,10 @@ public class DeviceInspectService {
 
         HitZone zone = detectHitZone(scoped, labelPool, px, py);
         log.info("点选分区 zone={} @({},{})", zone, px, py);
+        // 先把精确命中的「最新/热门」拆段放到首选，再放整条「评论筛选栏」。
+        // 否则整条栏抢在 index 0，点「最新」却被命名成整条——它自带 filter==null
+        // 早退守卫，不在合并筛选栏附近时此调用是空操作，不影响其它分区。
+        prependH5FilterSplit(out, seen, labelPool, px, py);
         prependMergedFilterBar(out, seen, labelPool, px, py);
 
         // 现用现选：点上自带文案的节点优先（避免父壳套用「退出登录」等远处文案）

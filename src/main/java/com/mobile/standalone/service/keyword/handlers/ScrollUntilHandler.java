@@ -94,6 +94,10 @@ public class ScrollUntilHandler implements KeywordHandler {
         String direction = KeywordContext.firstNonBlank(ctx.str("direction"), "up");
         String distance = resolveDistance(ctx);
         double ratio = resolveRatio(ctx, distance);
+        // directionalSwipe 的 distancePercent 是「百分比」(1~70)，不是比例(0~1)。
+        // 直接把 0.12 这种比例传进去会被 Math.round / clamp 砸成 0 或 1，
+        // 于是 short/normal/long 全失真——换算成百分比再传。
+        double distancePercent = ratio * 100;
         boolean customAmp = ctx.longParam("distancePercent", 0) > 0;
         int defaultMax = customAmp || "short".equals(distance) ? 35 : 20;
         int maxAttempts = (int) Math.min(80, Math.max(1, ctx.longParam("maxAttempts", defaultMax)));
@@ -118,7 +122,7 @@ public class ScrollUntilHandler implements KeywordHandler {
         for (int i = 1; i <= maxAttempts; i++) {
             ctx.ensureNotCancelled();
             if (!ctx.getRuntime().directionalSwipe(
-                    ctx.getDriver(), ctx.getDeviceId(), direction, duration, ratio)) {
+                    ctx.getDriver(), ctx.getDeviceId(), direction, duration, distancePercent)) {
                 throw ctx.fail("滑动直到元素", "第 " + i + " 次滑动失败: " + direction, selector,
                         "滑动直到元素失败: " + elementKey);
             }

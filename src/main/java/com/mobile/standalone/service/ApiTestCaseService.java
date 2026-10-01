@@ -549,6 +549,16 @@ public class ApiTestCaseService {
         if (body.getTestOnly() == null) {
             body.setTestOnly(existing.getTestOnly());
         }
+        // PUT 是整条覆盖，但停用开关、老页面这类入口不带 caseKind / sourceBranch。
+        // 字段缺省（null）时沿用库里的值——不能走创建那套「按有没有分支重推」，
+        // 否则点一下「停用」就把 UNCLASSIFIED 翻成 REGRESSION、把来源分支抹掉。
+        // sourceBranch 传空串才是「明确清空」，与 null＝没带 区分开。
+        if (body.getCaseKind() == null || body.getCaseKind().isBlank()) {
+            body.setCaseKind(existing.getCaseKind());
+        }
+        if (body.getSourceBranch() == null) {
+            body.setSourceBranch(existing.getSourceBranch());
+        }
         validateCase(body);
         defaults(body);
         // 路径或方法被改过时要重新挂：改完还挂在老接口上，

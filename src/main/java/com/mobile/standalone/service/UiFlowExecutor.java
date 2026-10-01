@@ -1172,7 +1172,7 @@ public class UiFlowExecutor implements FlowRuntime {
      * 整屏滑动的起止点。{@code distancePercent <= 0} 保持原来的大半屏；
      * 小幅滑动只挪一小截，避免「滑动直到元素」一把把目标划出屏幕。
      */
-    static int[] swipeEndpoints(int w, int h, String direction, double distancePercent) {
+    public static int[] swipeEndpoints(int w, int h, String direction, double distancePercent) {
         int x1 = w / 2, y1 = h / 2, x2 = w / 2, y2 = h / 2;
         String dir = normalizeSwipeDirection(direction);
         if (distancePercent <= 0) {
