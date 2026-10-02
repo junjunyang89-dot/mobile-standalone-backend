@@ -253,6 +253,24 @@ public class UiFlowController {
         }
     }
 
+    /**
+     * 跨平台克隆：按一条流程生成另一平台的流程（如 Android → iOS），步骤原样带走，
+     * platform 改为目标平台——运行时按「平台 + nameEn」解析各自 locator。
+     * 同时返回元素覆盖报告（已就绪 / 待定位 / 缺失），一眼看出还要补哪些元素。
+     * body: {platform: "IOS", environment?: "PROD"}
+     */
+    @PostMapping("/{id}/clone-to-platform")
+    public ResponseEntity<?> cloneToPlatform(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        String platform = body.get("platform") == null ? null : String.valueOf(body.get("platform"));
+        String environment = body.get("environment") == null ? null : String.valueOf(body.get("environment"));
+        try {
+            UiFlowService.PlatformCloneResult r = uiFlowService.cloneToPlatform(id, platform, environment);
+            return r == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(r);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
+        }
+    }
+
     @PutMapping("/{id}")
     public ResponseEntity<?> update(@PathVariable String id, @RequestBody UiFlow body) {
         try {

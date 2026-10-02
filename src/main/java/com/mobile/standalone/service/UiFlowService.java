@@ -2,6 +2,7 @@ package com.mobile.standalone.service;
 
 import com.mobile.standalone.entity.UiFlow;
 import com.mobile.standalone.mapper.UiFlowMapper;
+import com.mobile.standalone.util.PlatformNames;
 import com.mobile.standalone.util.RunTrack;
 import com.mobile.standalone.util.TestEnvironment;
 import lombok.RequiredArgsConstructor;
@@ -273,6 +274,105 @@ public class UiFlowService {
         copy.setEnabled(src.getEnabled());
         copy.setSortOrder(src.getSortOrder());
         return create(copy);
+    }
+
+    /**
+     * 跨平台克隆：按一条流程生成另一平台（如 Android → iOS）的流程。
+     * <p>
+     * 步骤<b>原样带走</b>——流程只引用 elementKey，不写死 locator，平台由运行时
+     * {@link UiFlowExecutor#resolveSelectors} 按「平台 + nameEn」解析。所以同一套步骤
+     * 换个 platform 就能跑另一端，前提是目标平台有同名(nameEn)元素。
+     * <p>
+     * 同时给出<b>覆盖报告</b>：每个 elementKey 在目标平台是「已就绪 / 待定位 / 缺失」，
+     * 让人一眼看出还要补哪些元素，而不是跑起来才一个个「无 ACTIVE 元素」。
+     */
+    @Transactional
+    public PlatformCloneResult cloneToPlatform(String id, String targetPlatform, String environment) {
+        UiFlow src = uiFlowMapper.findById(id);
+        if (src == null) {
+            return null;
+        }
+        String platform = PlatformNames.normalize(targetPlatform);
+        if (platform == null || platform.isBlank()) {
+            throw new IllegalArgumentException("目标平台不能为空（如 IOS / ANDROID）");
+        }
+        UiFlow copy = new UiFlow();
+        copy.setName(platformCloneName(src.getName(), platform));
+        copy.setDescription(src.getDescription());
+        copy.setAppId(src.getAppId());
+        copy.setPlatform(platform);
+        copy.setCatalog(src.getCatalog());
+        copy.setEnvironment(environment != null && !environment.isBlank()
+                ? environment.trim() : src.getEnvironment());
+        copy.setEnvBound(src.getEnvBound());
+        copy.setReleaseStage(src.getReleaseStage());
+        copy.setIsComponent(src.getIsComponent());
+        copy.setSteps(src.getSteps()); // 只引用 elementKey，平台由运行时解析
+        copy.setDependsOn(src.getDependsOn());
+        copy.setEnabled(src.getEnabled());
+        copy.setSortOrder(src.getSortOrder());
+        UiFlow saved = create(copy);
+
+        java.util.List<String> keys = elementKeysOf(src).stream()
+                .filter(k -> k != null && !k.isBlank()).map(String::trim).distinct().toList();
+        java.util.List<String> ready = new java.util.ArrayList<>();
+        java.util.List<String> needLocator = new java.util.ArrayList<>();
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        for (String key : keys) {
+            if (findActiveOnPlatform(src.getAppId(), platform, key) != null) {
+                ready.add(key);                 // 目标平台已有 ACTIVE 元素，直接能跑
+            } else if (findAnyOnPlatform(src.getAppId(), platform, key) != null) {
+                needLocator.add(key);           // 同名占位/候选已在，但还没定位(无 ACTIVE locator)
+            } else {
+                missing.add(key);               // 目标平台压根没有这个元素
+            }
+        }
+        java.util.List<String> components = componentIdsOf(src).stream()
+                .filter(k -> k != null && !k.isBlank()).map(String::trim).distinct().toList();
+        return new PlatformCloneResult(saved, keys.size(), ready, needLocator, missing, components);
+    }
+
+    /** 跨平台克隆结果：新流程 + 元素覆盖情况。needLocator=同名已在但没定位；missing=目标平台没这个元素。 */
+    public record PlatformCloneResult(UiFlow flow, int elementCount,
+                                      java.util.List<String> ready,
+                                      java.util.List<String> needLocator,
+                                      java.util.List<String> missing,
+                                      java.util.List<String> referencedComponents) {
+    }
+
+    private com.mobile.standalone.entity.UiElement findActiveOnPlatform(String appId, String platform, String key) {
+        com.mobile.standalone.entity.UiElement el = uiElementMapper.findActiveByKey(appId, platform, key);
+        if (el != null) return el;
+        for (String legacy : PlatformNames.legacyAliasesOf(platform)) {
+            el = uiElementMapper.findActiveByKey(appId, legacy, key);
+            if (el != null) return el;
+        }
+        return null;
+    }
+
+    private com.mobile.standalone.entity.UiElement findAnyOnPlatform(String appId, String platform, String key) {
+        com.mobile.standalone.entity.UiElement el = uiElementMapper.findByAppPlatformKey(appId, platform, key, null);
+        if (el != null) return el;
+        for (String legacy : PlatformNames.legacyAliasesOf(platform)) {
+            el = uiElementMapper.findByAppPlatformKey(appId, legacy, key, null);
+            if (el != null) return el;
+        }
+        return null;
+    }
+
+    private String platformCloneName(String raw, String platform) {
+        String base = (raw == null || raw.isBlank()) ? "未命名流程" : raw.trim();
+        String tag = "(" + platformLabel(platform) + ")";
+        return base.endsWith(tag) ? base : base + " " + tag;
+    }
+
+    private static String platformLabel(String platform) {
+        if (platform == null) return "副本";
+        String p = platform.toUpperCase(java.util.Locale.ROOT);
+        if (p.contains("IOS")) return "iOS";
+        if (p.contains("ANDROID")) return "Android";
+        if (p.contains("HARMONY")) return "鸿蒙";
+        return platform;
     }
 
     private String uniqueCopyName(String raw) {
