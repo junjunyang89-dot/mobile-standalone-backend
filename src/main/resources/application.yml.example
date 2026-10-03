@@ -32,8 +32,10 @@ app:
   node:
     role: ALL
 
-# 主菜单 AI助手 → Cursor SDK。密钥用环境变量，勿把生产 key 写进仓库
+# 主菜单 AI助手 + 页面编码/元素 key 翻译 → Cursor SDK（不再走千问）
+# 密钥用环境变量，勿把生产 key 写进仓库
 # export CURSOR_API_KEY=cursor_...
+# 首次：cd scripts/cursor-ask && npm install
 # cursor.ask.cwd 默认指向本机业务代码根目录
 cursor:
   ask:

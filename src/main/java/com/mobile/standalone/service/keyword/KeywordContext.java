@@ -216,16 +216,46 @@ public class KeywordContext {
     }
 
     public String substitute(String template) {
+        return substitute(template, execParams);
+    }
+
+    /**
+     * 用流程变量 + 本步字符串参数一起做占位符替换（步骤覆盖流程）。
+     * HTTP 请求这类「同一步里既填 matchId、URL 又写 ${matchId}」需要它。
+     */
+    public String substituteAll(String template) {
+        return substitute(template, locatorParams());
+    }
+
+    private String substitute(String template, Map<String, String> vars) {
         if (template == null) return null;
         Matcher m = PLACEHOLDER.matcher(template);
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
             String key = m.group(1) != null ? m.group(1) : m.group(2);
-            String value = execParams != null ? execParams.get(key) : null;
+            String value = vars != null ? vars.get(key) : null;
             m.appendReplacement(sb, Matcher.quoteReplacement(value != null ? value : m.group(0)));
         }
         m.appendTail(sb);
         return BuiltinVariables.expand(sb.toString());
+    }
+
+    /**
+     * 把值写进流程级变量，后续步骤的 ${name} / 定位模板都能用到。
+     * 要求 execParams 可变（执行器里是 HashMap）。
+     */
+    public void putVar(String key, String value) {
+        if (key == null || key.isBlank()) {
+            return;
+        }
+        if (execParams == null) {
+            throw new IllegalStateException("execParams 为空，无法写入变量 " + key);
+        }
+        if (value == null) {
+            execParams.remove(key.trim());
+        } else {
+            execParams.put(key.trim(), value);
+        }
     }
 
     // —— 日志 ——

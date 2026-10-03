@@ -81,4 +81,36 @@ class UiElementMirrorTest {
         assertThat(service.mirrorToSiblingPlatforms(element("ANDROID", "PLATFORM_COPY"))).isEmpty();
         verify(mapper, never()).insert(any());
     }
+
+    @Test
+    void copyOneToPlatformLeavesLocatorEmpty() {
+        UiElement src = element("ANDROID", "MANUAL");
+        src.setId("uie-src");
+        when(mapper.findById("uie-src")).thenReturn(src);
+        when(mapper.findByAppPlatformKey(eq("DOMESTIC_ESPORTS"), eq("IOS"), eq("login_btn"), isNull()))
+                .thenReturn(null);
+
+        UiElement twin = service.copyOneToPlatform("uie-src", "ios");
+
+        assertThat(twin.getPlatform()).isEqualTo("IOS");
+        assertThat(twin.getLocatorValue()).isEmpty();
+        assertThat(twin.getNameEn()).isEqualTo("login_btn");
+        assertThat(twin.getSource()).isEqualTo("PLATFORM_COPY");
+        assertThat(twin.getStatus()).isEqualTo("CANDIDATE");
+        verify(mapper).insert(any());
+    }
+
+    @Test
+    void copyOneToPlatformRejectsExistingKey() {
+        UiElement src = element("IOS", "MANUAL");
+        src.setId("uie-src");
+        when(mapper.findById("uie-src")).thenReturn(src);
+        when(mapper.findByAppPlatformKey(eq("DOMESTIC_ESPORTS"), eq("ANDROID"), eq("login_btn"), isNull()))
+                .thenReturn(element("ANDROID", "HUMAN_AI"));
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> service.copyOneToPlatform("uie-src", "ANDROID"));
+        verify(mapper, never()).insert(any());
+    }
 }

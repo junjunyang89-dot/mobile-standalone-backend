@@ -134,6 +134,38 @@ public class UiElementService {
         return done;
     }
 
+    /**
+     * 单条复制到另一平台：名字/页面/说明带走，xpath 等定位留空、状态待审。
+     * 目标端已有同英文名的（任意来源）拒绝覆盖——那是人已经录过的。
+     */
+    @Transactional
+    public UiElement copyOneToPlatform(String id, String toPlatform) {
+        UiElement src = uiElementMapper.findById(id);
+        if (src == null) {
+            throw new IllegalArgumentException("元素不存在");
+        }
+        String tp = blankToNull(toPlatform);
+        if (tp == null) {
+            throw new IllegalArgumentException("目标平台不能为空");
+        }
+        tp = tp.trim().toUpperCase(java.util.Locale.ROOT);
+        String sp = src.getPlatform() == null ? "" : src.getPlatform().trim().toUpperCase(java.util.Locale.ROOT);
+        if (sp.equals(tp)) {
+            throw new IllegalArgumentException("目标平台和当前一样，不用复制");
+        }
+        if (!MIRROR_PLATFORMS.contains(sp) || !MIRROR_PLATFORMS.contains(tp)) {
+            throw new IllegalArgumentException("只支持 Android ↔ iOS 互拷，鸿蒙请单独建");
+        }
+        if (src.getNameEn() == null || src.getNameEn().isBlank()) {
+            throw new IllegalArgumentException("源元素英文名为空，无法复制");
+        }
+        if (uiElementMapper.findByAppPlatformKey(src.getAppId(), tp, src.getNameEn(), null) != null) {
+            throw new IllegalArgumentException(
+                    tp + " 已有同英文名「" + src.getNameEn() + "」，未覆盖");
+        }
+        return create(placeholderOf(src, src.getAppId(), tp));
+    }
+
     private static UiElement placeholderOf(UiElement src, String appId, String platform) {
         UiElement c = new UiElement();
         c.setAppId(appId);

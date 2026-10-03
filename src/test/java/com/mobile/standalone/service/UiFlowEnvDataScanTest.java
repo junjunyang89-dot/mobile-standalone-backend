@@ -25,7 +25,7 @@ class UiFlowEnvDataScanTest {
         flow.setName("登录");
         flow.setSteps(steps);
         when(mapper.findById(anyString())).thenReturn(flow);
-        return new UiFlowService(mapper, null, null);
+        return new UiFlowService(mapper, null, null, null);
     }
 
     @Test

@@ -1,7 +1,9 @@
 package com.mobile.standalone.service;
 
+import com.mobile.standalone.entity.UiApp;
 import com.mobile.standalone.entity.UiElement;
 import com.mobile.standalone.entity.UiFlow;
+import com.mobile.standalone.mapper.UiAppMapper;
 import com.mobile.standalone.mapper.UiElementMapper;
 import com.mobile.standalone.mapper.UiFlowMapper;
 import org.junit.jupiter.api.Test;
@@ -19,7 +21,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /**
- * 按 Android 流程生成 iOS 流程：步骤原样带走、platform 改 iOS，并给出元素覆盖报告。
+ * 按 Android 流程生成 iOS 流程：步骤带走、platform 改 iOS，启动包名按目标端改写，并给出元素覆盖报告。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -27,6 +29,7 @@ class UiFlowCloneToPlatformTest {
 
     @Mock UiFlowMapper uiFlowMapper;
     @Mock UiElementMapper uiElementMapper;
+    @Mock UiAppMapper uiAppMapper;
     @Mock JdbcTemplate jdbcTemplate;
     @InjectMocks UiFlowService service;
 
@@ -40,6 +43,16 @@ class UiFlowCloneToPlatformTest {
         f.setSteps("[{\"keywordCode\":\"CLICK\",\"elementKey\":\"mall_entry\"},"
                 + "{\"keywordCode\":\"ASSERT_TEXT\",\"elementKey\":\"mall_title\"},"
                 + "{\"keywordCode\":\"CLICK\",\"elementKey\":\"mall_missing\"}]");
+        return f;
+    }
+
+    private static UiFlow androidFlowWithColdStart() {
+        UiFlow f = androidFlow();
+        f.setAppId("DOMESTIC_ESPORTS");
+        f.setSteps("[{\"keywordCode\":\"COLD_START\",\"params\":{"
+                + "\"appId\":\"DOMESTIC_ESPORTS\","
+                + "\"packageName\":\"com.pwrd.steam.esports\","
+                + "\"activity\":\".ui.activity.launcher.LauncherActivity\"}}]");
         return f;
     }
 
@@ -102,5 +115,71 @@ class UiFlowCloneToPlatformTest {
         when(uiFlowMapper.findById("f1")).thenReturn(androidFlow());
         var r = service.cloneToPlatform("f1", "IOS", "TEST");
         assertThat(r.flow().getEnvironment()).isEqualTo("TEST");
+    }
+
+    @Test
+    void 克隆到iOS_冷启动包名改成BundleId_并去掉activity() {
+        when(uiFlowMapper.findById("f1")).thenReturn(androidFlowWithColdStart());
+        UiApp app = new UiApp();
+        app.setId("DOMESTIC_ESPORTS");
+        app.setAndroidPackage("com.pwrd.steam.esports");
+        app.setIosBundleId("com.wmzq.esportapp");
+        when(uiAppMapper.findById("DOMESTIC_ESPORTS")).thenReturn(app);
+
+        var r = service.cloneToPlatform("f1", "IOS", null);
+
+        assertThat(r.flow().getSteps()).contains("com.wmzq.esportapp");
+        assertThat(r.flow().getSteps()).doesNotContain("com.pwrd.steam.esports");
+        assertThat(r.flow().getSteps()).doesNotContain("activity");
+        assertThat(r.flow().getSteps()).doesNotContain("LauncherActivity");
+    }
+
+    @Test
+    void 克隆纠正源流程幽灵元素名() {
+        UiFlow src = new UiFlow();
+        src.setId("f1");
+        src.setName("周边商城浏览");
+        src.setAppId("DOMESTIC_ESPORTS");
+        src.setPlatform("ANDROID");
+        src.setEnvironment("PROD");
+        // AI 编排编了个库里不存在的名字；真元素是 discover_top_nav_slide_area
+        src.setSteps("[{\"keywordCode\":\"SWIPE_IN_ELEMENT\",\"elementKey\":\"cs_discover_top_nav_bar\"}]");
+        when(uiFlowMapper.findById("f1")).thenReturn(src);
+
+        UiElement real = el();
+        real.setNameEn("discover_top_nav_slide_area");
+        when(uiElementMapper.findByFilters(
+                eq("DOMESTIC_ESPORTS"), eq("IOS"),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull(), eq("ACTIVE"),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull()))
+                .thenReturn(java.util.List.of(real));
+        when(uiElementMapper.findActiveByKey("DOMESTIC_ESPORTS", "ANDROID", "discover_top_nav_slide_area"))
+                .thenReturn(real);
+        when(uiElementMapper.findActiveByKey("DOMESTIC_ESPORTS", "IOS", "discover_top_nav_slide_area"))
+                .thenReturn(real);
+
+        var r = service.cloneToPlatform("f1", "IOS", null);
+
+        assertThat(r.remapped()).containsEntry("cs_discover_top_nav_bar", "discover_top_nav_slide_area");
+        assertThat(r.flow().getSteps()).contains("discover_top_nav_slide_area");
+        assertThat(r.flow().getSteps()).doesNotContain("cs_discover_top_nav_bar");
+        assertThat(r.ready()).contains("discover_top_nav_slide_area");
+        assertThat(r.sourceMissing()).isEmpty();
+        assertThat(r.missing()).isEmpty();
+    }
+
+    @Test
+    void uniqueSimilarName_词重叠够才命中() {
+        assertThat(UiFlowService.uniqueSimilarName(
+                "cs_discover_top_nav_bar",
+                java.util.List.of("discover_top_nav_slide_area", "mall_category_tab")))
+                .isEqualTo("discover_top_nav_slide_area");
+        assertThat(UiFlowService.uniqueSimilarName(
+                "totally_unrelated_key",
+                java.util.List.of("discover_top_nav_slide_area")))
+                .isNull();
     }
 }

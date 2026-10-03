@@ -90,6 +90,12 @@ public final class ApiTestDtos {
         /** 完整响应体，只给进程内用（按真实返回写断言），不落库不下发 */
         @com.fasterxml.jackson.annotation.JsonIgnore
         private String rawBody;
+        /**
+         * 本步从响应 extract 出来的变量（仅进程内 / UI 流程回填用）。
+         * 接口回归批次一般不看它——那里靠集合内 runtime 往下传。
+         */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY)
+        private java.util.Map<String, String> extracted;
     }
 
     @Data

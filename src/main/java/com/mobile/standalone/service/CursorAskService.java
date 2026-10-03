@@ -64,12 +64,9 @@ public class CursorAskService {
         Path script = resolveScript();
         boolean keyOk = apiKey != null && !apiKey.isBlank();
         boolean scriptOk = Files.isRegularFile(script);
-        Path nodeModules = script.getParent() == null
-                ? null
-                : script.getParent().resolve("node_modules/@cursor/sdk");
-        boolean sdkOk = nodeModules != null && Files.isDirectory(nodeModules);
+        boolean sdkOk = sdkInstalled(script);
         m.put("enabled", enabled);
-        m.put("configured", enabled && keyOk && scriptOk && sdkOk);
+        m.put("configured", isConfigured());
         m.put("provider", "cursor-sdk");
         m.put("model", model);
         m.put("cwd", defaultCwd);
@@ -85,6 +82,63 @@ public class CursorAskService {
             m.put("hint", "找不到 scripts/cursor-ask/ask.mjs");
         }
         return m;
+    }
+
+    /** 页面编码 / 元素 key 等工具调用前先看一眼，别再绕去千问 */
+    public boolean isConfigured() {
+        Path script = resolveScript();
+        return enabled
+                && apiKey != null && !apiKey.isBlank()
+                && Files.isRegularFile(script)
+                && sdkInstalled(script);
+    }
+
+    /**
+     * 短问短答：不挂多轮会话，给页面编码、元素 key 这类「只要一句话」的工具用。
+     * <p>
+     * 和主菜单 AI 助手同一条 Cursor 通道，不再走千问。
+     */
+    public String complete(String prompt) throws Exception {
+        if (!isConfigured()) {
+            throw new IllegalStateException(
+                    "Cursor 未就绪：配 cursor.ask.api-key（或 CURSOR_API_KEY），并在 scripts/cursor-ask 执行 npm install");
+        }
+        if (prompt == null || prompt.isBlank()) {
+            throw new IllegalArgumentException("prompt 不能为空");
+        }
+        String sid = "util-" + java.util.UUID.randomUUID();
+        try {
+            Map<String, Object> r = chat(prompt.trim(), sid, resolveUtilityCwd(), "ask");
+            if (!Boolean.TRUE.equals(r.get("ok"))) {
+                throw new IllegalStateException(String.valueOf(
+                        r.getOrDefault("error", "Cursor 调用失败")));
+            }
+            Object ans = r.get("answer");
+            String text = ans == null ? "" : String.valueOf(ans).trim();
+            if (text.isBlank()) {
+                throw new IllegalStateException("Cursor 未返回内容");
+            }
+            return text;
+        } finally {
+            reset(sid, "ask");
+        }
+    }
+
+    /** 工具调用优先用配置的业务目录；没有就退到当前后端工程目录 */
+    private String resolveUtilityCwd() {
+        for (String c : List.of(defaultCwd, k8sCwd, System.getProperty("user.dir", "."))) {
+            if (c == null || c.isBlank()) continue;
+            Path p = Path.of(c.trim());
+            if (Files.isDirectory(p)) {
+                return p.toAbsolutePath().normalize().toString();
+            }
+        }
+        throw new IllegalStateException("找不到可用工作目录（cursor.ask.cwd / user.dir）");
+    }
+
+    private static boolean sdkInstalled(Path script) {
+        if (script == null || script.getParent() == null) return false;
+        return Files.isDirectory(script.getParent().resolve("node_modules/@cursor/sdk"));
     }
 
     public Map<String, Object> chat(String message, String sessionId, String cwd) throws Exception {

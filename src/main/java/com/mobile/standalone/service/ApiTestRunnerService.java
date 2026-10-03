@@ -267,23 +267,143 @@ public class ApiTestRunnerService {
      * 生成用例时拿它看真实返回——那一跑是在「写用例」，不是在「验接口」。
      */
     public CaseResult tryRun(ApiTestCase c, String environment) {
+        return runCaseForFlow(c, environment, Map.of(), null).result();
+    }
+
+    /**
+     * UI 流程桥接：按已入库用例跑一条。
+     * <p>
+     * 环境 / ApiAuthService 鉴权 / 项目变量 / jsonPath·db 断言 / extract 全部复用接口测试基建；
+     * <b>不</b>落执行历史、<b>不</b>回写接口验证状态——这是流程里的一步，不是接口回归批次。
+     * <p>
+     * {@code seedRuntime} 来自 UI 流程变量（如随机进场后的 {@code matchId}），
+     * 用例里写 {@code {{matchId}}} 即可引用。优先级：runtime &gt; 项目环境变量。
+     *
+     * @param extractJsonOverride 本步额外/覆盖的 extract（JSON 对象）；空则用用例自带的
+     */
+    public FlowCaseResult runCaseForFlow(String caseId, String environment,
+                                         Map<String, String> seedRuntime,
+                                         String extractJsonOverride) {
+        if (caseId == null || caseId.isBlank()) {
+            throw new IllegalArgumentException("caseId 不能为空");
+        }
+        ApiTestCase c = caseMapper.findById(caseId.trim());
+        if (c == null) {
+            throw new IllegalArgumentException("接口用例不存在: " + caseId.trim()
+                    + "（到「接口测试」里复制用例 id）");
+        }
+        if (Boolean.FALSE.equals(c.getEnabled())) {
+            throw new IllegalStateException("接口用例已禁用: " + c.getName());
+        }
+        return runCaseForFlow(c, environment, seedRuntime, extractJsonOverride);
+    }
+
+    public FlowCaseResult runCaseForFlow(ApiTestCase c, String environment,
+                                         Map<String, String> seedRuntime,
+                                         String extractJsonOverride) {
         String envKey = TestEnvironment.normalize(environment);
+        if (TestEnvironment.PROD.equals(envKey) && Boolean.TRUE.equals(c.getTestOnly())) {
+            throw new IllegalStateException("用例「" + c.getName()
+                    + "」标记了只在测试跑，不能在生产环境的 UI 流程里调用");
+        }
+        String caseEnv = c.getEnvironment() == null ? "" : c.getEnvironment().trim().toUpperCase();
+        if (!caseEnv.isEmpty() && !"ANY".equals(caseEnv) && !caseEnv.equals(envKey)) {
+            throw new IllegalStateException("用例「" + c.getName() + "」适用环境是 " + caseEnv
+                    + "，当前流程环境是 " + envKey + "——环境不一致会验错库/错网关");
+        }
         ApiTestEnv env = caseService.getEnv(envKey);
         if (env == null || Boolean.FALSE.equals(env.getEnabled())
                 || env.getBaseUrl() == null || env.getBaseUrl().isBlank()) {
             throw new IllegalStateException("环境 " + envKey + " 没配好 baseUrl");
         }
-        String pj = c.getProject() == null ? "" : c.getProject();
+        ApiTestCase effective = withExtractOverride(c, extractJsonOverride);
+        String pj = effective.getProject() == null ? "" : effective.getProject();
         AuthCtx auth = authFor(pj, envKey);
         Map<String, String> envVars = new LinkedHashMap<>(variableService.resolveValues(envKey, pj));
         if (auth.token() != null) {
             envVars.put("token", auth.token());
         }
-        CaseResult cr = executeOne(c, env, null, null, envVars, new LinkedHashMap<>(), auth.headers());
+        Map<String, String> runtime = new LinkedHashMap<>();
+        if (seedRuntime != null) {
+            for (Map.Entry<String, String> e : seedRuntime.entrySet()) {
+                if (e.getKey() != null && !e.getKey().isBlank() && e.getValue() != null) {
+                    runtime.put(e.getKey(), e.getValue());
+                }
+            }
+        }
+        Map<String, String> before = new LinkedHashMap<>(runtime);
+        CaseResult cr = executeOne(effective, env, null, null, envVars, runtime, auth.headers());
         if (auth.error() != null && !"PASSED".equals(cr.getStatus())) {
             cr.setError("自动登录失败（" + auth.error() + "）；" + (cr.getError() == null ? "" : cr.getError()));
         }
-        return cr;
+        Map<String, String> extracted = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : runtime.entrySet()) {
+            // 只回传本步 extract 新写入的键，避免把 seed 再灌进流程变量
+            if (!before.containsKey(e.getKey())) {
+                extracted.put(e.getKey(), e.getValue());
+            }
+        }
+        // extract 只在 PASSED 时执行；失败时 extracted 为空是预期
+        cr.setExtracted(extracted);
+        return new FlowCaseResult(cr, extracted, envKey);
+    }
+
+    /** UI 流程调用接口用例后的结果：断言结果 + 抽到的变量 */
+    public record FlowCaseResult(CaseResult result, Map<String, String> extracted, String environment) {}
+
+    /** 本步 extract 覆盖/合并进用例；不改库里的原用例 */
+    static ApiTestCase withExtractOverride(ApiTestCase c, String extractJsonOverride) {
+        if (extractJsonOverride == null || extractJsonOverride.isBlank()) {
+            return c;
+        }
+        try {
+            JsonNode override = JSON.readTree(extractJsonOverride.trim());
+            if (override == null || !override.isObject()) {
+                throw new IllegalArgumentException("extract 必须是 JSON 对象，如 {\"teamA\":\"$.result.match.team1DTO.name\"}");
+            }
+            com.fasterxml.jackson.databind.node.ObjectNode merged = JSON.createObjectNode();
+            if (c.getExtractJson() != null && !c.getExtractJson().isBlank()) {
+                JsonNode base = JSON.readTree(c.getExtractJson());
+                if (base != null && base.isObject()) {
+                    base.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
+                }
+            }
+            override.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
+            ApiTestCase copy = shallowCopyCase(c);
+            copy.setExtractJson(JSON.writeValueAsString(merged));
+            return copy;
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("extract 不是合法 JSON：" + e.getMessage());
+        }
+    }
+
+    private static ApiTestCase shallowCopyCase(ApiTestCase c) {
+        ApiTestCase copy = new ApiTestCase();
+        copy.setId(c.getId());
+        copy.setProject(c.getProject());
+        copy.setEnvironment(c.getEnvironment());
+        copy.setName(c.getName());
+        copy.setDescription(c.getDescription());
+        copy.setRequirementRef(c.getRequirementRef());
+        copy.setCaseKind(c.getCaseKind());
+        copy.setSourceBranch(c.getSourceBranch());
+        copy.setMethod(c.getMethod());
+        copy.setPath(c.getPath());
+        copy.setUrlId(c.getUrlId());
+        copy.setQuery(c.getQuery());
+        copy.setHeaders(c.getHeaders());
+        copy.setBody(c.getBody());
+        copy.setAssertions(c.getAssertions());
+        copy.setExtractJson(c.getExtractJson());
+        copy.setCollectionId(c.getCollectionId());
+        copy.setEndpointId(c.getEndpointId());
+        copy.setFieldNotes(c.getFieldNotes());
+        copy.setEnabled(c.getEnabled());
+        copy.setTestOnly(c.getTestOnly());
+        copy.setSortOrder(c.getSortOrder());
+        return copy;
     }
 
     /* caseKind 在这里快照：见 ApiTestRunCase.caseKind 的注释——

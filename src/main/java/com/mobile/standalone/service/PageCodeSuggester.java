@@ -1,6 +1,5 @@
 package com.mobile.standalone.service;
 
-import com.mobile.standalone.service.ai.QwenChatClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -10,21 +9,19 @@ import java.util.Locale;
 /**
  * 中文页面名 → 大写下划线页面编码（{@code 输入验证码} → {@code LOGIN_SMS_INPUT}）。
  * <p>
- * 现在默认给的是 {@code PAGE_MSL5TC9K} 这种随机码。它「稳定」，但完全不可读——
- * 流程里引用元素时看到的是编码，一堆随机码等于没有信息，
- * 人还得回元素库反查这是哪个页面。编码本来就该是给人看的那一层。
+ * 走 Cursor（与主菜单 AI 助手同一通道），不再调千问。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class PageCodeSuggester {
 
-    private final QwenChatClient qwen;
+    private final CursorAskService cursorAsk;
 
     private static final int MAX_LENGTH = 40;
 
     /**
-     * @return 建议编码；AI 不可用或返回不可用内容时返回 null，由调用方保留原来的随机码兜底
+     * @return 建议编码；Cursor 不可用或返回不可用内容时返回 null，由调用方保留原来的随机码兜底
      */
     public String suggest(String nameZh) {
         if (nameZh == null || nameZh.isBlank()) {
@@ -36,12 +33,12 @@ public class PageCodeSuggester {
             return normalize(name);
         }
         try {
-            String raw = qwen.chat(prompt(name));
+            String raw = cursorAsk.complete(prompt(name));
             String code = normalize(raw);
             return code == null || code.isEmpty() ? null : code;
         } catch (Exception e) {
             // 翻译不出来不该挡住建页面——退回随机码，人照样能用
-            log.warn("[page-code] AI 生成编码失败「{}」: {}", name, e.getMessage());
+            log.warn("[page-code] Cursor 生成编码失败「{}」: {}", name, e.getMessage());
             return null;
         }
     }
@@ -54,7 +51,8 @@ public class PageCodeSuggester {
                 1. 全大写，单词之间用下划线分隔
                 2. 2~4 个单词，不超过 40 个字符
                 3. 用测试和开发都认得的通用词（登录=LOGIN，弹窗=DIALOG/POPUP，列表=LIST，详情=DETAIL，
-                   首页=HOME，我的=PROFILE，设置=SETTINGS，搜索=SEARCH，赛程=SCHEDULE，赛事=MATCH）
+                   首页=HOME，我的=PROFILE，设置=SETTINGS，搜索=SEARCH，赛程=SCHEDULE，赛事=MATCH，
+                   电竞=ESPORTS）
                 4. 只输出编码本身，不要引号、不要解释、不要 markdown
 
                 例子：
@@ -62,6 +60,7 @@ public class PageCodeSuggester {
                 温馨提示弹窗 -> PRIVACY_WARM_TIP
                 赛程详情 -> MATCH_SCHEDULE_DETAIL
                 侧边栏 -> SIDEBAR
+                电竞APP-首页 -> ESPORTS_HOME
 
                 中文名：%s
                 """.formatted(nameZh);

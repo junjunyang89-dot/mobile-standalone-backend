@@ -287,10 +287,9 @@ public class UiFlowController {
     }
 
     /**
-     * 这条流程用到的定位变量名。
+     * 执行时还缺的定位变量名（编排步骤里已经填过的不会出现）。
      * <p>
-     * 前端据此在执行对话框里自动列出输入框——否则人得记住哪条流程要填什么，
-     * 忘了就是一次「元素未找到」的白跑。
+     * 前端据此在执行对话框里列出输入框——编排里写好的文案变量不该再逼人填一遍。
      */
     @GetMapping("/{id}/locator-variables")
     public ResponseEntity<List<String>> locatorVariables(@PathVariable String id) {

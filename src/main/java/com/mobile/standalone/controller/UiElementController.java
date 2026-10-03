@@ -344,6 +344,19 @@ public class UiElementController {
         }
     }
 
+    /**
+     * 单条复制到另一平台：名字/页面带走，定位留空。
+     * body: { toPlatform: "IOS" | "ANDROID" }
+     */
+    @PostMapping("/{id}/copy-to-platform")
+    public ResponseEntity<?> copyOneToPlatform(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        try {
+            return ResponseEntity.ok(uiElementService.copyOneToPlatform(id, str(body.get("toPlatform"))));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
+        }
+    }
+
     @PostMapping
     public ResponseEntity<?> create(@RequestBody UiElement body) {
         UiElement saved;

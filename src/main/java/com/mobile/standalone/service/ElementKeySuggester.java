@@ -1,6 +1,5 @@
 package com.mobile.standalone.service;
 
-import com.mobile.standalone.service.ai.QwenChatClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -10,15 +9,14 @@ import java.util.Locale;
 /**
  * 中文元素名 → 小写下划线英文 key（{@code 活动中心} → {@code activity_center}）。
  * <p>
- * 跟 {@link PageCodeSuggester} 同一套路：流程里引用元素用的就是 nameEn，
- * 随机码 / 拼音乱拼都不如一句可读的英文 key。
+ * 跟 {@link PageCodeSuggester} 同一套路：走 Cursor，不再调千问。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ElementKeySuggester {
 
-    private final QwenChatClient qwen;
+    private final CursorAskService cursorAsk;
 
     private static final int MAX_LENGTH = 48;
 
@@ -35,11 +33,11 @@ public class ElementKeySuggester {
             return normalize(name);
         }
         try {
-            String raw = qwen.chat(prompt(name));
+            String raw = cursorAsk.complete(prompt(name));
             String key = normalize(raw);
             return key == null || key.isEmpty() ? null : key;
         } catch (Exception e) {
-            log.warn("[element-key] AI 翻译失败「{}」: {}", name, e.getMessage());
+            log.warn("[element-key] Cursor 翻译失败「{}」: {}", name, e.getMessage());
             return null;
         }
     }

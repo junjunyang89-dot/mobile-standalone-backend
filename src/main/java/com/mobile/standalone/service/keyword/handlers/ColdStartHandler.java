@@ -28,8 +28,9 @@ import java.util.stream.Collectors;
  * 所以 iOS 的数只能看<b>自己版本之间的趋势</b>，不能和 Android 横比——
  * 报告里会原样写上这句话，因为一个没标口径的数字迟早会被人拿去横比。
  *
- * <p>原先只跑一轮。{@code ColdStartMeasurer} 的注释早就说明白了：单轮冷启动波动能到
- * 15~20%，而基线告警阈值就是 15%——<b>单轮的数会天天报假劣化</b>。所以这里也改成多轮取中位数。
+ * <p>默认只启一轮（流程里当「复位到冷启状态」最常见）。若要做耗时对比，
+ * 步骤参数 {@code rounds} 可设为 3+：多轮取中位数，并丢掉第 1 轮预热——
+ * 单轮波动能到 15~20%，和基线告警阈值撞车时容易报假劣化。
  */
 @Component
 public class ColdStartHandler implements KeywordHandler {
@@ -87,12 +88,12 @@ public class ColdStartHandler implements KeywordHandler {
                         .withHelp("留空则取应用字典中该平台的包名"),
                 ParamDef.string("activity", "appActivity").withHelp("仅 Android 生效"),
                 ParamDef.string("appId", "应用字典ID"),
-                ParamDef.number("rounds", "测几轮（取中位数，默认 3）", DEFAULT_ROUNDS)
+                ParamDef.number("rounds", "测几轮（取中位数，默认 1；性能对比建议 3+）", DEFAULT_ROUNDS)
         );
     }
 
-    /** 默认轮数。3 轮起步：丢掉第 1 轮预热，还剩 2 个样本能取中位 */
-    public static final int DEFAULT_ROUNDS = 3;
+    /** 默认轮数。流程复位只启一次；专项量耗时再把 rounds 调到 3+ */
+    public static final int DEFAULT_ROUNDS = 1;
 
     /** 两轮之间等一下，让系统把进程真的收干净，否则下一轮会变成「切到前台」 */
     private static final long SETTLE_MS = 1500L;

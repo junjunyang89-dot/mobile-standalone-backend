@@ -21,6 +21,7 @@ public class UiFlowService {
 
     private final UiFlowMapper uiFlowMapper;
     private final com.mobile.standalone.mapper.UiElementMapper uiElementMapper;
+    private final com.mobile.standalone.mapper.UiAppMapper uiAppMapper;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     /**
@@ -279,12 +280,13 @@ public class UiFlowService {
     /**
      * 跨平台克隆：按一条流程生成另一平台（如 Android → iOS）的流程。
      * <p>
-     * 步骤<b>原样带走</b>——流程只引用 elementKey，不写死 locator，平台由运行时
-     * {@link UiFlowExecutor#resolveSelectors} 按「平台 + nameEn」解析。所以同一套步骤
-     * 换个 platform 就能跑另一端，前提是目标平台有同名(nameEn)元素。
-     * <p>
-     * 同时给出<b>覆盖报告</b>：每个 elementKey 在目标平台是「已就绪 / 待定位 / 缺失」，
-     * 让人一眼看出还要补哪些元素，而不是跑起来才一个个「无 ACTIVE 元素」。
+     * 元素引用大体带走，但有两类必须特殊处理：
+     * <ul>
+     *   <li>启动类步骤里的 packageName/activity（安卓包 ≠ iOS BundleId）</li>
+     *   <li>源流程里的「幽灵 elementKey」——编排编了个库里根本没有的名字，原样拷到
+     *       目标端只会变成更难查的失败。若两端都有唯一近似的 ACTIVE 元素，克隆时改写</li>
+     * </ul>
+     * 同时给出覆盖报告：已就绪 / 待定位 / 缺失 / 源也没有 / 已自动纠正。
      */
     @Transactional
     public PlatformCloneResult cloneToPlatform(String id, String targetPlatform, String environment) {
@@ -296,6 +298,41 @@ public class UiFlowService {
         if (platform == null || platform.isBlank()) {
             throw new IllegalArgumentException("目标平台不能为空（如 IOS / ANDROID）");
         }
+        String srcPlatform = PlatformNames.normalize(src.getPlatform());
+        String steps = src.getSteps();
+        if (srcPlatform != null && !srcPlatform.equalsIgnoreCase(platform)) {
+            steps = rewriteLaunchParamsForPlatform(steps, platform, src.getAppId());
+        }
+
+        java.util.List<String> keys = elementKeysFromSteps(steps).stream()
+                .filter(k -> k != null && !k.isBlank()).map(String::trim).distinct().toList();
+        java.util.LinkedHashMap<String, String> remapped = new java.util.LinkedHashMap<>();
+        java.util.List<String> sourceMissing = new java.util.ArrayList<>();
+        java.util.List<String> targetActiveNames = listActiveNameEns(src.getAppId(), platform);
+        for (String key : keys) {
+            if (findActiveOnPlatform(src.getAppId(), platform, key) != null
+                    || findAnyOnPlatform(src.getAppId(), platform, key) != null) {
+                continue;
+            }
+            // 目标没有同名。若源端也没有 → 编排幽灵引用，试着纠到唯一近似名
+            boolean sourceHas = srcPlatform != null
+                    && (findActiveOnPlatform(src.getAppId(), srcPlatform, key) != null
+                    || findAnyOnPlatform(src.getAppId(), srcPlatform, key) != null);
+            if (!sourceHas) {
+                sourceMissing.add(key);
+                String guess = uniqueSimilarName(key, targetActiveNames);
+                // 近似名在源端也必须是 ACTIVE，避免「猜到一个只在 iOS 有的无关元素」
+                if (guess != null && srcPlatform != null
+                        && findActiveOnPlatform(src.getAppId(), srcPlatform, guess) != null) {
+                    remapped.put(key, guess);
+                }
+            }
+        }
+        if (!remapped.isEmpty()) {
+            steps = rewriteElementKeys(steps, remapped);
+            log.info("跨端克隆纠正幽灵元素引用 {}: {}", src.getId(), remapped);
+        }
+
         UiFlow copy = new UiFlow();
         copy.setName(platformCloneName(src.getName(), platform));
         copy.setDescription(src.getDescription());
@@ -307,37 +344,49 @@ public class UiFlowService {
         copy.setEnvBound(src.getEnvBound());
         copy.setReleaseStage(src.getReleaseStage());
         copy.setIsComponent(src.getIsComponent());
-        copy.setSteps(src.getSteps()); // 只引用 elementKey，平台由运行时解析
+        copy.setSteps(steps);
         copy.setDependsOn(src.getDependsOn());
         copy.setEnabled(src.getEnabled());
         copy.setSortOrder(src.getSortOrder());
         UiFlow saved = create(copy);
 
-        java.util.List<String> keys = elementKeysOf(src).stream()
+        java.util.List<String> finalKeys = elementKeysFromSteps(steps).stream()
                 .filter(k -> k != null && !k.isBlank()).map(String::trim).distinct().toList();
         java.util.List<String> ready = new java.util.ArrayList<>();
         java.util.List<String> needLocator = new java.util.ArrayList<>();
         java.util.List<String> missing = new java.util.ArrayList<>();
-        for (String key : keys) {
+        for (String key : finalKeys) {
             if (findActiveOnPlatform(src.getAppId(), platform, key) != null) {
-                ready.add(key);                 // 目标平台已有 ACTIVE 元素，直接能跑
+                ready.add(key);
             } else if (findAnyOnPlatform(src.getAppId(), platform, key) != null) {
-                needLocator.add(key);           // 同名占位/候选已在，但还没定位(无 ACTIVE locator)
+                needLocator.add(key);
             } else {
-                missing.add(key);               // 目标平台压根没有这个元素
+                missing.add(key);
             }
         }
+        // 源幽灵里已自动纠正的，不再当「源缺失」吓人
+        java.util.List<String> unresolvedSourceMissing = sourceMissing.stream()
+                .filter(k -> !remapped.containsKey(k))
+                .toList();
         java.util.List<String> components = componentIdsOf(src).stream()
                 .filter(k -> k != null && !k.isBlank()).map(String::trim).distinct().toList();
-        return new PlatformCloneResult(saved, keys.size(), ready, needLocator, missing, components);
+        return new PlatformCloneResult(saved, finalKeys.size(), ready, needLocator, missing, components,
+                unresolvedSourceMissing, remapped);
     }
 
-    /** 跨平台克隆结果：新流程 + 元素覆盖情况。needLocator=同名已在但没定位；missing=目标平台没这个元素。 */
+    /**
+     * 跨平台克隆结果。
+     *
+     * @param sourceMissing 源平台也没有的 elementKey（编排幽灵引用，且未能自动纠正）
+     * @param remapped      克隆时自动纠正的 old→new（两端都有的唯一近似 ACTIVE 元素）
+     */
     public record PlatformCloneResult(UiFlow flow, int elementCount,
                                       java.util.List<String> ready,
                                       java.util.List<String> needLocator,
                                       java.util.List<String> missing,
-                                      java.util.List<String> referencedComponents) {
+                                      java.util.List<String> referencedComponents,
+                                      java.util.List<String> sourceMissing,
+                                      java.util.Map<String, String> remapped) {
     }
 
     private com.mobile.standalone.entity.UiElement findActiveOnPlatform(String appId, String platform, String key) {
@@ -358,6 +407,83 @@ public class UiFlowService {
             if (el != null) return el;
         }
         return null;
+    }
+
+    /**
+     * 跨端克隆时改写启动相关参数：packageName → 目标端包名/BundleId，iOS 去掉 activity。
+     * <p>
+     * 步骤里若显式写了安卓包名，运行时 {@code resolvePackage} 会优先用它，永远走不到应用字典里的
+     * iOS BundleId——这正是「复制到 iOS 后冷启动失败」的根因。
+     */
+    String rewriteLaunchParamsForPlatform(String stepsJson, String targetPlatform, String flowAppId) {
+        com.fasterxml.jackson.databind.JsonNode root = parseStepsTree(stepsJson);
+        if (root == null) {
+            return stepsJson == null ? "[]" : stepsJson;
+        }
+        boolean ios = PlatformNames.isIos(targetPlatform);
+        walkAndRewriteLaunchParams(root, ios, flowAppId);
+        try {
+            return com.mobile.standalone.util.ExecutionLogJson.mapper().writeValueAsString(root);
+        } catch (Exception e) {
+            log.warn("跨端克隆改写启动参数失败，回退原步骤: {}", e.getMessage());
+            return stepsJson;
+        }
+    }
+
+    private void walkAndRewriteLaunchParams(com.fasterxml.jackson.databind.JsonNode node,
+                                            boolean ios, String flowAppId) {
+        if (node == null || node.isNull()) {
+            return;
+        }
+        if (node.isArray()) {
+            node.forEach(child -> walkAndRewriteLaunchParams(child, ios, flowAppId));
+            return;
+        }
+        if (!node.isObject()) {
+            return;
+        }
+        com.fasterxml.jackson.databind.JsonNode params = node.get("params");
+        if (params != null && params.isObject() && params instanceof com.fasterxml.jackson.databind.node.ObjectNode obj) {
+            boolean touchesLaunch = obj.has("packageName") || obj.has("activity") || obj.has("appId");
+            String kw = textNode(node, "keywordCode");
+            if (kw != null) {
+                String u = kw.toUpperCase(java.util.Locale.ROOT);
+                if (u.contains("START") || u.contains("LAUNCH") || u.contains("INSTALL")
+                        || u.contains("UNINSTALL") || u.contains("KILL") || u.contains("HOT_START")
+                        || u.contains("COLD_START") || u.contains("OPEN_H5")) {
+                    touchesLaunch = true;
+                }
+            }
+            if (touchesLaunch) {
+                String appId = textNode(obj, "appId");
+                if (appId == null) {
+                    appId = flowAppId;
+                }
+                String pkg = packageForPlatform(appId, ios);
+                if (pkg == null || pkg.isBlank()) {
+                    // 字典没有目标端包名：删掉源端写死的，逼运行时/人再填，总比带着错包名启动强
+                    obj.remove("packageName");
+                } else {
+                    obj.put("packageName", pkg);
+                }
+                if (ios) {
+                    obj.remove("activity");
+                }
+            }
+        }
+        node.fields().forEachRemaining(e -> walkAndRewriteLaunchParams(e.getValue(), ios, flowAppId));
+    }
+
+    private String packageForPlatform(String appId, boolean ios) {
+        if (appId == null || appId.isBlank() || uiAppMapper == null) {
+            return null;
+        }
+        com.mobile.standalone.entity.UiApp app = uiAppMapper.findById(appId.trim());
+        if (app == null) {
+            return null;
+        }
+        String pkg = ios ? app.getIosBundleId() : app.getAndroidPackage();
+        return pkg == null || pkg.isBlank() ? null : pkg.trim();
     }
 
     private String platformCloneName(String raw, String platform) {
@@ -457,45 +583,268 @@ public class UiFlowService {
     }
 
     /**
-     * 这条流程（含它调用的组件）所有元素定位里用到的 ${变量} 名，按出现顺序去重。
+     * 执行时还要人填的定位变量名（编排步骤里已经写好的不算）。
      * <p>
-     * 前端据此在执行时列出输入框。取不全也不致命——真缺变量时执行会当场报出缺哪个；
-     * 但能提前列出来，人就不用记「这条流程要填什么」。
+     * 元素定位可以写 {@code ${mall_category_tab}}，真正取值常在步骤参数里
+     * （同一步填「刀塔商城」、另一步填「CS商城」）。执行器会按步合并参数，
+     * 所以编排里已填的变量不应再弹执行对话框逼人填一遍。
+     * <p>
+     * 只返回「至少有一步用到该变量、且该步 params 没给值」的名字。
+     * 取不全也不致命——真缺时执行会当场报出缺哪个。
      */
     public java.util.List<String> collectLocatorVariables(UiFlow flow) {
-        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
-        collectInto(flow, names, new java.util.HashSet<>(), 0);
-        return new java.util.ArrayList<>(names);
+        java.util.LinkedHashSet<String> needed = new java.util.LinkedHashSet<>();
+        collectUnresolvedVars(flow, needed, new java.util.HashSet<>(), 0);
+        return new java.util.ArrayList<>(needed);
     }
 
-    private void collectInto(UiFlow flow, java.util.Set<String> names,
-                             java.util.Set<String> visited, int depth) {
+    private void collectUnresolvedVars(UiFlow flow, java.util.Set<String> needed,
+                                       java.util.Set<String> visited, int depth) {
         // 组件可以互相引用，没有环检测会栈溢出
         if (flow == null || depth > 5 || !visited.add(flow.getId())) {
             return;
         }
-        for (String key : elementKeysOf(flow)) {
-            com.mobile.standalone.entity.UiElement el = uiElementMapper.findActiveByKey(
-                    flow.getAppId(),
-                    com.mobile.standalone.util.PlatformNames.normalize(flow.getPlatform()),
-                    key);
-            if (el == null) {
-                continue;
-            }
-            names.addAll(com.mobile.standalone.util.LocatorTemplate.variablesIn(el.getLocatorValue()));
-            names.addAll(com.mobile.standalone.util.LocatorTemplate.variablesIn(el.getLocatorFallbacks()));
+        com.fasterxml.jackson.databind.JsonNode root = parseStepsTree(flow.getSteps());
+        if (root == null) {
+            return;
         }
-        for (String childId : componentIdsOf(flow)) {
-            collectInto(get(childId), names, visited, depth + 1);
+        walkStepTreeForUnresolvedVars(root, flow, needed, visited, depth);
+    }
+
+    private void walkStepTreeForUnresolvedVars(com.fasterxml.jackson.databind.JsonNode node,
+                                               UiFlow flow, java.util.Set<String> needed,
+                                               java.util.Set<String> visited, int depth) {
+        if (node == null || node.isNull()) {
+            return;
+        }
+        if (node.isArray()) {
+            node.forEach(child -> walkStepTreeForUnresolvedVars(child, flow, needed, visited, depth));
+            return;
+        }
+        if (!node.isObject()) {
+            return;
+        }
+
+        String elementKey = textNode(node, "elementKey");
+        if (elementKey == null) {
+            elementKey = textNode(node, "element");
+        }
+        com.fasterxml.jackson.databind.JsonNode params = node.get("params");
+        if (elementKey != null) {
+            for (String var : varsOfElement(flow, elementKey)) {
+                if (!paramFilled(params, var)) {
+                    needed.add(var);
+                }
+            }
+        }
+
+        String childFlowId = textNode(node, "componentId");
+        if (childFlowId == null) {
+            childFlowId = textNode(node, "flowId");
+        }
+        if (childFlowId == null && params != null && params.isObject()) {
+            childFlowId = textNode(params, "componentId");
+            if (childFlowId == null) {
+                childFlowId = textNode(params, "flowId");
+            }
+        }
+        if (childFlowId != null) {
+            java.util.LinkedHashSet<String> childNeeded = new java.util.LinkedHashSet<>();
+            collectUnresolvedVars(get(childFlowId), childNeeded, visited, depth + 1);
+            for (String var : childNeeded) {
+                if (!paramFilled(params, var)) {
+                    needed.add(var);
+                }
+            }
+        }
+
+        // 嵌套分支 / 子步骤：thenSteps、elseSteps、以及 params 里其它对象/数组
+        node.fields().forEachRemaining(e -> {
+            String k = e.getKey();
+            if ("params".equals(k)) {
+                walkStepTreeForUnresolvedVars(e.getValue(), flow, needed, visited, depth);
+            } else if (e.getValue() != null && (e.getValue().isArray() || e.getValue().isObject())) {
+                // 步骤根上偶尔也会挂嵌套步骤数组
+                if (e.getValue().isArray() || looksLikeStepObject(e.getValue())) {
+                    walkStepTreeForUnresolvedVars(e.getValue(), flow, needed, visited, depth);
+                }
+            }
+        });
+    }
+
+    private java.util.List<String> varsOfElement(UiFlow flow, String elementKey) {
+        if (elementKey == null || elementKey.isBlank()) {
+            return java.util.List.of();
+        }
+        com.mobile.standalone.entity.UiElement el = uiElementMapper.findActiveByKey(
+                flow.getAppId(),
+                com.mobile.standalone.util.PlatformNames.normalize(flow.getPlatform()),
+                elementKey.trim());
+        if (el == null) {
+            return java.util.List.of();
+        }
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        names.addAll(com.mobile.standalone.util.LocatorTemplate.variablesIn(el.getLocatorValue()));
+        names.addAll(com.mobile.standalone.util.LocatorTemplate.variablesIn(el.getLocatorFallbacks()));
+        return new java.util.ArrayList<>(names);
+    }
+
+    private static boolean paramFilled(com.fasterxml.jackson.databind.JsonNode params, String name) {
+        if (params == null || !params.isObject() || name == null) {
+            return false;
+        }
+        com.fasterxml.jackson.databind.JsonNode v = params.get(name);
+        return v != null && v.isValueNode() && !v.isNull() && !v.asText("").trim().isEmpty();
+    }
+
+    private static String textNode(com.fasterxml.jackson.databind.JsonNode node, String field) {
+        if (node == null || field == null) {
+            return null;
+        }
+        com.fasterxml.jackson.databind.JsonNode v = node.get(field);
+        if (v == null || !v.isTextual()) {
+            return null;
+        }
+        String s = v.asText();
+        return s == null || s.isBlank() ? null : s.trim();
+    }
+
+    private static boolean looksLikeStepObject(com.fasterxml.jackson.databind.JsonNode n) {
+        return n != null && n.isObject()
+                && (n.has("keywordCode") || n.has("elementKey") || n.has("element") || n.has("params"));
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode parseStepsTree(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return com.mobile.standalone.util.ExecutionLogJson.mapper().readTree(json);
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
-    /** 步骤 JSON 里所有 elementKey，含嵌套分支 */
+    /** 步骤 JSON 里所有 elementKey，含嵌套分支（跨平台克隆等用） */
     private java.util.List<String> elementKeysOf(UiFlow flow) {
+        return elementKeysFromSteps(flow == null ? null : flow.getSteps());
+    }
+
+    private java.util.List<String> elementKeysFromSteps(String stepsJson) {
         java.util.List<String> out = new java.util.ArrayList<>();
-        scanJson(flow.getSteps(), "elementKey", out);
-        scanJson(flow.getSteps(), "element", out);
+        scanJson(stepsJson, "elementKey", out);
+        scanJson(stepsJson, "element", out);
         return out;
+    }
+
+    private java.util.List<String> listActiveNameEns(String appId, String platform) {
+        if (appId == null || platform == null || uiElementMapper == null) {
+            return java.util.List.of();
+        }
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        java.util.List<com.mobile.standalone.entity.UiElement> rows = uiElementMapper.findByFilters(
+                appId, platform, null, null, null, null, null, "ACTIVE", null, null, null);
+        if (rows != null) {
+            for (com.mobile.standalone.entity.UiElement el : rows) {
+                if (el.getNameEn() != null && !el.getNameEn().isBlank()) {
+                    names.add(el.getNameEn().trim());
+                }
+            }
+        }
+        for (String legacy : PlatformNames.legacyAliasesOf(platform)) {
+            rows = uiElementMapper.findByFilters(
+                    appId, legacy, null, null, null, null, null, "ACTIVE", null, null, null);
+            if (rows == null) continue;
+            for (com.mobile.standalone.entity.UiElement el : rows) {
+                if (el.getNameEn() != null && !el.getNameEn().isBlank()) {
+                    names.add(el.getNameEn().trim());
+                }
+            }
+        }
+        return new java.util.ArrayList<>(names);
+    }
+
+    /**
+     * 在候选 ACTIVE 名里找与幽灵 key 唯一近似的一个。
+     * 词重叠 ≥3（按下划线分词）且只有一个最高分，才敢自动改——猜错比不改更糟。
+     */
+    static String uniqueSimilarName(String ghost, java.util.List<String> candidates) {
+        if (ghost == null || ghost.isBlank() || candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+        java.util.Set<String> ghostTokens = nameTokens(ghost);
+        if (ghostTokens.size() < 2) {
+            return null;
+        }
+        String best = null;
+        int bestScore = 0;
+        boolean tie = false;
+        for (String c : candidates) {
+            if (c == null || c.isBlank() || c.equals(ghost)) continue;
+            int score = overlapCount(ghostTokens, nameTokens(c));
+            if (score < 3) continue;
+            if (score > bestScore) {
+                bestScore = score;
+                best = c;
+                tie = false;
+            } else if (score == bestScore) {
+                tie = true;
+            }
+        }
+        return tie ? null : best;
+    }
+
+    static java.util.Set<String> nameTokens(String nameEn) {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        if (nameEn == null) return out;
+        for (String p : nameEn.trim().toLowerCase(java.util.Locale.ROOT).split("[^a-z0-9]+")) {
+            if (p.length() >= 2) out.add(p);
+        }
+        return out;
+    }
+
+    static int overlapCount(java.util.Set<String> a, java.util.Set<String> b) {
+        int n = 0;
+        for (String t : a) {
+            if (b.contains(t)) n++;
+        }
+        return n;
+    }
+
+    private static String rewriteElementKeys(String stepsJson, java.util.Map<String, String> remapped) {
+        if (stepsJson == null || remapped == null || remapped.isEmpty()) {
+            return stepsJson;
+        }
+        com.fasterxml.jackson.databind.JsonNode root = parseStepsTree(stepsJson);
+        if (root == null) {
+            return stepsJson;
+        }
+        walkReplaceElementKeys(root, remapped);
+        try {
+            return com.mobile.standalone.util.ExecutionLogJson.mapper().writeValueAsString(root);
+        } catch (Exception e) {
+            return stepsJson;
+        }
+    }
+
+    private static void walkReplaceElementKeys(com.fasterxml.jackson.databind.JsonNode node,
+                                               java.util.Map<String, String> remapped) {
+        if (node == null || node.isNull()) return;
+        if (node.isArray()) {
+            node.forEach(c -> walkReplaceElementKeys(c, remapped));
+            return;
+        }
+        if (!node.isObject()) return;
+        if (node instanceof com.fasterxml.jackson.databind.node.ObjectNode obj) {
+            for (String field : java.util.List.of("elementKey", "element")) {
+                com.fasterxml.jackson.databind.JsonNode v = obj.get(field);
+                if (v != null && v.isTextual()) {
+                    String next = remapped.get(v.asText().trim());
+                    if (next != null) obj.put(field, next);
+                }
+            }
+        }
+        node.fields().forEachRemaining(e -> walkReplaceElementKeys(e.getValue(), remapped));
     }
 
     private java.util.List<String> componentIdsOf(UiFlow flow) {
@@ -528,7 +877,7 @@ public class UiFlowService {
                 }
             }
         } catch (Exception ignored) {
-            // 扫不出来就当没有变量，执行时仍会明确报缺哪个
+            // 扫不出来就当没有
         }
     }
 

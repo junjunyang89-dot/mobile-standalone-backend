@@ -30,7 +30,7 @@ import static org.mockito.Mockito.when;
 class UiFlowCreateDefaultsTest {
 
     private UiFlow createWith(UiFlow input, UiFlowMapper mapper) {
-        UiFlowService service = new UiFlowService(mapper, mock(UiElementMapper.class), mock(JdbcTemplate.class));
+        UiFlowService service = new UiFlowService(mapper, mock(UiElementMapper.class), mock(com.mobile.standalone.mapper.UiAppMapper.class), mock(JdbcTemplate.class));
         return service.create(input);
     }
 
@@ -101,7 +101,7 @@ class UiFlowCreateDefaultsTest {
         existing.setEnvironment("TEST");
         when(mapper.findById("uif-1")).thenReturn(existing);
 
-        UiFlowService service = new UiFlowService(mapper, mock(UiElementMapper.class), mock(JdbcTemplate.class));
+        UiFlowService service = new UiFlowService(mapper, mock(UiElementMapper.class), mock(com.mobile.standalone.mapper.UiAppMapper.class), mock(JdbcTemplate.class));
         UiFlow patch = new UiFlow();
         patch.setReleaseStage("ONLINE");
         service.update("uif-1", patch);

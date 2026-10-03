@@ -106,7 +106,7 @@ class AiTestCaseFlowLinkTest {
         final Map<String, UiFlow> flows = new HashMap<>();
 
         FakeFlowService() {
-            super(null, null, null);
+            super(null, null, null, null);
         }
 
         @Override

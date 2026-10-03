@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class RegressionEnvironmentTest {
 
-    private final UiFlowService service = new UiFlowService(null, null, null);
+    private final UiFlowService service = new UiFlowService(null, null, null, null);
 
     private static UiFlow flow(String catalog, String environment) {
         UiFlow f = new UiFlow();
