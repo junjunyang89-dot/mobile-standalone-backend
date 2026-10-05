@@ -12,6 +12,7 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,9 @@ import java.util.concurrent.TimeUnit;
 public class CursorAskService {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    /** 一张图 base64 后的上限（约 6MB 原图），页面上已压缩过，超了多半是没压的原图 */
+    private static final int IMAGE_MAX_CHARS = 8_000_000;
+    private static final int IMAGE_MAX_COUNT = 4;
 
     @Value("${cursor.ask.enabled:true}")
     private boolean enabled;
@@ -146,6 +150,14 @@ public class CursorAskService {
     }
 
     public Map<String, Object> chat(String message, String sessionId, String cwd, String mode) throws Exception {
+        return chat(message, sessionId, cwd, mode, List.of(), List.of());
+    }
+    /**
+     * @param dirs   除 cwd 外还能读的代码目录（一单涉及的其它后端 / H5 / 客户端），不存在的跳过
+     * @param images 截图：每项 {data: base64, mimeType: image/png}
+     */
+    public Map<String, Object> chat(String message, String sessionId, String cwd, String mode,
+                                    List<String> dirs, List<Map<String, String>> images) throws Exception {
         if (!enabled) {
             throw new IllegalStateException("cursor.ask 已关闭");
         }
@@ -177,6 +189,36 @@ public class CursorAskService {
         payload.put("message", message.trim());
         payload.put("model", model);
         payload.put("mode", useMode);
+        List<String> extra = new ArrayList<>();
+        for (String d : dirs == null ? List.<String>of() : dirs) {
+            if (d != null && !d.isBlank() && Files.isDirectory(Path.of(d.trim()))) {
+                String abs = Path.of(d.trim()).toAbsolutePath().normalize().toString();
+                if (!extra.contains(abs) && !abs.equals(payload.get("cwd"))) {
+                    extra.add(abs);
+                }
+            }
+        }
+        if (!extra.isEmpty()) {
+            payload.put("dirs", extra);
+        }
+        List<Map<String, String>> imgs = new ArrayList<>();
+        for (Map<String, String> img : images == null ? List.<Map<String, String>>of() : images) {
+            String data = img == null ? null : img.get("data");
+            String mime = img == null ? null : img.get("mimeType");
+            if (data == null || data.isBlank() || mime == null || !mime.startsWith("image/")) {
+                continue;
+            }
+            if (data.length() > IMAGE_MAX_CHARS) {
+                throw new IllegalArgumentException("图片太大了，换一张小点的截图");
+            }
+            imgs.add(Map.of("data", data, "mimeType", mime));
+        }
+        if (imgs.size() > IMAGE_MAX_COUNT) {
+            throw new IllegalArgumentException("一次最多 " + IMAGE_MAX_COUNT + " 张图");
+        }
+        if (!imgs.isEmpty()) {
+            payload.put("images", imgs);
+        }
         // k8s / ask 会话隔离，避免只读 agent 被拿去写文件
         String agentKey = useMode + ":" + sid;
         String existing = agents.get(agentKey);

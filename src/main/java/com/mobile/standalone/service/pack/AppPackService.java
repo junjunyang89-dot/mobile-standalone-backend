@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>
  * 鸿蒙：调 DevEco 的 {@code hvigorw}，签名材料继续用工程里已有的。
  * 完美电竞安卓：固定切 {@code testing} 分支后 {@code assembleDebug}。
- * iOS 还没接。
+ * 完美电竞 iOS：页面选分支，对齐 origin 后 {@code pod install} + {@code xcodebuild} 打 Debug IPA。
  */
 @Slf4j
 @Service
@@ -98,6 +98,21 @@ public class AppPackService {
 
     @Value("${app.pack.android.timeout-minutes:50}")
     private int androidTimeoutMinutes;
+
+    @Value("${app.pack.ios.project-dir:${user.home}/projects/qa_coding/app_coding/esportapp-ios}")
+    private String iosProjectDir;
+
+    @Value("${app.pack.ios.git-dir:}")
+    private String iosGitDir;
+
+    @Value("${app.pack.ios.branch:testing}")
+    private String iosBranch;
+
+    @Value("${app.pack.ios.team-id:Z3U4KP2R7K}")
+    private String iosTeamId;
+
+    @Value("${app.pack.ios.timeout-minutes:70}")
+    private int iosTimeoutMinutes;
 
     @Value("${app.pack.output-dir:${user.home}/.mobile-standalone/packs}")
     private String outputDir;
@@ -165,14 +180,16 @@ public class AppPackService {
 
     public Map<String, Object> options() {
         Map<String, Object> android = androidOptions();
+        Map<String, Object> ios = iosOptions();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("platforms", List.of(
                 Map.of("id", "HARMONYOS", "label", "鸿蒙", "ready", true),
                 Map.of("id", "ANDROID", "label", "完美电竞安卓",
                         "ready", Boolean.TRUE.equals(android.get("ready")),
                         "hint", String.valueOf(android.getOrDefault("hint", ""))),
-                Map.of("id", "IOS", "label", "iOS", "ready", false,
-                        "hint", "iOS 打包还没接")));
+                Map.of("id", "IOS", "label", "完美电竞 iOS",
+                        "ready", Boolean.TRUE.equals(ios.get("ready")),
+                        "hint", String.valueOf(ios.getOrDefault("hint", "")))));
         Path project = Path.of(harmonyProjectDir).toAbsolutePath().normalize();
         String hvigorw = HarmonyPackTools.hvigorw(hvigorwConfig);
         String nodeHome = HarmonyPackTools.nodeHome(nodeHomeConfig);
@@ -245,6 +262,7 @@ public class AppPackService {
         }
         out.put("harmony", harmony);
         out.put("android", android);
+        out.put("ios", ios);
         out.put("busy", busy.get() || hasRunningJob());
         return out;
     }
@@ -290,6 +308,63 @@ public class AppPackService {
             android.put("hint", "固定打 testing 分支的 debug 包，页面上不能改。");
         }
         return android;
+    }
+
+    private Map<String, Object> iosOptions() {
+        Path project = Path.of(iosProjectDir).toAbsolutePath().normalize();
+        Path gitRoot = IosGitSync.gitRoot(project, iosGitDir);
+        Path workspace = IosPackTools.workspace(project);
+        String xcode = IosPackTools.xcodebuild();
+        String pod = IosPackTools.pod();
+        boolean xcodeOk = IosPackTools.xcodeReady();
+        boolean signingOk = IosPackTools.developmentIdentityPresent();
+        boolean projectOk = Files.isDirectory(project)
+                && (workspace != null || Files.isRegularFile(project.resolve("Podfile")));
+        boolean gitOk = gitRoot != null;
+        boolean ready = projectOk && gitOk && xcodeOk && pod != null && signingOk;
+        String defaultBranch = iosBranch == null || iosBranch.isBlank()
+                ? IosPackCommand.DEFAULT_BRANCH : iosBranch.trim();
+        Map<String, Object> ios = new LinkedHashMap<>();
+        ios.put("ready", ready);
+        ios.put("label", "完美电竞 iOS");
+        ios.put("projectDir", project.toString());
+        ios.put("projectExists", projectOk);
+        ios.put("gitDir", gitRoot == null ? null : gitRoot.toString());
+        ios.put("branch", defaultBranch);
+        List<String> branches = IosGitSync.listRemoteBranches(gitRoot);
+        if (!branches.contains(defaultBranch)) {
+            List<String> withDefault = new ArrayList<>();
+            withDefault.add(defaultBranch);
+            withDefault.addAll(branches);
+            branches = withDefault;
+        }
+        ios.put("branches", branches);
+        ios.put("product", IosPackCommand.PRODUCT);
+        ios.put("outputType", IosPackCommand.OUTPUT_TYPE);
+        ios.put("scheme", IosPackCommand.SCHEME);
+        ios.put("workspace", workspace == null ? null : workspace.toString());
+        ios.put("xcodebuild", xcode);
+        ios.put("pod", pod);
+        ios.put("signingReady", signingOk);
+        ios.put("teamId", iosTeamId);
+        ios.put("versionName", projectOk ? IosBuildProfile.versionName(project) : null);
+        ios.put("versionCode", projectOk ? IosBuildProfile.versionCode(project) : null);
+        if (!projectOk) {
+            ios.put("hint", "找不到完美电竞 iOS 工程：" + project
+                    + "。把 app.pack.ios.project-dir 指到 esportapp-ios。");
+        } else if (!gitOk) {
+            ios.put("hint", "找不到 iOS Git 仓库。把 app.pack.ios.git-dir 指到 esportapp-ios。");
+        } else if (xcode == null || !xcodeOk) {
+            ios.put("hint", "找不到可用的 Xcode / xcodebuild。请安装 Xcode 并执行 xcode-select。");
+        } else if (pod == null) {
+            ios.put("hint", "找不到 CocoaPods（pod）。请 brew install cocoapods，或把 pod 加到 PATH。");
+        } else if (!signingOk) {
+            ios.put("hint", "钥匙串里没有 Apple Development 证书，development IPA 签不了。"
+                    + "用 Xcode 登录 Team " + iosTeamId + " 下过一次自动签名即可。");
+        } else {
+            ios.put("hint", "按所选分支对齐 origin 后打 Debug / development IPA，可装到已注册的开发设备。");
+        }
+        return ios;
     }
 
     public List<Map<String, Object>> list(String platform) {
@@ -355,8 +430,11 @@ public class AppPackService {
         if ("ANDROID".equals(plat)) {
             return startAndroid(createdBy, blankToNull(deviceId));
         }
+        if ("IOS".equals(plat)) {
+            return startIos(createdBy, blankToNull(deviceId), branch);
+        }
         if (!"HARMONYOS".equals(plat)) {
-            throw new IllegalArgumentException("目前只接了鸿蒙和完美电竞安卓，iOS 还在后面");
+            throw new IllegalArgumentException("目前只接了鸿蒙、完美电竞安卓和完美电竞 iOS");
         }
         Map<String, Object> opts = options();
         @SuppressWarnings("unchecked")
@@ -468,7 +546,42 @@ public class AppPackService {
         return id;
     }
 
-    /** 已成功的包装到指定设备（安卓 APK / 鸿蒙 HAP；可补装 / 换机） */
+    private String startIos(String createdBy, String deviceId, String branch) {
+        Map<String, Object> ios = iosOptions();
+        if (!Boolean.TRUE.equals(ios.get("ready"))) {
+            throw new IllegalStateException(String.valueOf(ios.getOrDefault("hint", "iOS 打包环境未就绪")));
+        }
+        if (deviceId != null) {
+            requireIosDevice(deviceId);
+        }
+        String defaultBranch = String.valueOf(ios.getOrDefault("branch", IosPackCommand.DEFAULT_BRANCH));
+        String gitBranch = IosGitSync.normalizeBranch(branch, defaultBranch);
+        acquireLock();
+        Path project = Path.of(iosProjectDir).toAbsolutePath().normalize();
+        String command = "git checkout " + gitBranch + " && pod install && xcodebuild archive && xcodebuild -exportArchive";
+        String id = UUID.randomUUID().toString().replace("-", "");
+        String versionName = IosBuildProfile.versionName(project);
+        String versionCode = IosBuildProfile.versionCode(project);
+        String installStatus = deviceId == null ? "SKIPPED" : "PENDING";
+        try {
+            jdbcTemplate.update("""
+                            INSERT INTO app_pack_jobs
+                                (id, platform, product, output_type, status, version_name, version_code,
+                                 created_by, command, log_text, install_device_id, install_status,
+                                 git_branch, created_at, updated_at)
+                            VALUES (?, 'IOS', ?, ?, 'QUEUED', ?, ?, ?, ?, '', ?, ?, ?, NOW(), NOW())
+                            """,
+                    id, IosPackCommand.PRODUCT, IosPackCommand.OUTPUT_TYPE,
+                    versionName, versionCode, createdBy, command, deviceId, installStatus, gitBranch);
+        } catch (Exception e) {
+            busy.set(false);
+            throw new IllegalStateException("写入打包任务失败：" + e.getMessage());
+        }
+        pool.execute(() -> runIos(id, project, gitBranch, deviceId));
+        return id;
+    }
+
+    /** 已成功的包装到指定设备（安卓 APK / 鸿蒙 HAP / iOS IPA；可补装 / 换机） */
     public void installArtifact(String id, String deviceId) {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("缺少任务 id");
@@ -511,7 +624,12 @@ public class AppPackService {
             installHapToDevice(id.trim(), artifact, did, logBuf);
             return;
         }
-        throw new IllegalStateException("目前只支持安卓 / 鸿蒙装机");
+        if ("IOS".equalsIgnoreCase(plat)) {
+            requireIosDevice(did);
+            installIpaToDevice(id.trim(), artifact, did, logBuf);
+            return;
+        }
+        throw new IllegalStateException("目前只支持安卓 / 鸿蒙 / iOS 装机");
     }
 
     private void acquireLock() {
@@ -777,6 +895,115 @@ public class AppPackService {
         }
     }
 
+    private void runIos(String id, Path project, String branch, String deviceId) {
+        StringBuilder logBuf = new StringBuilder();
+        try {
+            markRunning(id);
+            Path gitRoot = IosGitSync.gitRoot(project, iosGitDir);
+            if (gitRoot == null) {
+                throw new IllegalStateException("找不到 iOS Git 仓库。把 app.pack.ios.git-dir 指到 esportapp-ios");
+            }
+            String gitBranch = IosGitSync.normalizeBranch(branch, IosPackCommand.DEFAULT_BRANCH);
+            appendLine(logBuf, "[平台] Git 仓库 " + gitRoot);
+            appendLine(logBuf, "[平台] 切到 " + gitBranch + " 并对齐 origin/" + gitBranch);
+            flushLog(id, logBuf);
+            AndroidGitSync.Result git = IosGitSync.sync(gitRoot, gitBranch);
+            appendLine(logBuf, "[平台] 当前 " + git.branch() + " @" + git.commit());
+            flushLog(id, logBuf);
+
+            String versionName = IosBuildProfile.versionName(project);
+            String versionCode = IosBuildProfile.versionCode(project);
+            jdbcTemplate.update("""
+                    UPDATE app_pack_jobs
+                       SET version_name = ?, version_code = ?, updated_at = NOW()
+                     WHERE id = ?
+                    """, versionName, versionCode, id);
+
+            String pod = IosPackTools.pod();
+            if (pod == null) {
+                throw new IllegalStateException("找不到 pod");
+            }
+            List<String> podCmd = List.of(pod, "install");
+            appendLine(logBuf, "[平台] " + String.join(" ", podCmd));
+            flushLog(id, logBuf);
+            ProcessBuilder podPb = new ProcessBuilder(podCmd);
+            podPb.directory(project.toFile());
+            podPb.redirectErrorStream(true);
+            podPb.environment().put("PATH", HarmonyPackTools.joinPath(
+                    IosPackTools.extraPathEntries(), podPb.environment().get("PATH")));
+            podPb.environment().put("LANG", "en_US.UTF-8");
+            podPb.environment().put("LC_ALL", "en_US.UTF-8");
+            int podCode = executeLogged(id, podPb, logBuf, 25);
+            appendLine(logBuf, "[平台] pod 退出码 " + podCode);
+            flushLog(id, logBuf);
+            if (podCode != 0) {
+                throw new IllegalStateException("pod install 失败，退出码 " + podCode);
+            }
+
+            Path jobDir = Path.of(outputDir).toAbsolutePath().normalize().resolve(id);
+            Files.createDirectories(jobDir);
+            Path archivePath = jobDir.resolve("esport-app.xcarchive");
+            Path exportDir = jobDir.resolve("export");
+            Path plist = jobDir.resolve("ExportOptions.plist");
+            IosPackCommand.writeDevelopmentExportPlist(plist, iosTeamId);
+            Files.createDirectories(exportDir);
+
+            String xcode = IosPackTools.xcodebuild();
+            List<String> archiveCmd = new ArrayList<>();
+            archiveCmd.add(xcode);
+            archiveCmd.addAll(IosPackCommand.archiveArgs(
+                    IosPackCommand.WORKSPACE, archivePath.toString(), iosTeamId));
+            appendLine(logBuf, "[平台] 工作目录 " + project);
+            appendLine(logBuf, "[平台] " + String.join(" ", archiveCmd));
+            flushLog(id, logBuf);
+            ProcessBuilder archivePb = new ProcessBuilder(archiveCmd);
+            archivePb.directory(project.toFile());
+            archivePb.redirectErrorStream(true);
+            archivePb.environment().put("PATH", HarmonyPackTools.joinPath(
+                    IosPackTools.extraPathEntries(), archivePb.environment().get("PATH")));
+            archivePb.environment().put("LANG", "en_US.UTF-8");
+            int archiveCode = executeLogged(id, archivePb, logBuf, iosTimeoutMinutes);
+            appendLine(logBuf, "[平台] xcodebuild archive 退出码 " + archiveCode);
+            flushLog(id, logBuf);
+            if (archiveCode != 0) {
+                throw new IllegalStateException("xcodebuild archive 失败，退出码 " + archiveCode);
+            }
+
+            List<String> exportCmd = new ArrayList<>();
+            exportCmd.add(xcode);
+            exportCmd.addAll(IosPackCommand.exportArgs(
+                    archivePath.toString(), exportDir.toString(), plist.toString()));
+            appendLine(logBuf, "[平台] " + String.join(" ", exportCmd));
+            flushLog(id, logBuf);
+            ProcessBuilder exportPb = new ProcessBuilder(exportCmd);
+            exportPb.directory(project.toFile());
+            exportPb.redirectErrorStream(true);
+            exportPb.environment().put("PATH", HarmonyPackTools.joinPath(
+                    IosPackTools.extraPathEntries(), exportPb.environment().get("PATH")));
+            int exportCode = executeLogged(id, exportPb, logBuf, 15);
+            appendLine(logBuf, "[平台] xcodebuild export 退出码 " + exportCode);
+            flushLog(id, logBuf);
+            if (exportCode != 0) {
+                throw new IllegalStateException("xcodebuild exportArchive 失败，退出码 " + exportCode);
+            }
+
+            Path artifact = IosPackArtifacts.findIpa(exportDir)
+                    .orElseThrow(() -> new IllegalStateException("构建成功但没找到 ipa 产物"));
+            Path stored = copyArtifact(id, artifact, IosPackCommand.PRODUCT, versionName);
+            markSuccess(id, stored);
+            appendLine(logBuf, "[平台] 产物 " + stored.getFileName());
+            flushLog(id, logBuf);
+            if (deviceId != null && !deviceId.isBlank()) {
+                installIpaToDevice(id, stored, deviceId.trim(), logBuf);
+            }
+        } catch (Exception e) {
+            markFailed(id, logBuf, e);
+        } finally {
+            running.remove(id);
+            busy.set(false);
+        }
+    }
+
     private void requireAndroidDevice(String deviceId) {
         Device device = deviceService.getDeviceById(deviceId);
         if (device == null) {
@@ -797,6 +1024,19 @@ public class AppPackService {
         }
         if (device.getPlatform() != Device.Platform.HARMONYOS) {
             throw new IllegalStateException("请选鸿蒙设备，当前是 " + device.getPlatform());
+        }
+        if (device.getStatus() != Device.DeviceStatus.CONNECTED) {
+            throw new IllegalStateException("设备未连接：" + deviceId + "。请插上 USB 后点「刷新设备」再试");
+        }
+    }
+
+    private void requireIosDevice(String deviceId) {
+        Device device = deviceService.getDeviceById(deviceId);
+        if (device == null) {
+            throw new IllegalStateException("设备不存在：" + deviceId);
+        }
+        if (!Device.usesIosAutomation(device.getPlatform())) {
+            throw new IllegalStateException("请选 iOS 设备，当前是 " + device.getPlatform());
         }
         if (device.getStatus() != Device.DeviceStatus.CONNECTED) {
             throw new IllegalStateException("设备未连接：" + deviceId + "。请插上 USB 后点「刷新设备」再试");
@@ -849,6 +1089,30 @@ public class AppPackService {
                  WHERE id = ?
                 """, deviceId, msg, id);
         replaceLogAfterInstall(id, logBuf, hap, deviceId, false, msg);
+    }
+
+    private void installIpaToDevice(String id, Path ipa, String deviceId, StringBuilder logBuf) {
+        appendLine(logBuf, "[平台] 安装到设备 " + deviceId + " …");
+        flushLog(id, logBuf);
+        boolean ok = deviceManager.installIOSApp(deviceId, ipa.toString());
+        if (ok) {
+            jdbcTemplate.update("""
+                    UPDATE app_pack_jobs
+                       SET install_device_id = ?, install_status = 'SUCCESS',
+                           install_message = ?, updated_at = NOW()
+                     WHERE id = ?
+                    """, deviceId, "已安装到 " + deviceId, id);
+            replaceLogAfterInstall(id, logBuf, ipa, deviceId, true, null);
+            return;
+        }
+        String msg = "xcrun/ideviceinstaller 安装失败。核对这台设备是否在 development 描述文件里，以及是否开了开发者模式";
+        jdbcTemplate.update("""
+                UPDATE app_pack_jobs
+                   SET install_device_id = ?, install_status = 'FAILED',
+                       install_message = ?, updated_at = NOW()
+                 WHERE id = ?
+                """, deviceId, msg, id);
+        replaceLogAfterInstall(id, logBuf, ipa, deviceId, false, msg);
     }
 
     /** 安装结束后丢掉 Gradle 长日志，只留几行摘要，避免 MEDIUMTEXT 越积越大 */

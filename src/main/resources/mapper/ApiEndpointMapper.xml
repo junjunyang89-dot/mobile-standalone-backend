@@ -7,6 +7,7 @@
         <result property="project" column="project"/>
         <result property="httpMethod" column="http_method"/>
         <result property="path" column="path"/>
+        <result property="codePath" column="code_path"/>
         <result property="handler" column="handler"/>
         <result property="sourceFile" column="source_file"/>
         <result property="summary" column="summary"/>
@@ -26,6 +27,8 @@
         <result property="retiredBy" column="retired_by"/>
         <result property="levelManual" column="level_manual"/>
         <result property="levelSetBy" column="level_set_by"/>
+        <result property="goneAt" column="gone_at"/>
+        <result property="goneRef" column="gone_ref"/>
         <result property="lastSyncedAt" column="last_synced_at"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
@@ -35,10 +38,10 @@
     </resultMap>
 
     <sql id="cols">
-        e.id, e.project, e.http_method, e.path, e.handler, e.source_file, e.summary,
+        e.id, e.project, e.http_method, e.path, e.code_path, e.handler, e.source_file, e.summary,
         e.status, e.change_flag, e.source_branch, e.change_note, e.fields_snapshot,
         e.capture_meta, e.doc_meta, e.tables_json, e.auth_required, e.callers_json, e.caller_status, e.callers_scanned_at,
-        e.retired_at, e.retired_by, e.level_manual, e.level_set_by, e.last_synced_at, e.created_at, e.updated_at
+        e.retired_at, e.retired_by, e.level_manual, e.level_set_by, e.gone_at, e.gone_ref, e.last_synced_at, e.created_at, e.updated_at
     </sql>
 
     <select id="search" resultMap="endpointMap">
@@ -65,6 +68,7 @@
             </if>
             <if test="keyword != null and keyword != ''">
                 AND (e.path LIKE CONCAT('%', #{keyword}, '%')
+                     OR e.code_path LIKE CONCAT('%', #{keyword}, '%')
                      OR e.handler LIKE CONCAT('%', #{keyword}, '%')
                      OR e.summary LIKE CONCAT('%', #{keyword}, '%'))
             </if>
@@ -115,11 +119,11 @@
 
     <insert id="insert" parameterType="com.mobile.standalone.entity.ApiEndpoint">
         INSERT INTO api_endpoints
-            (id, project, http_method, path, handler, source_file, summary, status,
+            (id, project, http_method, path, code_path, handler, source_file, summary, status,
              change_flag, source_branch, change_note, fields_snapshot, capture_meta, doc_meta, tables_json,
              last_synced_at, created_at, updated_at)
         VALUES
-            (#{id}, #{project}, #{httpMethod}, #{path}, #{handler}, #{sourceFile}, #{summary},
+            (#{id}, #{project}, #{httpMethod}, #{path}, #{codePath}, #{handler}, #{sourceFile}, #{summary},
              #{status}, #{changeFlag}, #{sourceBranch}, #{changeNote}, #{fieldsSnapshot},
              #{captureMeta}, #{docMeta}, #{tablesJson}, #{lastSyncedAt}, NOW(), NOW())
     </insert>
@@ -127,6 +131,7 @@
     <update id="update" parameterType="com.mobile.standalone.entity.ApiEndpoint">
         UPDATE api_endpoints
         <set>
+            <if test="codePath != null">code_path = #{codePath},</if>
             <if test="handler != null">handler = #{handler},</if>
             <if test="sourceFile != null">source_file = #{sourceFile},</if>
             <if test="summary != null">summary = #{summary},</if>
@@ -144,17 +149,162 @@
         WHERE id = #{id}
     </update>
 
-    <update id="updateProject">
-        UPDATE api_endpoints SET project = #{project}, updated_at = NOW() WHERE id = #{id}
+    <!-- 轻量清单：不带用例统计，按代码路径认接口时用 -->
+    <select id="listByProject" resultMap="endpointMap">
+        SELECT <include refid="cols"/>, 0 AS case_count
+        FROM api_endpoints e
+        WHERE e.project = #{project}
+        <if test="httpMethod != null and httpMethod != ''">AND e.http_method = #{httpMethod}</if>
+    </select>
+
+    <!-- 改成客户端实际调的路径（带网关前缀）；调用方先确认过新路径没被占 -->
+    <update id="updatePath">
+        UPDATE api_endpoints SET path = #{path}, updated_at = NOW() WHERE id = #{id}
     </update>
 
-    <update id="markDeprecatedNotIn">
-        UPDATE api_endpoints SET status = 'DEPRECATED', updated_at = NOW()
-        WHERE project = #{project} AND status &lt;&gt; 'DEPRECATED'
-        <if test="keepIds != null and keepIds.size() > 0">
-            AND id NOT IN
-            <foreach collection="keepIds" item="kid" open="(" separator="," close=")">#{kid}</foreach>
-        </if>
+    <!-- null 也要写进去：接口重新出现时清掉 -->
+    <update id="updateGone">
+        UPDATE api_endpoints SET gone_at = #{goneAt}, gone_ref = #{goneRef} WHERE id = #{id}
+    </update>
+
+    <!-- 老数据：源码扫出来、没抓过包的，path 就是代码路径 -->
+    <update id="backfillCodePath">
+        UPDATE api_endpoints SET code_path = path
+         WHERE code_path IS NULL AND source_file IS NOT NULL AND source_file &lt;&gt; ''
+           AND (capture_meta IS NULL OR capture_meta = '')
+    </update>
+
+    <!-- 合并重复接口：用例跟着挪；请求路径还是旧的代码路径的，换成实际调的路径 -->
+    <update id="moveCases">
+        UPDATE api_test_cases
+           SET endpoint_id = #{toId},
+               path = CASE WHEN path = #{fromPath} THEN #{toPath} ELSE path END
+         WHERE endpoint_id = #{fromId}
+    </update>
+
+    <update id="moveRequirementLinks">
+        UPDATE requirement_endpoints SET endpoint_id = #{toId} WHERE endpoint_id = #{fromId}
+    </update>
+
+    <update id="moveChanges">
+        UPDATE IGNORE api_endpoint_changes SET endpoint_id = #{toId} WHERE endpoint_id = #{fromId}
+    </update>
+
+    <delete id="deleteChangesOf">
+        DELETE FROM api_endpoint_changes WHERE endpoint_id = #{endpointId}
+    </delete>
+
+    <!-- ===== 变更标记按分支存 ===== -->
+
+    <delete id="deleteChangesByBranch">
+        DELETE FROM api_endpoint_changes WHERE branch = #{branch}
+        <if test="project != null and project != ''">AND project = #{project}</if>
+    </delete>
+
+    <insert id="upsertChange">
+        REPLACE INTO api_endpoint_changes
+            (endpoint_id, project, branch, change_flag, change_note, change_type, analyzed_at)
+        VALUES (#{endpointId}, #{project}, #{branch}, #{changeFlag}, #{changeNote}, #{changeType}, NOW())
+    </insert>
+
+    <insert id="upsertChangeWithSnapshot">
+        REPLACE INTO api_endpoint_changes
+            (endpoint_id, project, branch, change_flag, change_note, change_type, analyzed_at,
+             handler, summary, source_file, fields_snapshot, tables_json)
+        VALUES (#{endpointId}, #{project}, #{branch}, #{changeFlag}, #{changeNote}, #{changeType}, NOW(),
+                #{handler}, #{summary}, #{sourceFile}, #{fieldsSnapshot}, #{tablesJson})
+    </insert>
+
+    <select id="listBranchSnapshots" resultType="map">
+        SELECT endpoint_id AS endpointId, project, change_flag AS changeFlag, change_type AS changeType,
+               handler, summary, source_file AS sourceFile, fields_snapshot AS fieldsSnapshot,
+               tables_json AS tablesJson
+          FROM api_endpoint_changes
+         WHERE branch = #{branch}
+        <if test="project != null and project != ''">AND project = #{project}</if>
+    </select>
+
+    <select id="listChangesOf" resultType="map">
+        SELECT endpoint_id AS endpointId, branch, change_flag AS changeFlag, change_note AS changeNote,
+               change_type AS changeType, analyzed_at AS analyzedAt
+          FROM api_endpoint_changes
+         WHERE endpoint_id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+         ORDER BY analyzed_at DESC
+    </select>
+
+    <update id="clearSourceBranchOf">
+        UPDATE api_endpoints SET source_branch = NULL, updated_at = NOW()
+         WHERE source_branch = #{branch}
+        <if test="project != null and project != ''">AND project = #{project}</if>
+    </update>
+
+    <update id="markDeprecated">
+        UPDATE api_endpoints SET status = 'DEPRECATED', updated_at = NOW() WHERE id = #{id}
+    </update>
+
+    <!-- 列上的 change_flag 只是「最近一次分析」的快照，真正的数据在分支表里 -->
+    <update id="recomputeChangeFlags">
+        UPDATE api_endpoints e
+           SET e.change_flag = (SELECT c.change_flag FROM api_endpoint_changes c
+                                 WHERE c.endpoint_id = e.id ORDER BY c.analyzed_at DESC, c.branch LIMIT 1),
+               e.change_note = (SELECT c.change_note FROM api_endpoint_changes c
+                                 WHERE c.endpoint_id = e.id ORDER BY c.analyzed_at DESC, c.branch LIMIT 1)
+         WHERE e.project IN
+        <foreach collection="projects" item="pc" open="(" separator="," close=")">#{pc}</foreach>
+    </update>
+
+    <select id="projectsOfBranch" resultType="string">
+        SELECT DISTINCT project FROM api_endpoint_changes WHERE branch = #{branch}
+        UNION
+        SELECT DISTINCT project FROM api_endpoints WHERE source_branch = #{branch}
+    </select>
+
+    <select id="endpointIdsOfBranch" resultType="string">
+        SELECT endpoint_id FROM api_endpoint_changes WHERE project = #{project} AND branch = #{branch}
+    </select>
+
+    <select id="listChanges" resultType="map">
+        SELECT endpoint_id AS endpointId, branch, change_flag AS changeFlag, change_note AS changeNote,
+               change_type AS changeType, analyzed_at AS analyzedAt
+          FROM api_endpoint_changes
+        <where>
+            <if test="projectCodes != null and projectCodes.size() > 0">
+                project IN
+                <foreach collection="projectCodes" item="pc" open="(" separator="," close=")">#{pc}</foreach>
+            </if>
+        </where>
+         ORDER BY analyzed_at DESC
+    </select>
+
+    <select id="summaryChangesByBranch" resultType="map">
+        SELECT branch, project, COUNT(*) AS total,
+               SUM(CASE WHEN change_flag IS NOT NULL AND change_flag &lt;&gt; '' THEN 1 ELSE 0 END) AS changed
+          FROM api_endpoint_changes
+         GROUP BY branch, project
+         ORDER BY total DESC
+    </select>
+
+    <select id="countChanges" resultType="int">
+        SELECT COUNT(1) FROM api_endpoint_changes
+    </select>
+
+    <!-- 只在分支表还是空的时候跑一次：老版本把标记直接写在列上，分支记在 source_branch -->
+    <insert id="migrateColumnFlags">
+        INSERT IGNORE INTO api_endpoint_changes
+            (endpoint_id, project, branch, change_flag, change_note, change_type, analyzed_at)
+        SELECT id, project, source_branch, change_flag, change_note, NULL, COALESCE(last_synced_at, updated_at, NOW())
+          FROM api_endpoints
+         WHERE change_flag IS NOT NULL AND change_flag &lt;&gt; ''
+           AND source_branch IS NOT NULL AND source_branch &lt;&gt; ''
+    </insert>
+
+    <update id="clearSourceBranch">
+        UPDATE api_endpoints SET source_branch = NULL, updated_at = NOW() WHERE source_branch = #{branch}
+    </update>
+
+    <update id="updateProject">
+        UPDATE api_endpoints SET project = #{project}, updated_at = NOW() WHERE id = #{id}
     </update>
 
     <update id="clearChangeFlags">

@@ -29,7 +29,7 @@ public final class ApiAppCatalog {
     private static final List<String> WMPVP_GITLAB = List.of(
             "seckill", "video", "robot", "xiaomai", "activity", "activity-center",
             "admin", "community", "decoration", "engine", "event", "push", "ban", "user",
-            "data-center", "data-agent", "data-provider", "esports-api", "global-agent",
+            "data-center", "data-agent", "data-provider", "esports-api",
             "message-center", "news-publish", "passport", "steam-web", "task-center",
             "vip-center", "wmpay", "wmpayplus");
 

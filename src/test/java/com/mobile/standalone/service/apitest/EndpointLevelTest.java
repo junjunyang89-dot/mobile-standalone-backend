@@ -66,4 +66,40 @@ class EndpointLevelTest {
         ep.setLevelManual(null);
         assertEquals(EndpointLevel.UNUSED, ApiEndpointService.levelOf(ep));
     }
+
+    @Test
+    void capturedIsCoreEvenWhenScanMissesItButManualStillWins() {
+        var ep = new com.mobile.standalone.entity.ApiEndpoint();
+        ep.setCaptureMeta("{\"capturedAt\":\"2026-10-02T12:00\"}");
+        assertEquals(EndpointLevel.CORE, ApiEndpointService.levelOf(ep));
+        ep.setCallerStatus("NONE");
+        assertEquals(EndpointLevel.CORE, ApiEndpointService.levelOf(ep));
+        ep.setLevelManual("NORMAL");
+        assertEquals(EndpointLevel.NORMAL, ApiEndpointService.levelOf(ep));
+
+        var v = EndpointLevel.of("NONE", null, true);
+        assertTrue(v.reason().startsWith("抓包抓到客户端在调"), v.reason());
+        assertTrue(v.reason().contains("搜不到调用"), v.reason());
+        assertEquals("抓包抓到客户端在调", EndpointLevel.of(null, null, true).reason());
+        assertEquals(EndpointLevel.IMPORTANT,
+                EndpointLevel.of("USED", callers("app_esports_harmonyos"), false).level());
+    }
+
+    @Test
+    void markCapturedAddsTimestampOnceAndKeepsExistingMeta() {
+        var mapper = org.mockito.Mockito.mock(com.mobile.standalone.mapper.ApiEndpointMapper.class);
+        var ep = new com.mobile.standalone.entity.ApiEndpoint();
+        ep.setId("e1");
+        ep.setCaptureMeta("{\"queryParams\":{\"a\":\"1\"}}");
+        org.mockito.Mockito.when(mapper.findById("e1")).thenReturn(ep);
+        var svc = new ApiEndpointService(mapper, null);
+
+        svc.markCaptured("e1");
+        assertTrue(ep.getCaptureMeta().contains("capturedAt"), ep.getCaptureMeta());
+        assertTrue(ep.getCaptureMeta().contains("queryParams"), ep.getCaptureMeta());
+        org.mockito.Mockito.verify(mapper).update(ep);
+
+        svc.markCaptured("e1");
+        org.mockito.Mockito.verify(mapper, org.mockito.Mockito.times(1)).update(ep);
+    }
 }

@@ -22,6 +22,8 @@ public final class EndpointChangeFlag {
     public static final String PARAM_CHANGED = "PARAM_CHANGED";
     public static final String FIELD_CHANGED = "FIELD_CHANGED";
     public static final String IMPL_CHANGED = "IMPL_CHANGED";
+    /** 分支上删掉了；上线前全量里那条照旧，上线时才标废弃 */
+    public static final String REMOVED = "REMOVED";
 
     /** 对比分析给出的一条接口变更，只取清单用得上的部分 */
     public record Input(String changeType, String risk, int paramChanges,

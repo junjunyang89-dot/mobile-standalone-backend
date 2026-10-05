@@ -43,6 +43,10 @@ public class ApiEndpointController {
     private final com.mobile.standalone.service.apitest.InterfaceDocImportService docImportService;
     private final com.mobile.standalone.service.apitest.ApiAuthService authService;
     private final com.mobile.standalone.service.apitest.CaptureCatalogService captureCatalogService;
+    private final com.mobile.standalone.service.apitest.ControllerBackfillService controllerBackfillService;
+    private final com.mobile.standalone.service.apitest.EndpointInsightService insightService;
+    private final com.mobile.standalone.service.apitest.SourceCaseService sourceCaseService;
+    private final com.mobile.standalone.service.apitest.SourceScanService sourceScanService;
 
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
 
@@ -65,6 +69,9 @@ public class ApiEndpointController {
             @RequestParam(required = false) String status) {
 
         List<ApiEndpoint> rows = endpointService.search(project, keyword, changeFlag, status);
+        Map<String, List<Map<String, Object>>> branchesById = endpointService.branchesOf(
+                project == null || project.isBlank() ? null
+                        : com.mobile.standalone.service.apitest.ApiAppCatalog.matchProjectCodes(project));
         // 项目配了业务码的话，执行时每条用例都会自动带上 code 断言——
         // 只看存库的断言文本会把它们全判成「仅探活」，而页面上恰好又建议人去配业务码
         java.util.Map<String, Boolean> bizCodeByProject = new java.util.HashMap<>();
@@ -90,6 +97,11 @@ public class ApiEndpointController {
             vo.put("treeKey", com.mobile.standalone.service.ApiProjectService.inventoryProjectKey(e.getProject()));
             vo.put("httpMethod", e.getHttpMethod());
             vo.put("path", e.getPath());
+            // 和 path 不同时说明客户端调的路径带网关前缀，页面上把代码里的路径也给出来
+            vo.put("codePath", e.getCodePath());
+            vo.put("goneAt", e.getGoneAt());
+            vo.put("goneRef", e.getGoneRef());
+            vo.put("branches", branchesById.getOrDefault(e.getId(), List.of()));
             vo.put("handler", e.getHandler());
             vo.put("sourceFile", e.getSourceFile());
             vo.put("tablesJson", e.getTablesJson());
@@ -113,7 +125,8 @@ public class ApiEndpointController {
             vo.put("actionable", st.actionable());
             vo.put("hasCaptureMeta", e.getCaptureMeta() != null && !e.getCaptureMeta().isBlank());
             vo.put("hasDocMeta", e.getDocMeta() != null && !e.getDocMeta().isBlank());
-            EndpointLevel.Verdict auto = EndpointLevel.of(e.getCallerStatus(), e.getCallersJson());
+            EndpointLevel.Verdict auto = EndpointLevel.of(e.getCallerStatus(), e.getCallersJson(),
+                    ApiEndpointService.isCaptured(e));
             EndpointLevel manual = EndpointLevel.parse(e.getLevelManual());
             EndpointLevel level = manual != null ? manual : auto.level();
             vo.put("level", level == null ? null : level.name());
@@ -146,6 +159,69 @@ public class ApiEndpointController {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * 变更分析里点开一个接口：按 项目 + 方法 + 路径 找到清单里的那一行和挂在它下面的用例。
+     * <p>
+     * 分析报告里的路径是代码里的，清单里的可能带网关前缀，所以精确对不上时按后缀再找一次。
+     * 用例顺带判一下「是不是只验了状态码」——必测清单里那句「先看是不是只验了 200」，这里直接给结论。
+     */
+    @GetMapping("/lookup")
+    public ResponseEntity<?> lookup(@RequestParam String project, @RequestParam String method,
+                                    @RequestParam String path) {
+        String m = method.trim().toUpperCase(java.util.Locale.ROOT);
+        String p = path.trim();
+        String seg = p.substring(p.lastIndexOf('/') + 1);
+        List<ApiEndpoint> rows = endpointService.search(project, seg.isBlank() ? p : seg, null, null);
+        java.util.function.Predicate<ApiEndpoint> sameMethod = e -> m.equalsIgnoreCase(e.getHttpMethod())
+                || "ANY".equalsIgnoreCase(e.getHttpMethod());
+        ApiEndpoint hit = rows.stream().filter(sameMethod).filter(e -> p.equals(e.getPath())).findFirst()
+                .orElseGet(() -> rows.stream().filter(sameMethod)
+                        .filter(e -> e.getPath() != null && (e.getPath().endsWith(p) || p.endsWith(e.getPath())))
+                        .findFirst().orElse(null));
+        if (hit == null) {
+            return ResponseEntity.ok(Map.of("found", false,
+                    "message", "接口清单里还没有这个接口：先在接口管理里全量扫描一次源码"));
+        }
+        boolean bizCode = projectHasBizCode(hit.getProject());
+        List<Map<String, Object>> cases = new ArrayList<>();
+        for (var c : caseMapper.findByEndpointId(hit.getId())) {
+            List<String> types = assertionTypes(c.getAssertions());
+            Map<String, Object> vo = new LinkedHashMap<>();
+            vo.put("id", c.getId());
+            vo.put("name", c.getName());
+            vo.put("enabled", c.getEnabled());
+            vo.put("environment", c.getEnvironment());
+            vo.put("intent", c.getIntent());
+            vo.put("createdBy", c.getCreatedBy());
+            vo.put("assertCount", types.size());
+            vo.put("assertTypes", types);
+            vo.put("onlyStatus", types.stream().allMatch(t -> "status".equals(t) || "responseTime".equals(t)));
+            cases.add(vo);
+        }
+        Map<String, Object> ep = new LinkedHashMap<>();
+        ep.put("id", hit.getId());
+        ep.put("project", hit.getProject());
+        ep.put("httpMethod", hit.getHttpMethod());
+        ep.put("path", hit.getPath());
+        ep.put("summary", hit.getSummary());
+        return ResponseEntity.ok(Map.of("found", true, "endpoint", ep, "bizCode", bizCode, "cases", cases));
+    }
+
+    static List<String> assertionTypes(String assertions) {
+        List<String> out = new ArrayList<>();
+        if (assertions == null || assertions.isBlank()) {
+            return out;
+        }
+        try {
+            for (var a : JSON.readTree(assertions)) {
+                out.add(a.path("type").asText(""));
+            }
+        } catch (Exception ignore) {
+            // 断言不是合法 JSON 就当没有
+        }
+        return out;
     }
 
     /** 接口清单左侧树：分类 → 项目 + 接口数（环境在页面顶部分开选） */
@@ -240,7 +316,13 @@ public class ApiEndpointController {
         return ResponseEntity.ok(Map.of("ok", true, "updated", n));
     }
 
-    /** 抓包待归类的接口归到项目。body: {ids: [...], project} */
+    /** 按路径前缀看明显放错项目的接口（源码里找得到的不算） */
+    @GetMapping("/misplaced")
+    public ResponseEntity<?> misplaced() {
+        return ResponseEntity.ok(Map.of("items", captureCatalogService.misplaced()));
+    }
+
+    /** 接口连同用例挪到另一个项目（待归类的归类也走这里）。body: {ids: [...], project} */
     @PostMapping("/classify")
     public ResponseEntity<?> classify(@RequestBody Map<String, Object> body) {
         List<String> ids = body != null && body.get("ids") instanceof List<?> list
@@ -405,62 +487,165 @@ public class ApiEndpointController {
      * 按本地源码目录全量扫一遍，把 Controller 里的接口录进这个项目。
      * 目录不传时用项目管理里配的仓库路径。
      */
+    /**
+     * 抓包收进来的接口没有 Controller：到本地仓库里找声明它的方法补上。
+     * body: {ids?: [...]}，不给就补项目下所有还没有源文件的。
+     */
+    /**
+     * 接口体检：读源码讲清字段含义、会返回哪些业务码、要不要登录、有哪些可疑写法。
+     * body: {endpointId?} 或 {project, method, path}，可带 respSample（抓包响应）用来对字段。
+     */
+    @PostMapping("/insight")
+    public ResponseEntity<?> insight(@RequestBody Map<String, String> body) {
+        try {
+            return ResponseEntity.ok(insightService.inspect(body.get("endpointId"), body.get("project"),
+                    body.get("method"), body.get("path"), body.get("respSample")));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("message",
+                    e.getMessage() == null ? "体检失败：" + e.getClass().getSimpleName() : e.getMessage()));
+        }
+    }
+
+    /** 按源码生成参数用例的预览：参数表 + 会生成哪些用例。body: {endpointId} */
+    @PostMapping("/source-cases/preview")
+    public ResponseEntity<?> sourceCasesPreview(@RequestBody Map<String, String> body) {
+        try {
+            return ResponseEntity.ok(sourceCaseService.preview(body.get("endpointId")));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("message",
+                    e.getMessage() == null ? "预览失败：" + e.getClass().getSimpleName() : e.getMessage()));
+        }
+    }
+
+    /**
+     * 按源码生成参数用例：抓包请求当底子，每条只改一个参数；GET 试跑一次，和源码推断一致的启用。
+     * body: {ids: [...], tryRun?: true}
+     */
+    @PostMapping("/source-cases")
+    public ResponseEntity<?> sourceCases(@RequestBody Map<String, Object> body) {
+        List<String> ids = new ArrayList<>();
+        if (body.get("ids") instanceof List<?> l) {
+            l.forEach(x -> {
+                if (x != null) ids.add(String.valueOf(x));
+            });
+        }
+        if (ids.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "先选接口"));
+        }
+        if (ids.size() > 50) {
+            return ResponseEntity.badRequest().body(Map.of("message", "一次最多 50 个接口"));
+        }
+        boolean tryRun = !Boolean.FALSE.equals(body.get("tryRun"));
+        return ResponseEntity.ok(sourceCaseService.generate(ids, tryRun));
+    }
+
+    @PostMapping("/projects/{project}/backfill-controllers")
+    public ResponseEntity<?> backfillControllers(@PathVariable String project,
+                                                 @RequestBody(required = false) Map<String, Object> body) {
+        List<String> ids = new ArrayList<>();
+        if (body != null && body.get("ids") instanceof List<?> l) {
+            l.forEach(x -> {
+                if (x != null) ids.add(String.valueOf(x));
+            });
+        }
+        try {
+            return ResponseEntity.ok(controllerBackfillService.backfill(project, ids));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("message",
+                    e.getMessage() == null ? "扫描仓库失败" : e.getMessage()));
+        }
+    }
+
+    /**
+     * 全量扫描一个项目的接口。
+     * <p>
+     * 默认读<b>基线分支</b>（项目管理里配的 baseBranch，没配是 master）：先 {@code git fetch}，
+     * 再把 {@code origin/master} 那个提交导出来扫——不切分支、不碰本地改动。
+     * 直接扫仓库目录的话，扫到的是「当前所在分支 + 没提交的改动」，不是「master 上有哪些接口」。
+     * <p>
+     * body 里给了 {@code dir} 就照旧扫那个目录（不一定是 git 仓库），这时不标「基线里没有」。
+     * 给了 {@code ref} 就扫那个分支，同样不标——只有基线说了算。
+     */
     @PostMapping("/projects/{project}/scan-source")
     public ResponseEntity<?> scanSource(@PathVariable String project,
                                         @RequestBody(required = false) Map<String, String> body) {
-        var p = projectService.get(project);
-        if (p == null) {
-            return ResponseEntity.badRequest().body(Map.of("message", "项目不存在: " + project));
-        }
-        String dir = body == null ? null : body.get("dir");
-        if (dir == null || dir.isBlank()) {
-            dir = p.getRepoPath();
-        }
-        if (dir == null || dir.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("message", "没给源码目录，项目管理里也没配仓库路径"));
-        }
+        Map<String, String> b = body == null ? Map.of() : body;
         try {
-            java.nio.file.Path source = java.nio.file.Path.of(dir.trim()).toAbsolutePath().normalize();
-            var scan = com.mobile.standalone.service.apitest.SourceEndpointScanner.scan(source);
-            var saved = endpointService.upsertFromSource(p.getCode(), scan.endpoints());
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("dir", dir.trim());
-            out.put("javaFiles", scan.javaFiles());
-            out.put("controllers", scan.controllers());
-            out.put("endpoints", scan.endpoints().size());
-            out.put("created", saved.created());
-            out.put("updated", saved.updated());
-            out.put("authRequired", scan.endpoints().stream().filter(s -> Boolean.TRUE.equals(s.auth())).count());
-            out.put("tokenHeaders", scan.tokenHeaders());
-            authService.rememberDetectedHeaders(p.getCode(), scan.tokenHeaders());
-            // 仓库一般并排放在同一个目录下，默认就搜后端仓库的上一级
-            List<java.nio.file.Path> callerRoots = new ArrayList<>();
-            String callerDirs = body == null ? null : body.get("callerDirs");
-            if (callerDirs != null && !callerDirs.isBlank()) {
-                for (String d : callerDirs.split("[\\n,;]")) {
-                    if (!d.isBlank()) {
-                        callerRoots.add(java.nio.file.Path.of(d.trim()));
-                    }
-                }
-            } else if (source.getParent() != null) {
-                callerRoots.add(source.getParent());
-            }
-            out.put("callerDirs", callerRoots.stream().map(String::valueOf).toList());
-            try {
-                var callers = endpointService.syncCallers(p.getCode(), callerRoots, source);
-                out.put("callerUsed", callers.used());
-                out.put("callerDefOnly", callers.defOnly());
-                out.put("callerNone", callers.none());
-            } catch (Exception e) {
-                // 接口已经入库了，搜调用方失败不该让整次扫描算失败
-                out.put("callerError", e.getMessage() == null ? "搜调用方失败" : e.getMessage());
-            }
-            return ResponseEntity.ok(out);
+            return ResponseEntity.ok(sourceScanService.scanProject(project, b.get("dir"), b.get("ref"),
+                    "true".equals(b.get("forceFetch")), b.get("callerDirs")));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of(
                     "message", e.getMessage() == null ? "扫描失败" : e.getMessage()));
         }
+    }
+
+    /** 一键把所有后端项目的基线分支扫一遍；后台跑，返回任务进度 */
+    @PostMapping("/scan-all")
+    public ResponseEntity<?> scanAll() {
+        return ResponseEntity.ok(jobView(sourceScanService.startScanAll()));
+    }
+
+    /** jobId 为 latest 时返回最近一个任务；没有任务返回空对象 */
+    @GetMapping("/scan-all/{jobId}")
+    public ResponseEntity<?> scanAllProgress(@PathVariable String jobId) {
+        var job = "latest".equals(jobId) ? sourceScanService.latestJob() : sourceScanService.job(jobId);
+        return ResponseEntity.ok(job == null ? Map.of() : jobView(job));
+    }
+
+    private static Map<String, Object> jobView(com.mobile.standalone.service.apitest.SourceScanService.Job job) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", job.id);
+        out.put("startedAt", job.startedAt);
+        out.put("finishedAt", job.finishedAt);
+        out.put("done", job.done());
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (var it : job.items) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("project", it.project);
+            m.put("name", it.name);
+            m.put("state", it.state);
+            m.put("error", it.error);
+            m.put("result", it.result);
+            m.put("levels", it.levels);
+            items.add(m);
+        }
+        out.put("items", items);
+        return out;
+    }
+
+    /** 每个项目最近一次全量扫描：基于哪个分支、哪个提交、什么时候扫的 */
+    @GetMapping("/source-scans")
+    public ResponseEntity<?> sourceScans(@RequestParam(required = false) String project) {
+        List<String> codes = project == null || project.isBlank() ? null
+                : com.mobile.standalone.service.apitest.ApiAppCatalog.matchProjectCodes(project);
+        return ResponseEntity.ok(endpointService.lastScans(codes));
+    }
+
+    /**
+     * 存量重复：同一个接口一条是抓包建的（带网关前缀），一条是源码扫的。只读，合并前先给人看清单。
+     */
+    @PostMapping("/duplicates/preview")
+    public ResponseEntity<?> duplicatesPreview(@RequestBody(required = false) Map<String, Object> body) {
+        String project = body == null || body.get("project") == null ? null : String.valueOf(body.get("project"));
+        return ResponseEntity.ok(endpointService.duplicates(project));
+    }
+
+    @PostMapping("/duplicates/merge")
+    public ResponseEntity<?> duplicatesMerge(@RequestBody Map<String, Object> body) {
+        String project = body.get("project") == null ? null : String.valueOf(body.get("project"));
+        List<String> ids = new ArrayList<>();
+        if (body.get("dropIds") instanceof List<?> l) {
+            l.forEach(o -> ids.add(String.valueOf(o)));
+        }
+        if (ids.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "没选要合并的接口"));
+        }
+        return ResponseEntity.ok(Map.of("merged", endpointService.mergeDuplicates(project, ids)));
     }
 }

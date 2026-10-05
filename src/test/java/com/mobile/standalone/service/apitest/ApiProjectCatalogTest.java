@@ -33,7 +33,7 @@ class ApiProjectCatalogTest {
         assertEquals("POGPOG", ApiProjectCatalog.resolveCategoryKey("pogpog-api", "POGPOG"));
         assertEquals("中间件", ApiProjectCatalog.resolveCategoryKey("app-seckill", "中间件"));
         assertEquals("中间件", ApiProjectCatalog.categoryDisplayLabel("中间件"));
-        assertEquals("电竞APP", ApiProjectCatalog.categoryDisplayLabel("APP"));
+        assertEquals("电竞", ApiProjectCatalog.categoryDisplayLabel("APP"));
     }
 
     @Test

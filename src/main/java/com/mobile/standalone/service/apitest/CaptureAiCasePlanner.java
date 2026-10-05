@@ -3,6 +3,7 @@ package com.mobile.standalone.service.apitest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,8 +30,13 @@ final class CaptureAiCasePlanner {
     private CaptureAiCasePlanner() {
     }
 
+    /** @param codeNotes 源码体检读出来的字段含义、业务码、登录要求，没有源码时为空 */
     record Input(String method, String path, String summary, Map<String, String> query, String reqBody,
-                 String respSample, String codePath, String successValue) {
+                 String respSample, String codePath, String successValue, String codeNotes) {
+        Input(String method, String path, String summary, Map<String, String> query, String reqBody,
+              String respSample, String codePath, String successValue) {
+            this(method, path, summary, query, reqBody, respSample, codePath, successValue, null);
+        }
     }
 
     record PlannedCase(String name, boolean normal, Map<String, String> query, String body, String basis,
@@ -39,14 +45,15 @@ final class CaptureAiCasePlanner {
 
     static String prompt(Input in) {
         StringBuilder sb = new StringBuilder();
-        sb.append("你是接口测试工程师。下面是测试环境抓包抓到的一次真实请求和响应，据此设计这个接口的测试用例和断言。\n\n");
+        sb.append("你是接口测试工程师。下面是抓包抓到的一次真实请求和响应，据此设计这个接口的测试用例和断言。\n\n");
         sb.append("接口：").append(in.method()).append(' ').append(in.path());
         if (in.summary() != null && !in.summary().isBlank()) {
             sb.append("（").append(in.summary().trim()).append("）");
         }
         sb.append('\n');
-        if (in.query() != null && !in.query().isEmpty()) {
-            sb.append("请求参数：").append(toJson(in.query())).append('\n');
+        Map<String, String> shown = noAuth(in.query());
+        if (!shown.isEmpty()) {
+            sb.append("请求参数：").append(toJson(shown)).append('\n');
         }
         if (in.reqBody() != null && !in.reqBody().isBlank()) {
             sb.append("请求体：").append(truncate(in.reqBody(), 3000)).append('\n');
@@ -56,6 +63,18 @@ final class CaptureAiCasePlanner {
             sb.append("业务成功码：").append(in.codePath()).append(" = ")
                     .append(in.successValue() == null || in.successValue().isBlank() ? "0" : in.successValue())
                     .append('\n');
+        }
+        if (in.codeNotes() != null && !in.codeNotes().isBlank()) {
+            sb.append("\n后端源码里读出来的（比抓包更能说明字段含义和报错码，但没跑过）：\n")
+                    .append(truncate(in.codeNotes(), 2500)).append('\n')
+                    .append("边界用例的报错码优先用上面列出的错误码；源码里的可疑写法不要写成期望结果。")
+                    .append("不带 token 的用例平台会单独生成，这里不要写。\n");
+        }
+        String dated = datedParams(shown);
+        if (dated != null) {
+            sb.append("\n注意：").append(dated)
+                    .append(" 是日期/时间参数，用例以后照抄这个值重放，那天的列表可能已经是空的——")
+                    .append("列表只断言节点存在，不要断言列表里某一项的字段。\n");
         }
         sb.append("""
 
@@ -117,17 +136,20 @@ final class CaptureAiCasePlanner {
     private static PlannedCase normalCase(String name, JsonNode c, Input in) {
         ArrayNode asserts = verified(c.path("assertions"), in.respSample());
         String failCode = capturedFailure(in);
+        if (failCode == null) {
+            FieldTypeAsserts.add(asserts, in.respSample(), AssertionSource.CAPTURE, "抓包响应里");
+        }
         boolean enabled = failCode == null && asserts.size() > 1;
         String note;
         if (failCode != null) {
             note = "抓包这次返回的就是失败（" + in.codePath() + "=" + failCode + "），换一次成功的请求重抓";
         } else if (!enabled) {
-            note = "模型给的断言在抓包响应里都不成立，只留了状态码，补上断言再启用";
+            note = "抓包响应里没有可断言的字段，只留了状态码，补上断言再启用";
         } else {
             note = "断言已用抓包响应验证过（" + (asserts.size() - 1) + " 条）";
         }
         String body = "GET".equalsIgnoreCase(in.method()) ? null : in.reqBody();
-        return new PlannedCase(name, true, noAuth(in.query()), body, c.path("basis").asText(""),
+        return new PlannedCase(name, true, authAsVariable(in.query()), body, c.path("basis").asText(""),
                 asserts.toString(), enabled, note);
     }
 
@@ -136,7 +158,11 @@ final class CaptureAiCasePlanner {
         for (JsonNode x : c.path("assertions")) {
             if (asserts.size() >= MAX_ASSERTS) break;
             if (wellFormed(x) && (x.has("equals") || x.has("notEquals"))) {
-                asserts.add(x.deepCopy());
+                ObjectNode a = JSON.createObjectNode();
+                a.put("type", "jsonPath").put("path", x.get("path").asText());
+                if (x.has("equals")) a.set("equals", x.get("equals").deepCopy());
+                if (x.has("notEquals")) a.set("notEquals", x.get("notEquals").deepCopy());
+                asserts.add(AssertionSource.mark(a, AssertionSource.AI, "AI 按参数推测的报错，没有真实响应可验"));
             }
         }
         Map<String, String> query = new LinkedHashMap<>();
@@ -149,6 +175,10 @@ final class CaptureAiCasePlanner {
                 }
             });
         }
+        // 边界用例测的是别的参数，登录态照样要带，否则全死在鉴权上
+        authAsVariable(in.query()).forEach((k, v) -> {
+            if (AUTH_PARAMS.contains(k.toLowerCase())) query.putIfAbsent(k, v);
+        });
         JsonNode body = c.get("body");
         String bodyText = body == null || body.isNull() || "GET".equalsIgnoreCase(in.method()) ? null : body.toString();
         return new PlannedCase(name, false, query, bodyText, c.path("basis").asText(""),
@@ -159,7 +189,8 @@ final class CaptureAiCasePlanner {
     /** 状态码打底，模型的断言逐条拿抓包响应验；带数组下标的值断言不留——列表第一条换个时间就不是它了 */
     static ArrayNode verified(JsonNode proposed, String respSample) {
         ArrayNode out = JSON.createArrayNode();
-        out.addObject().put("type", "status").put("equals", 200);
+        AssertionSource.mark(out.addObject().put("type", "status").put("equals", 200),
+                AssertionSource.DEFAULT, "成功用例固定断言 HTTP 200");
         if (proposed == null || !proposed.isArray()) {
             return out;
         }
@@ -175,10 +206,13 @@ final class CaptureAiCasePlanner {
             }
             if (actual == null || actual.isMissingNode() || actual.isNull()) continue;
             if (x.path("exists").asBoolean(false)) {
-                out.addObject().put("type", "jsonPath").put("path", path).put("exists", true);
+                AssertionSource.mark(out.addObject().put("type", "jsonPath").put("path", path).put("exists", true),
+                        AssertionSource.CAPTURE, "抓包响应里有这个节点");
             } else if (x.has("equals") && actual.isValueNode() && !path.contains("[")
                     && actual.asText().equals(x.get("equals").asText())) {
-                out.addObject().put("type", "jsonPath").put("path", path).set("equals", actual.deepCopy());
+                ObjectNode a = out.addObject().put("type", "jsonPath").put("path", path);
+                a.set("equals", actual.deepCopy());
+                AssertionSource.mark(a, AssertionSource.CAPTURE, "抓包响应里就是 " + actual.asText());
             }
         }
         return out;
@@ -199,6 +233,33 @@ final class CaptureAiCasePlanner {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    static final String TOKEN_VAR = "{{token}}";
+
+    /**
+     * 抓包 query 里的登录参数换成 {@code {{token}}}：值会过期不能照抄，
+     * 但键必须留着——token 走 query 的网关（?token=…），缺了这个键请求根本不带登录态。
+     */
+    static Map<String, String> authAsVariable(Map<String, String> q) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (q != null) {
+            q.forEach((k, v) -> out.put(k, AUTH_PARAMS.contains(k.toLowerCase()) ? TOKEN_VAR : v));
+        }
+        return out;
+    }
+
+    private static final Pattern DATE_VALUE = Pattern.compile("^\\d{4}-\\d{1,2}-\\d{1,2}([ T+]\\d{1,2}:\\d{2}(:\\d{2})?)?$");
+
+    /** 取值长得像日期的参数名，逗号隔开；没有返回 null */
+    static String datedParams(Map<String, String> q) {
+        if (q == null) {
+            return null;
+        }
+        List<String> names = q.entrySet().stream()
+                .filter(en -> en.getValue() != null && DATE_VALUE.matcher(en.getValue().trim()).matches())
+                .map(Map.Entry::getKey).toList();
+        return names.isEmpty() ? null : String.join("、", names);
     }
 
     private static Map<String, String> noAuth(Map<String, String> q) {

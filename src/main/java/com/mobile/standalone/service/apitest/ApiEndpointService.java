@@ -38,6 +38,9 @@ public class ApiEndpointService {
     private final ApiEndpointMapper endpointMapper;
     private final JdbcTemplate jdbcTemplate;
 
+    /** 扫描时自动废弃基础接口记的操作人；人手取消废弃后下次扫描会再标上 */
+    static final String INFRA_RETIRED_BY = "系统：基础接口";
+
     @PostConstruct
     public void ensureSchema() {
         try {
@@ -90,6 +93,14 @@ public class ApiEndpointService {
                     "VARCHAR(16) NULL COMMENT '人工定的自动化级别 CORE/IMPORTANT/NORMAL/UNUSED，空=按调用方自动算' AFTER retired_by");
             ensureColumn("api_endpoints", "level_set_by",
                     "VARCHAR(100) NULL COMMENT '谁改的级别' AFTER level_manual");
+            ensureColumn("api_endpoints", "code_path",
+                    "VARCHAR(512) NULL COMMENT '源码 Controller 声明的路径（不带网关前缀）' AFTER path");
+            ensureColumn("api_endpoints", "gone_at",
+                    "DATETIME NULL COMMENT '按基线分支扫描时代码里已没有' AFTER level_set_by");
+            ensureColumn("api_endpoints", "gone_ref",
+                    "VARCHAR(255) NULL COMMENT '在哪个分支/提交上发现没有的' AFTER gone_at");
+            endpointMapper.backfillCodePath();
+            ensureChangesTable();
             migrateExistingCases();
             log.info("[api-endpoints] 表已就绪");
         } catch (Exception e) {
@@ -108,11 +119,122 @@ public class ApiEndpointService {
                 if ("endpoint_id".equals(column)) {
                     jdbcTemplate.execute("ALTER TABLE " + table + " ADD INDEX idx_endpoint_id (" + column + ")");
                 }
+                if ("code_path".equals(column)) {
+                    jdbcTemplate.execute("ALTER TABLE " + table
+                            + " ADD INDEX idx_code_path (project, http_method, code_path(255))");
+                }
                 log.info("[api-endpoints] 已补充 {}.{} 列", table, column);
             }
         } catch (Exception e) {
             log.debug("[api-endpoints] {}.{} 列检查跳过: {}", table, column, e.getMessage());
         }
+    }
+
+    /**
+     * 变更标记按分支存。以前标记直接写在接口上，分析 B 分支会把 A 分支的标记清掉——
+     * 两个需求并行提测时，先分析的那个就看不到自己的必测接口了。
+     */
+    private void ensureChangesTable() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS api_endpoint_changes (
+                    endpoint_id VARCHAR(64) NOT NULL,
+                    project VARCHAR(64) NOT NULL,
+                    branch VARCHAR(255) NOT NULL,
+                    change_flag VARCHAR(32) DEFAULT NULL,
+                    change_note VARCHAR(1024) DEFAULT NULL,
+                    change_type VARCHAR(32) DEFAULT NULL,
+                    analyzed_at DATETIME NOT NULL,
+                    PRIMARY KEY (endpoint_id, branch(191)),
+                    INDEX idx_branch (branch(191), project)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """);
+        // 分支版本存在变更行上，全量那条保持 master 的样子，上线时才写回
+        ensureColumn("api_endpoint_changes", "handler", "VARCHAR(255) NULL");
+        ensureColumn("api_endpoint_changes", "summary", "VARCHAR(512) NULL");
+        ensureColumn("api_endpoint_changes", "source_file", "VARCHAR(512) NULL");
+        ensureColumn("api_endpoint_changes", "fields_snapshot", "MEDIUMTEXT NULL");
+        ensureColumn("api_endpoint_changes", "tables_json", "MEDIUMTEXT NULL");
+        forgetBaselineBranches();
+        if (endpointMapper.countChanges() == 0) {
+            int n = endpointMapper.migrateColumnFlags();
+            if (n > 0) {
+                log.info("[api-endpoints] 已把 {} 条变更标记迁到按分支存", n);
+            }
+        }
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS api_source_scans (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    project VARCHAR(64) NOT NULL,
+                    ref_name VARCHAR(255) DEFAULT NULL,
+                    sha VARCHAR(64) DEFAULT NULL,
+                    committed_at DATETIME DEFAULT NULL,
+                    scanned_at DATETIME NOT NULL,
+                    endpoints INT DEFAULT NULL,
+                    summary VARCHAR(1024) DEFAULT NULL,
+                    INDEX idx_project_time (project, scanned_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """);
+    }
+
+    /** 以前拿 master 对比过 testing 之类留下的记录：那不是需求分支，接口本来就在基线里 */
+    private void forgetBaselineBranches() {
+        try {
+            String in = BaselineBranches.names().stream().map(n -> "'" + n + "','origin/" + n + "'")
+                    .collect(java.util.stream.Collectors.joining(","));
+            List<String> projects = jdbcTemplate.queryForList(
+                    "SELECT DISTINCT project FROM api_endpoint_changes WHERE LOWER(branch) IN (" + in + ")"
+                            + " UNION SELECT DISTINCT project FROM api_endpoints WHERE LOWER(source_branch) IN (" + in + ")",
+                    String.class);
+            if (projects.isEmpty()) {
+                return;
+            }
+            int changes = jdbcTemplate.update("DELETE FROM api_endpoint_changes WHERE LOWER(branch) IN (" + in + ")");
+            int owned = jdbcTemplate.update(
+                    "UPDATE api_endpoints SET source_branch = NULL WHERE LOWER(source_branch) IN (" + in + ")");
+            endpointMapper.recomputeChangeFlags(projects);
+            log.info("[api-endpoints] 清掉基线分支上的分支记录：变更 {} 条、接口归属 {} 条", changes, owned);
+        } catch (Exception e) {
+            log.warn("[api-endpoints] 清理基线分支记录失败（树上仍会过滤掉）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 记一次全量扫描：页面要能回答「清单是按哪个分支、哪个提交、什么时候扫的」。
+     *
+     * @param ref 分支名；null＝扫的是本地目录
+     */
+    public void recordScan(String project, String ref, String sha, LocalDateTime committedAt,
+                           int endpoints, String summary) {
+        try {
+            jdbcTemplate.update("INSERT INTO api_source_scans (project, ref_name, sha, committed_at, scanned_at, endpoints, summary) "
+                            + "VALUES (?, ?, ?, ?, NOW(), ?, ?)",
+                    project, ref, sha, committedAt, endpoints,
+                    summary == null || summary.length() <= 1000 ? summary : summary.substring(0, 1000));
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 记扫描历史失败 {}: {}", project, e.getMessage());
+        }
+    }
+
+    /** 每个项目最近一次扫描；projects 为空时取全部 */
+    public Map<String, Map<String, Object>> lastScans(List<String> projects) {
+        Map<String, Map<String, Object>> out = new java.util.LinkedHashMap<>();
+        try {
+            String sql = """
+                    SELECT s.project, s.ref_name AS ref, s.sha, s.committed_at AS committedAt,
+                           s.scanned_at AS scannedAt, s.endpoints, s.summary
+                      FROM api_source_scans s
+                      JOIN (SELECT project, MAX(id) AS id FROM api_source_scans GROUP BY project) t ON t.id = s.id
+                    """;
+            for (Map<String, Object> r : jdbcTemplate.queryForList(sql)) {
+                String code = String.valueOf(r.get("project"));
+                if (projects == null || projects.isEmpty() || projects.contains(code)) {
+                    out.put(code, r);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 查扫描历史失败: {}", e.getMessage());
+        }
+        return out;
     }
 
     /**
@@ -196,20 +318,6 @@ public class ApiEndpointService {
         return ep != null ? ep.getHandler() : null;
     }
 
-    /**
-     * 把「接口对比分析」的结果同步进清单。
-     * <p>
-     * 按每条变更自己的 {@code changeType} 走，<b>不</b>拿「当前分支全部接口」去反向标废弃——
-     * 报告里只有<b>变更过</b>的接口，把它当全量传进来会把整份清单标成已废弃。
-     * 接口没了这件事由 {@code REMOVED} 这条变更自己说。
-     * <p>
-     * 每次同步先清掉上一轮的变更标记：不清的话「上次新增」会一直挂着，
-     * 几个版本之后整份清单全是高亮，等于没有高亮。
-     *
-     * @param project 项目
-     * @param branch  引入这次变更的分支
-     * @param changes 报告里的接口变更
-     */
     /** 表名列表 → JSON 数组字符串；空列表存 null，别存个 "[]" 占位 */
     static String tablesJson(List<String> tables) {
         if (tables == null || tables.isEmpty()) {
@@ -222,49 +330,201 @@ public class ApiEndpointService {
         }
     }
 
+    public ScanSyncResult upsertFromSource(String project, List<SourceEndpointScanner.Scanned> scanned) {
+        return upsertFromSource(project, scanned, null);
+    }
+
     /**
-     * 全量扫描的结果入库：没有的建，有的补上方法名 / 中文名 / 源码文件。
+     * 全量扫描的结果入库。
      * <p>
-     * 不动变更标记、不标废弃：全量扫描回答的是「现在有哪些接口」，
-     * 「这一版改了什么」是对比分析的事，混进来会把整个项目都标成「新增」。
+     * 认接口按<b>代码路径</b>，不按调用路径：抓包进来的 {@code /steamcn/a/b} 和代码里的 {@code /a/b}
+     * 是同一个接口，按 path 精确比会再建一条，用例、抓包样本、变更标记就分散在两行上。
+     * <ol>
+     *   <li>代码路径（或还没记代码路径、path 正好相同的）对上的：补方法名 / 中文名 / 源码文件</li>
+     *   <li>抓包建的、还没认过代码的：按整段后缀认（{@link SourceControllerMatcher}）</li>
+     *   <li>剩下的新建，path 补上这个项目的网关前缀——不补的话生成的用例打到网关是 404</li>
+     *   <li>{@code baseRef} 不为空（按基线分支扫的）时，代码里找不到的标「基线里没有」，不删</li>
+     * </ol>
+     * 不动变更标记：全量扫描回答「现在有哪些接口」，「这一版改了什么」是对比分析的事。
+     *
+     * @param baseRef 扫的是哪个基线分支 / 提交；null＝扫的是本地目录，不标「没有」——本地目录可能是任意分支
      */
     @Transactional
-    public ScanSyncResult upsertFromSource(String project, List<SourceEndpointScanner.Scanned> scanned) {
-        int created = 0;
-        int updated = 0;
+    public ScanSyncResult upsertFromSource(String project, List<SourceEndpointScanner.Scanned> scanned, String baseRef) {
         LocalDateTime now = LocalDateTime.now();
+        List<ApiEndpoint> rows = new ArrayList<>(endpointMapper.search(List.of(project), null, null, null));
+        Map<String, List<ApiEndpoint>> byCode = new HashMap<>();
+        Map<String, ApiEndpoint> byPath = new HashMap<>();
+        for (ApiEndpoint r : rows) {
+            if (r.getCodePath() != null && !r.getCodePath().isBlank()) {
+                byCode.computeIfAbsent(key(r.getHttpMethod(), r.getCodePath()), k -> new ArrayList<>()).add(r);
+            }
+            byPath.put(key(r.getHttpMethod(), r.getPath()), r);
+        }
+        Set<String> hitIds = new java.util.HashSet<>();
+        List<SourceEndpointScanner.Scanned> unclaimed = new ArrayList<>();
+        int updated = 0;
+        int linked = 0;
+
         for (SourceEndpointScanner.Scanned s : scanned) {
-            ApiEndpoint existing = endpointMapper.findByKey(project, s.httpMethod(), s.path());
-            if (existing == null) {
-                ApiEndpoint row = new ApiEndpoint();
-                row.setId("ep-" + UUID.randomUUID());
-                row.setProject(project);
-                row.setHttpMethod(s.httpMethod());
-                row.setPath(s.path());
-                row.setHandler(s.handler());
-                row.setSummary(blankToNull(s.summary()));
-                row.setSourceFile(s.file());
-                row.setStatus("ACTIVE");
-                row.setLastSyncedAt(now);
-                endpointMapper.insert(row);
-                endpointMapper.updateAuthRequired(row.getId(), s.auth());
-                created++;
+            List<ApiEndpoint> hits = byCode.getOrDefault(key(s.httpMethod(), s.path()), List.of());
+            if (hits.isEmpty()) {
+                ApiEndpoint same = byPath.get(key(s.httpMethod(), s.path()));
+                if (same != null && (same.getCodePath() == null || same.getCodePath().isBlank())) {
+                    hits = List.of(same);
+                }
+            }
+            if (hits.isEmpty()) {
+                unclaimed.add(s);
                 continue;
             }
-            ApiEndpoint patch = new ApiEndpoint();
-            patch.setId(existing.getId());
-            patch.setHandler(s.handler());
-            // 源码里没写 @ApiOperation 时别把人工补过的中文名抹掉
-            patch.setSummary(blankToNull(s.summary()));
-            patch.setSourceFile(s.file());
-            patch.setStatus("ACTIVE");
-            patch.setLastSyncedAt(now);
-            endpointMapper.update(patch);
-            endpointMapper.updateAuthRequired(existing.getId(), s.auth());
-            updated++;
+            for (ApiEndpoint r : hits) {
+                patchFromSource(r, s, now);
+                hitIds.add(r.getId());
+                updated++;
+            }
         }
-        log.info("[api-endpoints] 源码全量扫描 {}：新建 {}、更新 {}", project, created, updated);
-        return new ScanSyncResult(created, updated);
+
+        // 抓包建的行：路径带网关前缀，按整段后缀认
+        List<SourceEndpointScanner.Scanned> stillUnclaimed = new ArrayList<>(unclaimed);
+        for (ApiEndpoint r : rows) {
+            if (hitIds.contains(r.getId()) || r.getCodePath() != null && !r.getCodePath().isBlank()) {
+                continue;
+            }
+            var m = SourceControllerMatcher.match(r.getHttpMethod(), r.getPath(), scanned);
+            if (m.kind() != SourceControllerMatcher.Kind.EXACT && m.kind() != SourceControllerMatcher.Kind.SUFFIX) {
+                continue;
+            }
+            if (SourceControllerMatcher.gatewayPrefix(r.getPath(), m.hit().path()) == null) {
+                continue;
+            }
+            patchFromSource(r, m.hit(), now);
+            hitIds.add(r.getId());
+            stillUnclaimed.remove(m.hit());
+            linked++;
+        }
+
+        String prefix = learnedPrefix(rows);
+        int created = 0;
+        for (SourceEndpointScanner.Scanned s : stillUnclaimed) {
+            String path = joinPath(prefix, s.path());
+            ApiEndpoint taken = byPath.get(key(s.httpMethod(), path));
+            if (taken != null) {
+                patchFromSource(taken, s, now);
+                hitIds.add(taken.getId());
+                updated++;
+                continue;
+            }
+            ApiEndpoint row = new ApiEndpoint();
+            row.setId("ep-" + UUID.randomUUID());
+            row.setProject(project);
+            row.setHttpMethod(s.httpMethod());
+            row.setPath(path);
+            row.setCodePath(s.path());
+            row.setHandler(s.handler());
+            row.setSummary(blankToNull(s.summary()));
+            row.setSourceFile(s.file());
+            row.setStatus("ACTIVE");
+            row.setLastSyncedAt(now);
+            endpointMapper.insert(row);
+            endpointMapper.updateAuthRequired(row.getId(), s.auth());
+            byPath.put(key(row.getHttpMethod(), path), row);
+            hitIds.add(row.getId());
+            created++;
+        }
+
+        // 以前扫进来、没加前缀的：没有用例、没抓过包的直接补上；有用例的不动，免得用例和接口对不上
+        int reprefixed = 0;
+        if (!prefix.isEmpty()) {
+            for (ApiEndpoint r : rows) {
+                if (isCaptured(r) || r.getCodePath() == null || !r.getCodePath().equals(r.getPath())
+                        || r.getCaseCount() != null && r.getCaseCount() > 0) {
+                    continue;
+                }
+                String path = joinPath(prefix, r.getPath());
+                if (byPath.containsKey(key(r.getHttpMethod(), path))) {
+                    continue;
+                }
+                endpointMapper.updatePath(r.getId(), path);
+                byPath.put(key(r.getHttpMethod(), path), r);
+                reprefixed++;
+            }
+        }
+
+        // 以前扫进来 / 抓进来的 Swagger、下线、探活接口：标废弃，执行器那边也会拦
+        for (ApiEndpoint r : rows) {
+            if (!r.isRetired() && (InfraEndpoints.is(r.getPath()) || InfraEndpoints.is(r.getCodePath()))) {
+                endpointMapper.updateRetired(r.getId(), now, INFRA_RETIRED_BY);
+                r.setRetiredAt(now);
+                hitIds.add(r.getId());
+            }
+        }
+
+        int gone = 0;
+        int revived = 0;
+        if (baseRef != null && !baseRef.isBlank()) {
+            for (ApiEndpoint r : rows) {
+                boolean fromCode = r.getCodePath() != null && !r.getCodePath().isBlank()
+                        || r.getSourceFile() != null && !r.getSourceFile().isBlank();
+                if (hitIds.contains(r.getId())) {
+                    if (r.getGoneAt() != null) {
+                        endpointMapper.updateGone(r.getId(), null, null);
+                        revived++;
+                    }
+                } else if (fromCode && r.getGoneAt() == null
+                        && (r.getSourceBranch() == null || r.getSourceBranch().isBlank())) {
+                    // 分支上新加的接口本来就不在基线里，等它上线并入后再说
+                    endpointMapper.updateGone(r.getId(), now, baseRef);
+                    gone++;
+                }
+            }
+        }
+        log.info("[api-endpoints] 源码全量扫描 {}（{}）：新建 {}、更新 {}、认上抓包 {}、补前缀 {}、基线里没有 {}、重新出现 {}，网关前缀「{}」",
+                project, baseRef == null ? "本地目录" : baseRef, created, updated, linked, reprefixed, gone, revived, prefix);
+        return new ScanSyncResult(created, updated, linked, reprefixed, gone, revived, prefix);
+    }
+
+    private void patchFromSource(ApiEndpoint r, SourceEndpointScanner.Scanned s, LocalDateTime now) {
+        ApiEndpoint patch = new ApiEndpoint();
+        patch.setId(r.getId());
+        patch.setCodePath(s.path());
+        patch.setHandler(s.handler());
+        // 源码里没写 @ApiOperation 时别把人工补过的中文名抹掉
+        patch.setSummary(blankToNull(s.summary()));
+        patch.setSourceFile(s.file());
+        patch.setStatus("ACTIVE");
+        patch.setLastSyncedAt(now);
+        endpointMapper.update(patch);
+        endpointMapper.updateAuthRequired(r.getId(), s.auth());
+        r.setCodePath(s.path());
+        r.setSourceFile(s.file());
+    }
+
+    /** 已经认上代码的抓包接口里，占多数的那段网关前缀；没有就是空串 */
+    static String learnedPrefix(List<ApiEndpoint> rows) {
+        List<String> prefixes = new ArrayList<>();
+        for (ApiEndpoint r : rows) {
+            if (isCaptured(r) && r.getCodePath() != null && !r.getCodePath().isBlank()) {
+                String p = SourceControllerMatcher.gatewayPrefix(r.getPath(), r.getCodePath());
+                if (p != null) {
+                    prefixes.add(p);
+                }
+            }
+        }
+        String p = SourceControllerMatcher.dominantPrefix(prefixes);
+        return p == null ? "" : p;
+    }
+
+    static String joinPath(String prefix, String path) {
+        String p = path == null ? "" : path.trim();
+        if (!p.startsWith("/")) {
+            p = "/" + p;
+        }
+        return prefix == null || prefix.isEmpty() ? p : prefix + p;
+    }
+
+    private static String key(String method, String path) {
+        return (method == null ? "" : method.trim().toUpperCase(Locale.ROOT)) + " " + (path == null ? "" : path.trim());
     }
 
     /**
@@ -276,14 +536,25 @@ public class ApiEndpointService {
     public CallerSyncResult syncCallers(String project, List<java.nio.file.Path> roots, java.nio.file.Path exclude)
             throws java.io.IOException {
         List<ApiEndpoint> rows = endpointMapper.search(List.of(project), null, null, null);
-        List<String> paths = rows.stream().map(ApiEndpoint::getPath).distinct().toList();
+        // 调用方代码里可能写全路径，也可能只写代码路径（网关前缀放在 baseUrl 里），两个都搜
+        List<String> paths = rows.stream()
+                .flatMap(r -> java.util.stream.Stream.of(r.getPath(), r.getCodePath()))
+                .filter(p -> p != null && !p.isBlank())
+                .distinct().toList();
         Map<String, List<CallerRefScanner.Ref>> found = CallerRefScanner.scan(paths, roots, exclude);
         var json = new com.fasterxml.jackson.databind.ObjectMapper();
         int used = 0;
         int defOnly = 0;
         int none = 0;
         for (ApiEndpoint row : rows) {
-            List<CallerRefScanner.Ref> refs = found.getOrDefault(row.getPath(), List.of());
+            List<CallerRefScanner.Ref> refs = new ArrayList<>(found.getOrDefault(row.getPath(), List.of()));
+            if (!blank(row.getCodePath()) && !row.getCodePath().equals(row.getPath())) {
+                for (CallerRefScanner.Ref r : found.getOrDefault(row.getCodePath(), List.of())) {
+                    if (!refs.contains(r)) {
+                        refs.add(r);
+                    }
+                }
+            }
             String status;
             if (refs.isEmpty()) {
                 status = "NONE";
@@ -308,28 +579,59 @@ public class ApiEndpointService {
         return s == null || s.isBlank() ? null : s.trim();
     }
 
-    public record ScanSyncResult(int created, int updated) {
+    /**
+     * @param linked     抓包建的接口这次认上了代码
+     * @param reprefixed 以前没带网关前缀的接口补上了前缀
+     * @param gone       基线里已经没有的
+     * @param revived    以前标了没有、这次又出现的
+     * @param prefix     这个项目的网关前缀，空串＝没有或说不准
+     */
+    public record ScanSyncResult(int created, int updated, int linked, int reprefixed,
+                                 int gone, int revived, String prefix) {
+        public ScanSyncResult(int created, int updated) {
+            this(created, updated, 0, 0, 0, 0, "");
+        }
     }
 
+    /**
+     * 把「接口对比分析」的结果同步进清单。
+     * <p>
+     * 按每条变更自己的 {@code changeType} 走，<b>不</b>拿「当前分支全部接口」去反向标废弃——
+     * 报告里只有<b>变更过</b>的接口，把它当全量传进来会把整份清单标成已废弃。
+     * <p>
+     * 标记按分支存：只替换<b>这个分支</b>上一轮的记录，别的分支的不动——
+     * 两个需求并行提测时，分析 B 不能把 A 的必测接口清掉。
+     * 接口按代码路径认（报告里的 path 是代码路径），认不上才新建；
+     * 只有新建的行记 {@code source_branch}，基线里本来就有的接口不归某个分支。
+     * <p>
+     * 已有接口只记分支版本、不改全量那条；分支删掉的接口也只记一笔，上线时才标废弃。
+     *
+     * @param branch 引入这次变更的分支
+     * @return deprecated 是「这个分支删掉的」条数，全量里还没动
+     */
     @Transactional
     public SyncResult syncFromChangeReport(String project, String branch, List<EndpointChange> changes) {
         if (project == null || project.isBlank()) {
             return new SyncResult(0, 0, 0);
         }
-        endpointMapper.clearChangeFlags(project);
-        if (changes == null || changes.isEmpty()) {
-            return new SyncResult(0, 0, 0);
-        }
+        String br = branch == null || branch.isBlank() ? "(未记录分支)" : branch.trim();
+        endpointMapper.deleteChangesByBranch(project, br);
         LocalDateTime now = LocalDateTime.now();
         int created = 0;
         int updated = 0;
         int deprecated = 0;
+        List<ApiEndpoint> rows = changes == null || changes.isEmpty()
+                ? List.of() : new ArrayList<>(endpointMapper.listByProject(project, null));
+        String prefix = learnedPrefix(rows);
 
-        for (EndpointChange ch : changes) {
+        for (EndpointChange ch : changes == null ? List.<EndpointChange>of() : changes) {
             if (ch.httpMethod() == null || ch.path() == null || ch.path().isBlank()) {
                 continue;
             }
-            ApiEndpoint existing = endpointMapper.findByKey(project, ch.httpMethod(), ch.path());
+            ApiEndpoint existing = byCodePath(rows, ch.httpMethod(), ch.path());
+            if (existing == null) {
+                existing = endpointMapper.findByKey(project, ch.httpMethod(), ch.path());
+            }
             boolean removal = EndpointChangeFlag.isRemoval(ch.changeType());
 
             if (existing == null) {
@@ -341,64 +643,84 @@ public class ApiEndpointService {
                 row.setId("ep-" + UUID.randomUUID());
                 row.setProject(project);
                 row.setHttpMethod(ch.httpMethod());
-                row.setPath(ch.path());
+                String path = joinPath(prefix, ch.path());
+                row.setPath(endpointMapper.findByKey(project, ch.httpMethod(), path) == null ? path : ch.path());
+                row.setCodePath(ch.path());
                 row.setHandler(ch.handler());
                 row.setSummary(ch.summary());
                 row.setSourceFile(ch.file());
                 row.setStatus("ACTIVE");
                 row.setChangeFlag(ch.changeFlag());
                 row.setChangeNote(ch.changeNote());
-                row.setSourceBranch(branch);
+                row.setSourceBranch(br);
                 row.setFieldsSnapshot(fieldsJson(ch.responseFields()));
                 row.setTablesJson(tablesJson(ch.tables()));
                 row.setLastSyncedAt(now);
                 endpointMapper.insert(row);
+                rows.add(row);
+                endpointMapper.upsertChange(row.getId(), project, br, ch.changeFlag(), ch.changeNote(), ch.changeType());
                 created++;
                 continue;
             }
 
-            ApiEndpoint patch = new ApiEndpoint();
-            patch.setId(existing.getId());
-            patch.setHandler(ch.handler());
-            patch.setSummary(ch.summary());
-            patch.setSourceFile(ch.file());
-            patch.setChangeFlag(ch.changeFlag());
-            patch.setChangeNote(ch.changeNote());
-            patch.setSourceBranch(branch);
-            patch.setFieldsSnapshot(fieldsJson(ch.responseFields()));
-            // tables 为空时不写：目录对比等场景解析不出依赖，传空会把上次分析存下的表抹掉
-            if (ch.tables() != null && !ch.tables().isEmpty()) {
-                patch.setTablesJson(tablesJson(ch.tables()));
+            if (existing.getCodePath() == null || existing.getCodePath().isBlank()) {
+                ApiEndpoint patch = new ApiEndpoint();
+                patch.setId(existing.getId());
+                patch.setCodePath(ch.path());
+                endpointMapper.update(patch);
+                existing.setCodePath(ch.path());
             }
-            patch.setLastSyncedAt(now);
-            // 不删，只标废弃：删掉的话挂在它下面的用例会变成孤儿，
-            // 而「这个接口被删了」本身就是要确认的事——可能是有意下线，也可能是分支合错了
+            // 全量那条保持 master 的样子：分支没上线前，分析 A、B 两个分支不能互相覆盖，
+            // 也不能让回归跑的用例突然对着还没上线的出参断言。分支版本记在变更行上，上线时写回
+            String flag = removal ? EndpointChangeFlag.REMOVED : ch.changeFlag();
+            String note = removal ? "这个分支删掉了该接口，上线后才标废弃" : ch.changeNote();
+            String tables = ch.tables() != null && !ch.tables().isEmpty() ? tablesJson(ch.tables()) : null;
+            endpointMapper.upsertChangeWithSnapshot(existing.getId(), project, br, flag, note, ch.changeType(),
+                    removal ? null : ch.handler(), removal ? null : ch.summary(), removal ? null : ch.file(),
+                    removal ? null : fieldsJson(ch.responseFields()), removal ? null : tables);
             if (removal) {
-                patch.setStatus("DEPRECATED");
                 deprecated++;
             } else {
-                // 上次标了废弃、这次又出现了：多半是分支切换或合错导致的误判，恢复成活的
-                patch.setStatus("ACTIVE");
                 updated++;
             }
-            endpointMapper.update(patch);
         }
-        log.info("[api-endpoints] 同步 {}（{}）：新建 {}、更新 {}、标废弃 {}",
-                project, branch, created, updated, deprecated);
+        endpointMapper.recomputeChangeFlags(List.of(project));
+        log.info("[api-endpoints] 同步 {}（{}）：新建 {}、记分支改动 {}、分支删除 {}",
+                project, br, created, updated, deprecated);
         return new SyncResult(created, updated, deprecated);
     }
 
     /**
-     * 找到（或建出）这条 项目+方法+路径 对应的接口，返回它的 id。
-     * <p>
-     * 用例保存时调用，让「清单」和「用例」自动保持一致。找不到就建一条：
-     * 手写了一条用例、清单里却没有这个接口，说明清单漏了它——
-     * 这种时候补进去比丢掉强，一条路径写错的脏数据在清单上是看得见、能删的，
-     * 而「用例存在但清单不知道」是看不见的。
-     *
-     * @return 接口 id；项目或路径为空时返回 null（这种用例本来也挂不上）
+     * 按代码路径找接口：先比 code_path；再比还没记代码路径、path 正好相同的；
+     * 最后是抓包建的、去掉网关前缀后正好是这个代码路径的（只有一条时才认）。
      */
-    @Transactional
+    static ApiEndpoint byCodePath(List<ApiEndpoint> rows, String method, String codePath) {
+        String m = method.trim().toUpperCase(Locale.ROOT);
+        String code = codePath.trim();
+        List<ApiEndpoint> same = rows.stream()
+                .filter(r -> r.getHttpMethod() != null && m.equalsIgnoreCase(r.getHttpMethod()))
+                .toList();
+        // 同一个代码路径存在重复行（抓包那条 + 源码那条，还没合并）时取抓包那条：它的 path 才是客户端真正调的
+        ApiEndpoint hit = same.stream().filter(r -> code.equals(r.getCodePath()))
+                .min(java.util.Comparator.comparing(r -> isCaptured(r) ? 0 : 1)).orElse(null);
+        if (hit != null) {
+            return hit;
+        }
+        hit = same.stream().filter(r -> blank(r.getCodePath()) && code.equals(r.getPath())).findFirst().orElse(null);
+        if (hit != null) {
+            return hit;
+        }
+        List<ApiEndpoint> alias = same.stream()
+                .filter(r -> blank(r.getCodePath()) && isCaptured(r)
+                        && SourceControllerMatcher.gatewayPrefix(r.getPath(), code) != null)
+                .toList();
+        return alias.size() == 1 ? alias.get(0) : null;
+    }
+
+    private static boolean blank(String s) {
+        return s == null || s.isBlank();
+    }
+
     /**
      * 按分支汇总：对比分析出来的接口挂在分支上，那是测试环境树的另一个根。
      * <p>
@@ -407,33 +729,144 @@ public class ApiEndpointService {
      */
     public List<java.util.Map<String, Object>> summaryByBranch() {
         try {
-            return jdbcTemplate.queryForList("""
-                    SELECT source_branch AS branch, project,
-                           COUNT(*) AS total,
-                           SUM(CASE WHEN change_flag IS NOT NULL AND change_flag <> '' THEN 1 ELSE 0 END) AS changed
-                      FROM api_endpoints
-                     WHERE source_branch IS NOT NULL AND source_branch <> ''
-                     GROUP BY source_branch, project
-                     ORDER BY total DESC
-                    """);
+            return endpointMapper.summaryChangesByBranch();
         } catch (Exception e) {
             log.debug("[api-endpoints] 按分支汇总失败: {}", e.getMessage());
             return java.util.List.of();
         }
     }
 
+    /** 这个分支对比分析出来的接口 id */
+    public Set<String> endpointIdsOfBranch(String project, String branch) {
+        if (project == null || branch == null) {
+            return Set.of();
+        }
+        try {
+            return new java.util.HashSet<>(endpointMapper.endpointIdsOfBranch(project, branch.trim()));
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 查分支接口失败: {}", e.getMessage());
+            return Set.of();
+        }
+    }
+
+    /** 接口 id → 在哪些分支上有变更（最近分析的在前） */
+    public Map<String, List<Map<String, Object>>> branchesOf(List<String> projectCodes) {
+        Map<String, List<Map<String, Object>>> out = new HashMap<>();
+        try {
+            for (Map<String, Object> r : endpointMapper.listChanges(projectCodes)) {
+                Object id = r.get("endpointId");
+                if (id == null) {
+                    continue;
+                }
+                Map<String, Object> b = new java.util.LinkedHashMap<>();
+                b.put("branch", r.get("branch"));
+                b.put("changeFlag", r.get("changeFlag"));
+                b.put("changeNote", r.get("changeNote"));
+                b.put("analyzedAt", r.get("analyzedAt"));
+                out.computeIfAbsent(String.valueOf(id), k -> new ArrayList<>()).add(b);
+            }
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 查分支变更失败: {}", e.getMessage());
+        }
+        return out;
+    }
+
     /**
      * 分支合上线：这一批接口并进 master。
-     * 原来就有的覆盖更新，这次新增的挂到 master 下面；变更标记清掉，不再算「本分支必测」。
+     * 这个分支的变更记录删掉，不再算「本分支必测」；别的分支的标记不受影响。
      */
     @Transactional
     public int promoteBranchToMaster(String branch) {
+        return promoteBranchToMaster(null, branch).total();
+    }
+
+    /**
+     * 分支上线：老接口换成分支版本，分支删掉的标废弃，新增的去掉分支归属进全量。
+     *
+     * @param project 空＝这个分支在所有项目下的记录
+     */
+    @Transactional
+    public PromoteResult promoteBranchToMaster(String project, String branch) {
         if (branch == null || branch.isBlank()) {
-            return 0;
+            return new PromoteResult(0, 0, 0);
         }
-        int n = endpointMapper.promoteBranchToMaster(branch.trim());
-        log.info("[api-endpoints] 分支 {} 已并入 master，{} 条", branch.trim(), n);
-        return n;
+        String br = branch.trim();
+        String pj = project == null || project.isBlank() ? null : project.trim();
+        List<String> projects = pj == null ? endpointMapper.projectsOfBranch(br) : List.of(pj);
+        int updated = 0;
+        int deprecated = 0;
+        for (Map<String, Object> s : endpointMapper.listBranchSnapshots(pj, br)) {
+            String id = s.get("endpointId") == null ? null : String.valueOf(s.get("endpointId"));
+            if (id == null || EndpointChangeFlag.NEW.equals(s.get("changeFlag"))) {
+                continue;
+            }
+            if (EndpointChangeFlag.REMOVED.equals(s.get("changeFlag"))
+                    || EndpointChangeFlag.isRemoval(str(s.get("changeType")))) {
+                endpointMapper.markDeprecated(id);
+                deprecated++;
+                continue;
+            }
+            ApiEndpoint patch = new ApiEndpoint();
+            patch.setId(id);
+            patch.setHandler(str(s.get("handler")));
+            patch.setSummary(str(s.get("summary")));
+            patch.setSourceFile(str(s.get("sourceFile")));
+            patch.setFieldsSnapshot(str(s.get("fieldsSnapshot")));
+            patch.setTablesJson(str(s.get("tablesJson")));
+            patch.setStatus("ACTIVE");
+            patch.setLastSyncedAt(LocalDateTime.now());
+            endpointMapper.update(patch);
+            updated++;
+        }
+        int added = endpointMapper.clearSourceBranchOf(pj, br);
+        endpointMapper.deleteChangesByBranch(pj, br);
+        if (!projects.isEmpty()) {
+            endpointMapper.recomputeChangeFlags(projects);
+        }
+        log.info("[api-endpoints] 分支 {}{} 已并入 master：更新 {}、新增 {}、标废弃 {}",
+                br, pj == null ? "" : "（" + pj + "）", updated, added, deprecated);
+        return new PromoteResult(updated, added, deprecated);
+    }
+
+    public record PromoteResult(int updated, int added, int deprecated) {
+        public int total() {
+            return updated + added + deprecated;
+        }
+    }
+
+    public List<String> projectsOfBranch(String branch) {
+        if (branch == null || branch.isBlank()) {
+            return List.of();
+        }
+        try {
+            return endpointMapper.projectsOfBranch(branch.trim());
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 查分支所在项目失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 同 {@link #branchesOf}，按接口 id 查；全量页只关心当前这一屏的接口 */
+    public Map<String, List<Map<String, Object>>> branchesOfEndpoints(java.util.Collection<String> endpointIds) {
+        Map<String, List<Map<String, Object>>> out = new HashMap<>();
+        List<String> ids = endpointIds == null ? List.of()
+                : endpointIds.stream().filter(s -> s != null && !s.isBlank()).distinct().toList();
+        if (ids.isEmpty()) {
+            return out;
+        }
+        try {
+            for (Map<String, Object> r : endpointMapper.listChangesOf(ids)) {
+                Map<String, Object> b = new java.util.LinkedHashMap<>();
+                b.put("branch", r.get("branch"));
+                b.put("changeFlag", r.get("changeFlag"));
+                b.put("changeNote", r.get("changeNote"));
+                b.put("analyzedAt", r.get("analyzedAt"));
+                out.computeIfAbsent(String.valueOf(r.get("endpointId")), k -> new ArrayList<>()).add(b);
+            }
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 查分支变更失败: {}", e.getMessage());
+        }
+        return out;
     }
 
     /**
@@ -489,16 +922,49 @@ public class ApiEndpointService {
         return parts[parts.length - 2] + "/" + parts[parts.length - 1];
     }
 
+    /** 浏览器跨域前自动发的 OPTIONS：没有业务响应，源码里也没有对应方法，不进接口清单 */
+    public static boolean isPreflight(String httpMethod) {
+        return httpMethod != null && "OPTIONS".equalsIgnoreCase(httpMethod.trim());
+    }
+
+    /**
+     * 找到（或建出）这条 项目+方法+路径 对应的接口，返回它的 id。
+     * <p>
+     * 用例保存、抓包入库时调用，让「清单」和「用例」自动保持一致。找不到就建一条：
+     * 手写了一条用例、清单里却没有这个接口，说明清单漏了它——
+     * 这种时候补进去比丢掉强，一条路径写错的脏数据在清单上是看得见、能删的，
+     * 而「用例存在但清单不知道」是看不见的。
+     * <p>
+     * 路径对不上时先按代码路径认：抓包的 {@code /steamcn/a/b} 落到源码扫出来的 {@code /a/b} 上，
+     * 那一行的 path 改成抓包路径（客户端真正调的），不另建一条。
+     *
+     * @return 接口 id；项目或路径为空时返回 null（这种用例本来也挂不上）
+     */
     public String ensureEndpointFor(String project, String httpMethod, String path,
                                     String handler, String summary) {
         if (project == null || project.isBlank() || path == null || path.isBlank()
-                || httpMethod == null || httpMethod.isBlank()) {
+                || httpMethod == null || httpMethod.isBlank() || isPreflight(httpMethod)) {
             return null;
         }
         try {
             ApiEndpoint existing = endpointMapper.findByKey(project, httpMethod, path);
             if (existing != null) {
                 return existing.getId();
+            }
+            ApiEndpoint alias = aliasTarget(endpointMapper.listByProject(project, httpMethod), path);
+            if (alias != null) {
+                if (!isCaptured(alias) && alias.getPath() != null && alias.getPath().equals(codeOf(alias))
+                        && SourceControllerMatcher.gatewayPrefix(path, alias.getPath()) != null) {
+                    endpointMapper.updatePath(alias.getId(), path);
+                    if (blank(alias.getCodePath())) {
+                        ApiEndpoint patch = new ApiEndpoint();
+                        patch.setId(alias.getId());
+                        patch.setCodePath(alias.getPath());
+                        endpointMapper.update(patch);
+                    }
+                    log.info("[api-endpoints] {} {} 认到源码接口 {}，路径改成实际调用的", httpMethod, path, alias.getPath());
+                }
+                return alias.getId();
             }
             ApiEndpoint row = new ApiEndpoint();
             row.setId("ep-" + UUID.randomUUID());
@@ -515,6 +981,191 @@ public class ApiEndpointService {
             log.warn("[api-endpoints] 用例挂接口失败 {} {} {}: {}", project, httpMethod, path, e.getMessage());
             return null;
         }
+    }
+
+    /** 行的代码路径：记过的用记的；源码扫进来、没抓过包的老数据 path 就是代码路径 */
+    static String codeOf(ApiEndpoint r) {
+        if (!blank(r.getCodePath())) {
+            return r.getCodePath();
+        }
+        return !isCaptured(r) && !blank(r.getSourceFile()) ? r.getPath() : null;
+    }
+
+    /**
+     * 调用路径 → 声明它的那一行（同项目同方法）。代码路径最长的赢；一样长的有两条就不认，
+     * 宁可多建一条让人合并，也别把抓包样本挂到别的接口上。
+     */
+    static ApiEndpoint aliasTarget(List<ApiEndpoint> sameMethod, String calledPath) {
+        ApiEndpoint best = null;
+        int bestLen = -1;
+        boolean tie = false;
+        for (ApiEndpoint r : sameMethod) {
+            String code = codeOf(r);
+            if (code == null || SourceControllerMatcher.gatewayPrefix(calledPath, code) == null) {
+                continue;
+            }
+            int len = code.length();
+            if (len > bestLen) {
+                best = r;
+                bestLen = len;
+                tie = false;
+            } else if (len == bestLen && !r.getId().equals(best.getId())) {
+                tie = true;
+            }
+        }
+        return tie ? null : best;
+    }
+
+    /**
+     * 一对重复：{@code keep} 是抓包建的（path 带网关前缀），{@code drop} 是源码扫出来的（path 是代码路径）。
+     */
+    public record DuplicatePair(String project, String httpMethod,
+                                String keepId, String keepPath, int keepCases,
+                                String dropId, String dropPath, int dropCases,
+                                String handler, String summary) {
+    }
+
+    /** 一条源码接口对上了好几条抓包接口（或反过来），自动合并会合错，列出来给人看 */
+    public record DuplicateAmbiguous(String project, String httpMethod, String codePath, List<String> paths) {
+    }
+
+    public record DuplicateReport(List<DuplicatePair> pairs, List<DuplicateAmbiguous> ambiguous) {
+    }
+
+    /**
+     * 找出「同一个接口、两行记录」：抓包那行的路径 = 网关前缀 + 源码那行的路径。
+     * 这是改成按代码路径认接口之前留下的存量。
+     */
+    static DuplicateReport findDuplicates(List<ApiEndpoint> rows) {
+        Map<String, List<ApiEndpoint>> groups = new java.util.LinkedHashMap<>();
+        for (ApiEndpoint r : rows) {
+            if (r.getPath() != null && r.getHttpMethod() != null) {
+                groups.computeIfAbsent(r.getProject() + "\u0000" + r.getHttpMethod().toUpperCase(Locale.ROOT),
+                        k -> new ArrayList<>()).add(r);
+            }
+        }
+        List<DuplicatePair> pairs = new ArrayList<>();
+        List<DuplicateAmbiguous> ambiguous = new ArrayList<>();
+        for (List<ApiEndpoint> g : groups.values()) {
+            List<ApiEndpoint> captured = g.stream().filter(ApiEndpointService::isCaptured).toList();
+            // 源码那行：没抓过包、path 就是代码路径
+            List<ApiEndpoint> code = g.stream()
+                    .filter(r -> !isCaptured(r) && r.getPath().equals(codeOf(r)))
+                    .toList();
+            Map<String, List<ApiEndpoint>> keepFor = new java.util.LinkedHashMap<>();
+            Map<String, ApiEndpoint> bestCodeOfKeep = new HashMap<>();
+            for (ApiEndpoint a : captured) {
+                List<ApiEndpoint> fits = code.stream()
+                        .filter(b -> !b.getId().equals(a.getId()))
+                        .filter(b -> blank(a.getCodePath()) || a.getCodePath().equals(b.getPath()))
+                        .filter(b -> {
+                            String p = SourceControllerMatcher.gatewayPrefix(a.getPath(), b.getPath());
+                            return p != null && !p.isEmpty();
+                        })
+                        .toList();
+                if (fits.isEmpty()) {
+                    continue;
+                }
+                int longest = fits.stream().mapToInt(b -> b.getPath().length()).max().orElse(0);
+                List<ApiEndpoint> top = fits.stream().filter(b -> b.getPath().length() == longest).toList();
+                if (top.size() > 1) {
+                    ambiguous.add(new DuplicateAmbiguous(a.getProject(), a.getHttpMethod(), a.getPath(),
+                            top.stream().map(ApiEndpoint::getPath).toList()));
+                    continue;
+                }
+                bestCodeOfKeep.put(a.getId(), top.get(0));
+                keepFor.computeIfAbsent(top.get(0).getId(), k -> new ArrayList<>()).add(a);
+            }
+            for (ApiEndpoint b : code) {
+                List<ApiEndpoint> keeps = keepFor.getOrDefault(b.getId(), List.of());
+                if (keeps.size() > 1) {
+                    ambiguous.add(new DuplicateAmbiguous(b.getProject(), b.getHttpMethod(), b.getPath(),
+                            keeps.stream().map(ApiEndpoint::getPath).toList()));
+                } else if (keeps.size() == 1) {
+                    ApiEndpoint a = keeps.get(0);
+                    pairs.add(new DuplicatePair(a.getProject(), a.getHttpMethod(),
+                            a.getId(), a.getPath(), a.getCaseCount() == null ? 0 : a.getCaseCount(),
+                            b.getId(), b.getPath(), b.getCaseCount() == null ? 0 : b.getCaseCount(),
+                            b.getHandler() != null ? b.getHandler() : a.getHandler(),
+                            !blank(a.getSummary()) ? a.getSummary() : b.getSummary()));
+                }
+            }
+        }
+        return new DuplicateReport(pairs, ambiguous);
+    }
+
+    public DuplicateReport duplicates(String project) {
+        List<String> codes = project == null || project.isBlank() ? null : ApiAppCatalog.matchProjectCodes(project);
+        return findDuplicates(endpointMapper.search(codes, null, null, null));
+    }
+
+    /**
+     * 合并重复：保留抓包那行，源码那行的方法名、源码文件、用例、需求关联、分支变更记录都挪过来，然后删掉源码那行。
+     * 只合并当前仍然成对的（页面上的清单可能过时了），所以传的是要删掉的那行的 id。
+     */
+    @Transactional
+    public int mergeDuplicates(String project, List<String> dropIds) {
+        if (dropIds == null || dropIds.isEmpty()) {
+            return 0;
+        }
+        Set<String> wanted = new java.util.HashSet<>(dropIds);
+        Map<String, ApiEndpoint> byId = new HashMap<>();
+        List<String> codes = project == null || project.isBlank() ? null : ApiAppCatalog.matchProjectCodes(project);
+        List<ApiEndpoint> rows = endpointMapper.search(codes, null, null, null);
+        rows.forEach(r -> byId.put(r.getId(), r));
+        int merged = 0;
+        for (DuplicatePair p : findDuplicates(rows).pairs()) {
+            if (!wanted.contains(p.dropId())) {
+                continue;
+            }
+            mergeInto(byId.get(p.keepId()), byId.get(p.dropId()));
+            merged++;
+        }
+        log.info("[api-endpoints] 合并重复接口 {} 对", merged);
+        return merged;
+    }
+
+    private void mergeInto(ApiEndpoint keep, ApiEndpoint drop) {
+        ApiEndpoint patch = new ApiEndpoint();
+        patch.setId(keep.getId());
+        patch.setCodePath(drop.getPath());
+        if (!blank(drop.getHandler())) {
+            patch.setHandler(drop.getHandler());
+        }
+        if (!blank(drop.getSourceFile())) {
+            patch.setSourceFile(drop.getSourceFile());
+        }
+        if (blank(keep.getSummary()) && !blank(drop.getSummary())) {
+            patch.setSummary(drop.getSummary());
+        }
+        if (blank(keep.getFieldsSnapshot()) && !blank(drop.getFieldsSnapshot())) {
+            patch.setFieldsSnapshot(drop.getFieldsSnapshot());
+        }
+        if (blank(keep.getDocMeta()) && !blank(drop.getDocMeta())) {
+            patch.setDocMeta(drop.getDocMeta());
+        }
+        if (blank(keep.getTablesJson()) && !blank(drop.getTablesJson())) {
+            patch.setTablesJson(drop.getTablesJson());
+        }
+        if ("ACTIVE".equals(drop.getStatus())) {
+            patch.setStatus("ACTIVE");
+        }
+        endpointMapper.update(patch);
+        if (drop.getAuthRequired() != null) {
+            endpointMapper.updateAuthRequired(keep.getId(), drop.getAuthRequired());
+        }
+        if (blank(keep.getCallerStatus()) && !blank(drop.getCallerStatus())) {
+            endpointMapper.updateCallers(keep.getId(), drop.getCallersJson(), drop.getCallerStatus());
+        }
+        if (blank(keep.getLevelManual()) && !blank(drop.getLevelManual())) {
+            endpointMapper.updateLevel(keep.getId(), drop.getLevelManual(), drop.getLevelSetBy());
+        }
+        endpointMapper.moveCases(drop.getId(), keep.getId(), drop.getPath(), keep.getPath());
+        endpointMapper.moveRequirementLinks(drop.getId(), keep.getId());
+        endpointMapper.moveChanges(drop.getId(), keep.getId());
+        endpointMapper.deleteChangesOf(drop.getId());
+        endpointMapper.deleteById(drop.getId());
+        endpointMapper.recomputeChangeFlags(List.of(keep.getProject()));
     }
 
     /**
@@ -831,13 +1482,69 @@ public class ApiEndpointService {
         return n;
     }
 
-    /** 人工定过的优先，其次按调用方算 */
+    /** 人工定过的优先，其次抓包抓到过，再其次按调用方算 */
     public static EndpointLevel levelOf(ApiEndpoint e) {
         if (e == null) {
             return null;
         }
         EndpointLevel manual = EndpointLevel.parse(e.getLevelManual());
-        return manual != null ? manual : EndpointLevel.of(e.getCallerStatus(), e.getCallersJson()).level();
+        return manual != null ? manual
+                : EndpointLevel.of(e.getCallerStatus(), e.getCallersJson(), isCaptured(e)).level();
+    }
+
+    /** capture_meta 只有抓包会写 */
+    public static boolean isCaptured(ApiEndpoint e) {
+        return e != null && e.getCaptureMeta() != null && !e.getCaptureMeta().isBlank();
+    }
+
+    /** 抓包抓到过就记一笔：没参数、没请求体、响应也解析不出字段的接口，同样是客户端在调 */
+    public void markCaptured(String endpointId) {
+        if (endpointId == null || endpointId.isBlank()) {
+            return;
+        }
+        try {
+            ApiEndpoint row = endpointMapper.findById(endpointId);
+            if (row == null) {
+                return;
+            }
+            Map<String, Object> meta = new java.util.LinkedHashMap<>(captureMetaOf(row));
+            if (meta.containsKey("capturedAt")) {
+                return;
+            }
+            meta.put("capturedAt", java.time.LocalDateTime.now().toString());
+            row.setCaptureMeta(EndpointAssertionContext.metaJson(meta));
+            endpointMapper.update(row);
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 记抓包标记失败 {}: {}", endpointId, e.getMessage());
+        }
+    }
+
+    /**
+     * 记下这份抓包样本是哪个环境的（TEST / PROD）。
+     * <p>
+     * 每次挂样本都要写，不能只在 PROD 时写：样本会被后一次抓包覆盖，
+     * 先导入过生产、后来又在测试环境抓了一次，标记还停在 PROD 就会生成错环境的用例。
+     */
+    public void markCaptureEnv(String endpointId, String env) {
+        if (endpointId == null || endpointId.isBlank()) {
+            return;
+        }
+        try {
+            ApiEndpoint row = endpointMapper.findById(endpointId);
+            if (row == null) {
+                return;
+            }
+            Map<String, Object> meta = new java.util.LinkedHashMap<>(captureMetaOf(row));
+            String value = env == null || env.isBlank() ? "TEST" : env.trim().toUpperCase(Locale.ROOT);
+            if (value.equals(meta.get("captureEnv"))) {
+                return;
+            }
+            meta.put("captureEnv", value);
+            row.setCaptureMeta(EndpointAssertionContext.metaJson(meta));
+            endpointMapper.update(row);
+        } catch (Exception e) {
+            log.debug("[api-endpoints] 记抓包环境失败 {}: {}", endpointId, e.getMessage());
+        }
     }
 
     /** 同步进来的一条接口变化 */

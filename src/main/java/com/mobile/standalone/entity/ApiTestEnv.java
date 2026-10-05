@@ -18,8 +18,8 @@ public class ApiTestEnv {
     /** 默认 token；请求头 token / Authorization 可引用 */
     private String defaultToken;
     /**
-     * 数据库断言用的只读连接。跟着环境走，和 {@code baseUrl} 一个逻辑——
-     * 接口打预发、断言却查测试库的话，结论是反的。
+     * 老的「一个环境一个库」配置，只留着给启动时迁移读。
+     * 现在数据库断言的连接在 {@link ApiDbConnection}（环境 × 项目），迁完这几列会被清空。
      */
     private String dbHost;
     private Integer dbPort;

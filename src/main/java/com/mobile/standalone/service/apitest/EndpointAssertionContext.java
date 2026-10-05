@@ -29,7 +29,8 @@ public final class EndpointAssertionContext {
      *                       抓包这次看到有值不代表总有值，照抓包断言换个数据就红，
      *                       而红的原因是断言写错了，不是接口坏了
      * @param docParams      文档里的入参约束，用来设计边界用例
-     * @param captureQuery   抓包时的真实参数值，边界用例靠它拼出能跑的请求
+     * @param captureQuery   抓包时的真实参数值，边界用例靠它拼出能跑的请求；
+     *                       登录参数已换成 {@code {{token}}}，直接写进用例不会带上过期 token
      */
     public record Sources(List<String> responseFields, Map<String, Object> captureSamples,
                           String noteHint, String docReference,
@@ -59,7 +60,7 @@ public final class EndpointAssertionContext {
 
         String hint = hints.isEmpty() ? null : String.join(" + ", hints);
         return new Sources(fields, samples, hint, docRef,
-                nullableOf(doc), paramsOf(doc), queryOf(cap), headersOf(cap));
+                nullableOf(doc), paramsOf(doc), CaptureAiCasePlanner.authAsVariable(queryOf(cap)), headersOf(cap));
     }
 
     static Set<String> nullableOf(Map<String, Object> doc) {

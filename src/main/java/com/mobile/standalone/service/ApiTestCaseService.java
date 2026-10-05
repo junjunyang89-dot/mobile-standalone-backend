@@ -168,6 +168,11 @@ public class ApiTestCaseService {
             ensureColumn("api_test_cases", "source_branch",
                     "VARCHAR(191) NULL COMMENT '为哪个提测分支写的；升级成回归用例后不要清空，它是来历' "
                             + "AFTER case_kind");
+            ensureColumn("api_test_cases", "intent",
+                    "VARCHAR(16) NULL COMMENT 'NORMAL=正常用法 / NEGATIVE=异常输入（缺参、传错、越界）；空＝没标' "
+                            + "AFTER source_branch");
+            ensureColumn("api_test_cases", "expect_note",
+                    "VARCHAR(600) NULL COMMENT '期望行为的出处：代码行为、源码行号、疑似问题' AFTER intent");
             // 数据库断言的连接跟着环境走，和 base_url 一个逻辑：
             // 切到预发就该查预发的库，否则「接口打的是预发、断言查的是测试库」，
             // 这种错查出来的结论全是反的

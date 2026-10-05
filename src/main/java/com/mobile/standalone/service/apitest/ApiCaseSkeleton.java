@@ -61,21 +61,33 @@ public final class ApiCaseSkeleton {
     public static Draft build(Input in) {
         List<String> asserts = new ArrayList<>();
         // HTTP 状态码永远断言，但它一条不算「验过」
-        asserts.add("{\"type\":\"status\",\"equals\":200}");
+        asserts.add("{\"type\":\"status\",\"equals\":200" + src(AssertionSource.DEFAULT, "成功用例固定断言 HTTP 200") + "}");
 
+        // 只有在真实数据上站得住的断言才算数；按约定写的业务码不算——没在这个接口上验过
         boolean meaningful = false;
+        boolean conventionOnly = false;
 
+        Map<String, Object> samples = in.captureSamples() == null ? Map.of() : in.captureSamples();
         String codePath = nz(in.successCodePath());
         if (!codePath.isEmpty()) {
             String want = nz(in.successCodeValue()).isEmpty() ? "0" : nz(in.successCodeValue());
             String equals = isNumeric(want) ? want : "\"" + want + "\"";
-            asserts.add("{\"type\":\"jsonPath\",\"path\":\"" + esc(codePath) + "\",\"equals\":" + equals + "}");
-            meaningful = true;
+            Object seen = samples.get(codePath.startsWith("$.") ? codePath.substring(2) : codePath);
+            boolean verified = seen != null && want.equals(String.valueOf(seen));
+            asserts.add("{\"type\":\"jsonPath\",\"path\":\"" + esc(codePath) + "\",\"equals\":" + equals
+                    + (verified
+                    ? src(AssertionSource.CAPTURE, "抓包响应里就是 " + want)
+                    : src(AssertionSource.CONVENTION, "项目配置的业务成功码，没在这个接口上验证过"))
+                    + "}");
+            if (verified) {
+                meaningful = true;
+            } else {
+                conventionOnly = true;
+            }
         }
 
         List<String> fields = in.responseFields() == null ? List.of() : in.responseFields();
         int used = 0;
-        Map<String, Object> samples = in.captureSamples() == null ? Map.of() : in.captureSamples();
         Set<String> sampled = new java.util.LinkedHashSet<>();
         // 文档写明「查不到可空」的字段，一律不生成断言。
         // 抓包这次看到它有值，不代表它总有值——照抓包断言 equals/exists，
@@ -101,7 +113,7 @@ public final class ApiCaseSkeleton {
                 continue;
             }
             asserts.add("{\"type\":\"jsonPath\",\"path\":\"" + esc(path) + "\",\"equals\":"
-                    + jsonLiteral(val) + "}");
+                    + jsonLiteral(val) + src(AssertionSource.CAPTURE, "抓包响应里就是这个值") + "}");
             sampled.add(field.trim());
             used++;
             meaningful = true;
@@ -121,7 +133,8 @@ public final class ApiCaseSkeleton {
             }
             // 只断言「字段在」，不断言值：值是什么只有跑一次才知道，
             // 猜一个填进去，第一次跑就是红的，而红得没有道理最消耗信任
-            asserts.add("{\"type\":\"jsonPath\",\"path\":\"" + esc(path) + "\",\"exists\":true}");
+            asserts.add("{\"type\":\"jsonPath\",\"path\":\"" + esc(path) + "\",\"exists\":true"
+                    + src(AssertionSource.FIELDS, "接口对比 / 抓包记录过这个返回字段") + "}");
             used++;
             meaningful = true;
         }
@@ -130,10 +143,12 @@ public final class ApiCaseSkeleton {
         String base = displayName(in.httpMethod(), in.path(), in.summary());
 
         if (meaningful) {
-            return new Draft(json, true, base,
-                    used > 0
-                            ? "断言来自抓包实测或代码对比；开发文档仅参考，不参与"
-                            : "已带上业务码断言。具体字段请抓包后补");
+            return new Draft(json, true, base, "断言来自抓包实测或代码对比；开发文档仅参考，不参与");
+        }
+        if (conventionOnly) {
+            return new Draft(json, false, base + "（待验证）",
+                    "只有按项目约定写的业务码断言，没在这个接口的真实响应上验证过。"
+                            + "抓一次包或跑一次确认返回，再启用");
         }
         return new Draft(json, false,
                 base + "（待补断言）",
@@ -221,8 +236,13 @@ public final class ApiCaseSkeleton {
         }
     }
 
+    private static String src(String source, String evidence) {
+        return ",\"source\":\"" + source + "\",\"evidence\":\"" + esc(evidence) + "\"";
+    }
+
     private static String esc(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
     }
 
     private static String nz(String s) {

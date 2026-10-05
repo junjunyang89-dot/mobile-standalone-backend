@@ -53,6 +53,12 @@ cursor:
 #   capture:
 #     passthrough-hosts: pogpog.gg,unpkg.com,appengine.wmpvp.com
 
+# 抓包收录猜归属用的网关路由（路径第一段=服务名），抄自 Apollo gateway 项目的
+# spring.cloud.gateway.routes；不配就用代码里的默认值（2026-10 测试环境那份）
+# app:
+#   api-test:
+#     gateway-routes: acty=app-community,avo=app-video,apppush=app-push,appuser=appuser
+
 # 发版文档 / 上线看板（账号密码放本机 application.yml，勿提交）
 # release-doc:
 #   wiki-base-url: https://wiki.shdev.net

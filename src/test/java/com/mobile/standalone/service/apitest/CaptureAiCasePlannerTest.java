@@ -30,8 +30,12 @@ class CaptureAiCasePlannerTest {
         ArrayNode out = CaptureAiCasePlanner.verified(proposed, resp);
         assertEquals(3, out.size());
         assertEquals("status", out.get(0).path("type").asText());
+        assertEquals("default", out.get(0).path("source").asText());
         assertEquals("$.code", out.get(1).path("path").asText());
+        assertEquals("capture", out.get(1).path("source").asText());
+        assertEquals("抓包响应里就是 0", out.get(1).path("evidence").asText());
         assertEquals("$.data.list", out.get(2).path("path").asText());
+        assertEquals("capture", out.get(2).path("source").asText());
     }
 
     @Test
@@ -55,13 +59,42 @@ class CaptureAiCasePlannerTest {
         CaptureAiCasePlanner.PlannedCase normal = cases.get(0);
         assertTrue(normal.normal());
         assertEquals("2", normal.query().get("page"));
-        assertFalse(normal.query().containsKey("token"));
+        assertEquals("{{token}}", normal.query().get("token"));
         assertFalse(normal.enabled());
         assertTrue(normal.note().contains("失败"));
 
         CaptureAiCasePlanner.PlannedCase boundary = cases.get(1);
         assertFalse(boundary.enabled());
         assertTrue(boundary.note().contains("确认预期"));
+        assertEquals("{{token}}", boundary.query().get("token"));
+        assertFalse(boundary.query().containsKey("page"));
+        assertTrue(boundary.assertions().contains("\"source\":\"ai\""));
+    }
+
+    @Test
+    void realTokenNeverReachesThePromptOrTheCase() throws Exception {
+        var in = new CaptureAiCasePlanner.Input("POST", "/apppush/user/message/msgClassNew", null,
+                Map.of("token", "1e143eaf0ed6ec1c", "type", "1"), "{}", "{\"code\":0}", "$.code", "0");
+        String prompt = CaptureAiCasePlanner.prompt(in);
+        assertFalse(prompt.contains("1e143eaf0ed6ec1c"));
+        assertTrue(prompt.contains("\"type\":\"1\""));
+
+        var cases = CaptureAiCasePlanner.plan("{\"cases\":[]}", in);
+        assertEquals("{{token}}", cases.get(0).query().get("token"));
+        assertEquals("1", cases.get(0).query().get("type"));
+    }
+
+    @Test
+    void dateParamsWarnAgainstAssertingListItems() {
+        var in = new CaptureAiCasePlanner.Input("GET", "/event/getMatchList", null,
+                Map.of("matchTime", "2026-10-02 00:00:00", "gameType", "1"), null, "{\"code\":0}", "$.code", "0");
+        String prompt = CaptureAiCasePlanner.prompt(in);
+        assertTrue(prompt.contains("matchTime 是日期/时间参数"));
+        assertFalse(prompt.contains("测试环境抓包"));
+
+        var plain = new CaptureAiCasePlanner.Input("GET", "/x", null,
+                Map.of("page", "1"), null, "{\"code\":0}", "$.code", "0");
+        assertFalse(CaptureAiCasePlanner.prompt(plain).contains("日期/时间参数"));
     }
 
     @Test

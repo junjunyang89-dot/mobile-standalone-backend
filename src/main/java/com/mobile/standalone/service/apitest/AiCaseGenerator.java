@@ -37,6 +37,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -63,7 +64,6 @@ public class AiCaseGenerator {
     public static final String CREATED_BY = "AI 生成";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_CASES = 4;
-    private static final int MAX_FIELD_ASSERTS = 4;
     private static final int KEEP_JOBS = 20;
     private static final Set<String> SKIP_DIRS = Set.of(
             ".git", ".idea", "target", "build", "out", "node_modules", "test", "tests");
@@ -78,6 +78,15 @@ public class AiCaseGenerator {
     private final ApiTestRunnerService runner;
     private final EnvVariableService variableService;
     private final ApiTestCollectionService collectionService;
+    private final EndpointInsightService insightService;
+    private final ApiAuthService authService;
+    private final SourceCaseService sourceCaseService;
+    private final ControllerBackfillService backfillService;
+    private final GitSnapshotService gitSnapshotService;
+
+    /** 用例跑在测试环境，读测试环境部署的分支；读不到再退回工作区 */
+    @org.springframework.beans.factory.annotation.Value("${app.api-test.test-ref:origin/testing}")
+    private String testRef = "origin/testing";
 
     /** 读源码出请求用不着推理大模型：实测 flash 20 秒、max 80 秒，出的用例一样 */
     @org.springframework.beans.factory.annotation.Value("${ai-case.model:qwen3.6-flash}")
@@ -96,9 +105,29 @@ public class AiCaseGenerator {
      * @param dir       源码目录；空时用项目管理里配的仓库路径
      * @param tryRun    在测试环境真跑一次、按真实返回写断言。默认不跑：地址配的可能是生产
      * @param runWrites 非 GET 接口也试跑。默认不跑：会改测试环境的数据，有的还会调付费服务
+     * @param preferCapture 有抓包样本就按抓包生成，哪怕接口关联了源码。从抓包页发起时用：
+     *                      源码那条路只带 Accept 头、环境是 ANY，抓到的真实请求头和响应用不上
+     * @param levels    只生成这些级别的接口；空＝不按级别筛。给了 endpointIds 时不看它
      */
     public record Request(String project, List<String> endpointIds, boolean onlyUncovered,
-                          boolean tryRun, boolean runWrites, String dir) {
+                          boolean tryRun, boolean runWrites, String dir, boolean preferCapture,
+                          Set<EndpointLevel> levels) {
+        public Request(String project, List<String> endpointIds, boolean onlyUncovered,
+                       boolean tryRun, boolean runWrites, String dir, boolean preferCapture) {
+            this(project, endpointIds, onlyUncovered, tryRun, runWrites, dir, preferCapture, null);
+        }
+
+        public Request(String project, List<String> endpointIds, boolean onlyUncovered,
+                       boolean tryRun, boolean runWrites, String dir) {
+            this(project, endpointIds, onlyUncovered, tryRun, runWrites, dir, false, null);
+        }
+    }
+
+    /**
+     * 生成到某个单 / 分支的「分支用例」集合，而不是项目的全量集合。
+     * 用例标成分支用例、记上来源分支：分支上线时「分支已上线」才能把它们挪进全量。
+     */
+    public record BranchTarget(String collectionId, String sourceBranch, String requirementRef) {
     }
 
     @Data
@@ -129,11 +158,16 @@ public class AiCaseGenerator {
         private String message;
         private LocalDateTime startedAt;
         private LocalDateTime finishedAt;
+        /** 读的哪份源码：origin/testing@abc123def456 / 工作区 / 没有源码 */
+        private String sourceRef;
         private List<Item> items = Collections.synchronizedList(new ArrayList<>());
         @com.fasterxml.jackson.annotation.JsonIgnore
         private final Map<String, String> harvest = new ConcurrentHashMap<>();
         @com.fasterxml.jackson.annotation.JsonIgnore
         private Path root;
+        /** 人在页面上指定了目录：照读，不切到测试分支快照 */
+        @com.fasterxml.jackson.annotation.JsonIgnore
+        private boolean explicitDir;
         @com.fasterxml.jackson.annotation.JsonIgnore
         private Map<String, Path> classIndex;
         @com.fasterxml.jackson.annotation.JsonIgnore
@@ -142,9 +176,19 @@ public class AiCaseGenerator {
         private boolean tryRun;
         @com.fasterxml.jackson.annotation.JsonIgnore
         private boolean runWrites;
+        @com.fasterxml.jackson.annotation.JsonIgnore
+        private boolean preferCapture;
+        /** 生成到分支用例时的来源分支；null = 生成到全量 */
+        private String sourceBranch;
+        @com.fasterxml.jackson.annotation.JsonIgnore
+        private String requirementRef;
     }
 
     public Job start(Request req) {
+        return start(req, null);
+    }
+
+    public Job start(Request req, BranchTarget into) {
         if (!qwen.isConfigured()) {
             throw new IllegalStateException("千问没配：application.yml 里 diagnosis.ai.api-key 填上密钥");
         }
@@ -154,6 +198,12 @@ public class AiCaseGenerator {
         ApiProject p = projectService.get(req.project());
         if (p == null) {
             throw new IllegalArgumentException("项目不存在: " + req.project());
+        }
+        if (!ApiProjectKind.scansEndpoints(p)) {
+            throw new IllegalArgumentException(
+                    ApiProjectKind.skipScan(p.getCode())
+                            ? "网关不扫接口，不用生成用例"
+                            : "只有后端业务仓库才生成接口用例");
         }
         Job running = active(p.getCode());
         if (running != null) {
@@ -168,7 +218,7 @@ public class AiCaseGenerator {
             }
         } else {
             for (ApiEndpoint e : endpointService.search(p.getCode(), null, null, null)) {
-                if (e.isRetired() || "DEPRECATED".equalsIgnoreCase(e.getStatus())) continue;
+                if (!selectable(e, req.levels())) continue;
                 if (req.onlyUncovered() && !caseMapper.findByEndpointId(e.getId()).isEmpty()) continue;
                 targets.add(e);
             }
@@ -177,7 +227,9 @@ public class AiCaseGenerator {
             throw new IllegalArgumentException("没有要生成的接口");
         }
         // 只靠抓包也能生成：没配源码目录时，有抓包响应的接口照样走，其余的逐条报原因
-        String dir = req.dir() == null || req.dir().isBlank() ? p.getRepoPath() : req.dir().trim();
+        boolean explicitDir = req.dir() != null && !req.dir().isBlank();
+        Path repo = explicitDir ? null : backfillService.repoOf(p);
+        String dir = explicitDir ? req.dir().trim() : repo != null ? repo.toString() : p.getRepoPath();
         Path root = dir == null || dir.isBlank() ? null : Path.of(dir).toAbsolutePath().normalize();
         if (root != null && !Files.isDirectory(root)) {
             if (targets.stream().noneMatch(this::hasCaptureSample)) {
@@ -196,9 +248,17 @@ public class AiCaseGenerator {
         job.setRunning(true);
         job.setStartedAt(LocalDateTime.now());
         job.setRoot(root);
-        job.setCollectionId(collectionService.ensureDefaultLiveCollection(p.getCode()).getId());
+        job.setExplicitDir(explicitDir);
+        if (into != null) {
+            job.setCollectionId(into.collectionId());
+            job.setSourceBranch(into.sourceBranch());
+            job.setRequirementRef(into.requirementRef());
+        } else {
+            job.setCollectionId(collectionService.ensureDefaultLiveCollection(p.getCode()).getId());
+        }
         job.setTryRun(req.tryRun());
         job.setRunWrites(req.runWrites());
+        job.setPreferCapture(req.preferCapture());
         Map<String, ApiEndpoint> byId = new HashMap<>();
         for (ApiEndpoint e : targets) {
             Item it = new Item();
@@ -217,6 +277,15 @@ public class AiCaseGenerator {
         return job;
     }
 
+    /** 按项目批量时哪些接口算进来：废弃、基线里已没有、基础接口不算；levels 为空不按级别筛 */
+    static boolean selectable(ApiEndpoint e, Set<EndpointLevel> levels) {
+        if (e.isRetired() || e.getGoneAt() != null || "DEPRECATED".equalsIgnoreCase(e.getStatus())
+                || InfraEndpoints.is(e.getPath())) {
+            return false;
+        }
+        return levels == null || levels.isEmpty() || levels.contains(ApiEndpointService.levelOf(e));
+    }
+
     public Job get(String id) {
         return jobs.get(id);
     }
@@ -232,6 +301,70 @@ public class AiCaseGenerator {
                 .filter(j -> j.getProject().equals(project))
                 .max(Comparator.comparing(Job::getStartedAt))
                 .orElse(null);
+    }
+
+    /** 一个项目在批量里的结果：起了任务给 jobId，没起给原因 */
+    public record BatchEntry(String project, String name, String jobId, String skipped) {
+    }
+
+    public record Batch(String id, LocalDateTime startedAt, Set<EndpointLevel> levels, List<BatchEntry> entries) {
+    }
+
+    private volatile Batch lastBatch;
+
+    /**
+     * 所有后端项目按级别各起一批，只生成还没用例的接口。共用同一个 3 线程池，不会多打模型。
+     */
+    public synchronized Batch startAll(Set<EndpointLevel> levels, boolean tryRun, boolean runWrites) {
+        if (!qwen.isConfigured()) {
+            throw new IllegalStateException("千问没配：application.yml 里 diagnosis.ai.api-key 填上密钥");
+        }
+        if (levels == null || levels.isEmpty()) {
+            throw new IllegalArgumentException("至少选一个级别");
+        }
+        List<BatchEntry> entries = new ArrayList<>();
+        for (ApiProject p : projectService.list(true)) {
+            if (!ApiProjectKind.scansEndpoints(p)) {
+                continue;
+            }
+            if (CaptureCatalogService.INBOX.equals(p.getCode())) {
+                continue;
+            }
+            String name = p.getName() == null || p.getName().isBlank() ? p.getCode() : p.getName();
+            try {
+                Job j = start(new Request(p.getCode(), List.of(), true, tryRun, runWrites, null, false, levels));
+                entries.add(new BatchEntry(p.getCode(), name, j.getId(), null));
+            } catch (IllegalArgumentException | IllegalStateException ex) {
+                entries.add(new BatchEntry(p.getCode(), name, null, ex.getMessage()));
+            }
+        }
+        lastBatch = new Batch("aib-" + UUID.randomUUID().toString().substring(0, 8), LocalDateTime.now(),
+                Set.copyOf(levels), entries);
+        return lastBatch;
+    }
+
+    public Batch lastBatch() {
+        return lastBatch;
+    }
+
+    /** 没指定目录时读测试分支快照：工作区可能停在任意分支上，生成出来的请求和测试环境对不上 */
+    private void useTestRefSnapshot(Job job) {
+        if (job.getRoot() == null) {
+            job.setSourceRef("没有源码");
+            return;
+        }
+        if (job.isExplicitDir()) {
+            job.setSourceRef("工作区 " + job.getRoot());
+            return;
+        }
+        try {
+            var snap = gitSnapshotService.snapshot(job.getRoot(), testRef, true, false);
+            job.setRoot(snap.dir());
+            job.setSourceRef(snap.ref() + "@" + snap.shortSha());
+        } catch (Exception ex) {
+            log.info("[ai-case] {} 读 {} 失败，改读工作区: {}", job.getProject(), testRef, ex.getMessage());
+            job.setSourceRef("工作区（没有 " + testRef + "）");
+        }
     }
 
     /** 早先生成时没归集合的，补进项目的全量集合，不然用例集合页看不到 */
@@ -275,6 +408,7 @@ public class AiCaseGenerator {
     private void runJob(Job job, Map<String, ApiEndpoint> byId) {
         try {
             parseCache.clear();
+            useTestRefSnapshot(job);
             job.setClassIndex(job.getRoot() == null ? Map.of() : indexClasses(job.getRoot()));
             // 先跑不要参数的查询接口：它们的真实返回里有后面接口要的 id
             List<Item> first = new ArrayList<>();
@@ -285,6 +419,7 @@ public class AiCaseGenerator {
             }
             runPhase(job, byId, first);
             runPhase(job, byId, rest);
+            markBranchCases(job);
             job.setMessage(job.isCancelled() ? "已取消" : "完成");
         } catch (Exception e) {
             log.warn("[ai-case] job {} 失败", job.getId(), e);
@@ -315,6 +450,41 @@ public class AiCaseGenerator {
         }
         for (Future<?> f : fs) {
             f.get();
+        }
+    }
+
+    private static ApiTestCase stamp(Job job, ApiTestCase c) {
+        if (job.getSourceBranch() != null) {
+            c.setSourceBranch(job.getSourceBranch());
+            c.setCaseKind(ApiCaseKind.BRANCH.name());
+            if (c.getRequirementRef() == null || c.getRequirementRef().isBlank()) {
+                c.setRequirementRef(job.getRequirementRef());
+            }
+        }
+        return c;
+    }
+
+    /**
+     * 按源码补的参数用例由 {@link SourceCaseService} 建，没经过 {@link #stamp}。
+     * 只补这次任务新建的：item 里也挂着这个接口早先就有的用例，那些是全量的，不能被改成分支用例。
+     */
+    private void markBranchCases(Job job) {
+        if (job.getSourceBranch() == null) {
+            return;
+        }
+        for (Item it : new ArrayList<>(job.getItems())) {
+            for (String id : new ArrayList<>(it.getCaseIds())) {
+                try {
+                    ApiTestCase c = caseMapper.findById(id);
+                    if (c == null || ApiCaseKind.BRANCH.name().equals(c.getCaseKind())
+                            || c.getCreatedAt() == null || c.getCreatedAt().isBefore(job.getStartedAt())) {
+                        continue;
+                    }
+                    caseService.updateCase(id, stamp(job, c));
+                } catch (Exception ex) {
+                    log.debug("[ai-case] 标分支用例失败 {}: {}", id, ex.getMessage());
+                }
+            }
         }
     }
 
@@ -349,15 +519,17 @@ public class AiCaseGenerator {
             if (e == null) {
                 throw new IllegalStateException("接口不存在了");
             }
+            // 生成到分支时只看这个分支下有没有：全量里的老用例是按老逻辑写的，挡不住这次分支要的新用例
             boolean hasAi = caseMapper.findByEndpointId(e.getId()).stream()
-                    .anyMatch(c -> CREATED_BY.equals(c.getCreatedBy()));
+                    .anyMatch(c -> CREATED_BY.equals(c.getCreatedBy())
+                            && (job.getSourceBranch() == null || job.getSourceBranch().equals(c.getSourceBranch())));
             if (hasAi) {
                 it.setStatus("SKIPPED");
                 it.setNote("已经 AI 生成过");
                 return;
             }
             boolean noSource = job.getRoot() == null || e.getSourceFile() == null || e.getSourceFile().isBlank();
-            if (noSource && hasCaptureSample(e)) {
+            if ((noSource || job.isPreferCapture()) && hasCaptureSample(e)) {
                 processCapture(job, e, it);
                 return;
             }
@@ -404,7 +576,7 @@ public class AiCaseGenerator {
                 }
                 c.setEnabled(v.enabled());
                 c.setDescription(describe(e, ac, v, filled));
-                ApiTestCase saved = caseService.createCase(c);
+                ApiTestCase saved = caseService.createCase(stamp(job, c));
                 collectionService.assign(job.getCollectionId(), List.of(saved.getId()));
                 it.getCaseIds().add(saved.getId());
                 it.setCases(it.getCases() + 1);
@@ -430,24 +602,47 @@ public class AiCaseGenerator {
 
     /**
      * 只有抓包、没有源码：模型看真实请求和响应出用例和断言，断言再拿响应验一遍。
-     * 不试跑；抓的是测试环境，用例只给测试环境跑。
+     * 不试跑；样本是哪个环境抓的，用例就只给哪个环境跑。
+     * 生产的样本只给 GET 生成：写接口在生产上跑一次就是真改数据。
      */
     private void processCapture(Job job, ApiEndpoint e, Item it) throws Exception {
         Map<String, Object> cap = endpointService.captureMetaOf(e);
+        String method = e.getHttpMethod() == null || "ANY".equalsIgnoreCase(e.getHttpMethod()) ? "GET" : e.getHttpMethod();
+        boolean prod = isProdCapture(cap);
+        if (prod && !"GET".equalsIgnoreCase(method)) {
+            it.setStatus("SKIPPED");
+            it.setNote("生产环境抓的 " + method + " 只收录、不生成用例：写接口在生产上跑一次就是真改数据");
+            return;
+        }
+        String env = prod ? "PROD" : "TEST";
         ApiProject project = projectService.get(e.getProject());
+        EndpointInsight.Report insight = null;
+        try {
+            var res = insightService.inspect(e.getId(), null, null, null, null);
+            insight = res.located() ? res.report() : null;
+        } catch (Exception ex) {
+            log.debug("[ai-case] 体检失败 {} {}: {}", e.getHttpMethod(), e.getPath(), ex.getMessage());
+        }
         var in = new CaptureAiCasePlanner.Input(
-                e.getHttpMethod() == null || "ANY".equalsIgnoreCase(e.getHttpMethod()) ? "GET" : e.getHttpMethod(),
-                e.getPath(), e.getSummary(),
+                method, e.getPath(), e.getSummary(),
                 EndpointAssertionContext.queryOf(cap), EndpointAssertionContext.reqBodyOf(cap),
                 EndpointAssertionContext.respSampleOf(cap),
                 project == null ? null : project.getSuccessCodePath(),
-                project == null ? null : project.getSuccessCodeValue());
+                project == null ? null : project.getSuccessCodeValue(),
+                EndpointInsightService.promptNotes(insight));
         var cases = CaptureAiCasePlanner.plan(qwen.chat(CaptureAiCasePlanner.prompt(in), List.of(), model), in);
         String headers = RequirementCaseGenerator.headersJson(EndpointAssertionContext.headersOf(cap));
         int enabled = 0;
         List<String> notes = new ArrayList<>();
+        List<String> covered = insight == null || insight.params() == null ? List.of()
+                : insight.params().stream().filter(p -> p.missing() != null).map(ParamInsight.Param::name).toList();
         for (var pc : cases) {
+            // 源码已经读出这个参数缺了/错了会怎样，模型猜的那条只会和源码那条打架
+            if (!pc.normal() && covered.stream().anyMatch(n -> pc.name().contains(n))) {
+                continue;
+            }
             ApiTestCase c = new ApiTestCase();
+            c.setIntent(pc.normal() ? SourceCases.NORMAL : SourceCases.NEGATIVE);
             c.setProject(e.getProject());
             String base = e.getSummary() != null && !e.getSummary().isBlank() ? e.getSummary().trim() : e.getPath();
             String name = base + " · " + pc.name();
@@ -459,12 +654,12 @@ public class AiCaseGenerator {
             c.setHeaders(headers);
             c.setAssertions(pc.assertions() == null ? "[]" : pc.assertions());
             c.setEnabled(pc.enabled());
-            c.setEnvironment("TEST");
-            c.setTestOnly(true);
+            c.setEnvironment(env);
+            c.setTestOnly(!prod);
             c.setEndpointId(e.getId());
             c.setCreatedBy(CREATED_BY);
             c.setSortOrder(pc.normal() ? 50 : 60);
-            StringBuilder desc = new StringBuilder("AI 按抓包生成 · ")
+            StringBuilder desc = new StringBuilder(prod ? "AI 按生产抓包生成 · " : "AI 按抓包生成 · ")
                     .append(pc.normal() ? "正常" : "边界")
                     .append(" · ").append(in.method()).append(' ').append(e.getPath());
             if (pc.basis() != null && !pc.basis().isBlank()) {
@@ -472,7 +667,7 @@ public class AiCaseGenerator {
             }
             desc.append("\n状态：").append(pc.note());
             c.setDescription(desc.toString());
-            ApiTestCase saved = caseService.createCase(c);
+            ApiTestCase saved = caseService.createCase(stamp(job, c));
             collectionService.assign(job.getCollectionId(), List.of(saved.getId()));
             it.getCaseIds().add(saved.getId());
             it.setCases(it.getCases() + 1);
@@ -482,9 +677,65 @@ public class AiCaseGenerator {
                 notes.add(pc.name() + "：" + pc.note());
             }
         }
+        var nt = InsightCases.noToken(insight, EndpointAssertionContext.queryOf(cap),
+                EndpointAssertionContext.headersOf(cap), authService.headersOf(authService.findForCaseProject(e.getProject())),
+                project == null ? null : project.getSuccessCodePath(),
+                project == null ? null : project.getSuccessCodeValue());
+        if (nt != null) {
+            ApiTestCase c = new ApiTestCase();
+            c.setProject(e.getProject());
+            String base = e.getSummary() != null && !e.getSummary().isBlank() ? e.getSummary().trim() : e.getPath();
+            String name = base + " · " + nt.name();
+            c.setName(name.length() > 120 ? name.substring(0, 120) : name);
+            c.setMethod(in.method());
+            c.setPath(e.getPath());
+            c.setQuery(toJson(nt.query()));
+            c.setBody(in.reqBody() == null ? "" : in.reqBody());
+            c.setHeaders(RequirementCaseGenerator.headersJson(nt.headers()));
+            c.setAssertions(nt.assertions());
+            c.setIntent(SourceCases.NEGATIVE);
+            c.setExpectNote(nt.basis() == null ? null
+                    : (nt.suspect() ? "疑似问题：" : "代码行为：") + (nt.basis().length() > 560 ? nt.basis().substring(0, 560) : nt.basis()));
+            c.setEnabled(false);
+            c.setEnvironment(env);
+            c.setTestOnly(!prod);
+            c.setEndpointId(e.getId());
+            c.setCreatedBy(CREATED_BY);
+            c.setSortOrder(65);
+            c.setDescription("源码体检生成 · " + (nt.suspect() ? "疑似问题" : "边界") + " · " + in.method() + ' ' + e.getPath()
+                    + "\n依据：" + nt.basis() + "\n状态：" + nt.note());
+            ApiTestCase saved = caseService.createCase(stamp(job, c));
+            collectionService.assign(job.getCollectionId(), List.of(saved.getId()));
+            it.getCaseIds().add(saved.getId());
+            it.setCases(it.getCases() + 1);
+            if (nt.suspect()) {
+                notes.add(0, "疑似问题：不带 token 仍返回成功，已生成一条停用的用例待确认");
+            }
+        }
+        if (insight != null) {
+            try {
+                var sc = sourceCaseService.generate(e, insight, job.getCollectionId(), true);
+                List<ApiTestCase> mine = caseMapper.findByEndpointId(e.getId()).stream()
+                        .filter(x -> SourceCaseService.CREATED_BY.equals(x.getCreatedBy())).toList();
+                mine.stream().map(ApiTestCase::getId).filter(id -> !it.getCaseIds().contains(id))
+                        .forEach(it.getCaseIds()::add);
+                it.setCases(it.getCases() + sc.created());
+                enabled += sc.enabled();
+                if (sc.created() + sc.fixed() > 0) {
+                    notes.add("按源码补了 " + sc.created() + " 条参数用例" + (sc.fixed() > 0 ? "，纠正 " + sc.fixed() + " 条" : "")
+                            + (sc.notes().isEmpty() ? "" : "（" + String.join("；", sc.notes()) + "）"));
+                }
+            } catch (Exception ex) {
+                log.debug("[ai-case] 源码参数用例失败 {} {}: {}", e.getHttpMethod(), e.getPath(), ex.getMessage());
+            }
+        }
         it.setEnabled(enabled);
         it.setStatus(enabled > 0 ? "ENABLED" : "PENDING");
         it.setNote(notes.isEmpty() ? "按抓包生成，边界用例先停用" : String.join("；", notes));
+    }
+
+    static boolean isProdCapture(Map<String, Object> captureMeta) {
+        return captureMeta != null && "PROD".equalsIgnoreCase(String.valueOf(captureMeta.get("captureEnv")));
     }
 
     private Map<String, String> safeVars(String project) {
@@ -597,7 +848,8 @@ public class AiCaseGenerator {
             if (hasCode) {
                 putEquals(asserts.addObject().put("type", "jsonPath").put("path", codePath), actualCode);
             }
-            addFieldAsserts(asserts, body);
+            FieldTypeAsserts.add(asserts, body, AssertionSource.TRYRUN, "试跑响应里");
+            AssertionSource.markUnset(asserts, AssertionSource.TRYRUN, "试跑返回 " + got);
             return new Verdict(asserts.toString(), true, "试跑通过");
         }
         if (bizOk) {
@@ -607,19 +859,27 @@ public class AiCaseGenerator {
         if (http2xx && hasCode && actualCode != null) {
             putEquals(asserts.addObject().put("type", "jsonPath").put("path", codePath), actualCode);
         }
+        AssertionSource.markUnset(asserts, AssertionSource.TRYRUN, "试跑返回 " + got);
         return new Verdict(asserts.toString(), true, "按预期报错：" + got);
     }
 
-    /** 不试跑：只按项目的成功码约定断言，业务数据没着落的留停用 */
+    /**
+     * 不试跑：断言只能按项目的成功码约定写，没有一条在这个接口的真实响应上成立过，
+     * 所以一律停用——启用了就会在报告里显示成绿的，而它什么都没证明。
+     */
     static Verdict unrun(AiCase ac, String codePath, String successValue,
                          List<String> dataParams, List<String> filled) {
         boolean hasCode = codePath != null && !codePath.isBlank();
         String want = successValue == null || successValue.isBlank() ? "0" : successValue.trim();
         ArrayNode asserts = JSON.createArrayNode();
         if ("SUCCESS".equals(ac.expect())) {
-            asserts.addObject().put("type", "status").put("equals", 200);
+            AssertionSource.mark(asserts.addObject().put("type", "status").put("equals", 200),
+                    AssertionSource.DEFAULT, "成功用例固定断言 HTTP 200");
             if (hasCode) {
-                putEquals(asserts.addObject().put("type", "jsonPath").put("path", codePath), want);
+                ObjectNode a = asserts.addObject().put("type", "jsonPath").put("path", codePath);
+                putEquals(a, want);
+                AssertionSource.mark(a, AssertionSource.CONVENTION,
+                        "项目配置的业务成功码，没在这个接口上验证过");
             }
             List<String> unknown = dataParams == null ? List.of() : dataParams.stream()
                     .filter(d -> filled.stream().noneMatch(f -> f.startsWith(d + " ") || f.startsWith(d + "=")))
@@ -628,7 +888,7 @@ public class AiCaseGenerator {
                 return new Verdict(asserts.toString(), false,
                         "没试跑；" + String.join("、", unknown) + " 是模型编的，换成真实值再启用");
             }
-            return new Verdict(asserts.toString(), true, "没试跑，断言按成功码写的");
+            return new Verdict(asserts.toString(), false, "没试跑，断言按项目成功码约定写的，没验证过；跑一次确认后再启用");
         }
         if (!hasCode) {
             return new Verdict(null, false, "没试跑；项目没配成功码字段，报错用例写不了断言");
@@ -639,7 +899,10 @@ public class AiCaseGenerator {
         } catch (NumberFormatException e) {
             a.put("notEquals", want);
         }
-        return new Verdict(asserts.toString(), true, "没试跑，断言业务码不是成功码");
+        AssertionSource.mark(a, AssertionSource.CONVENTION,
+                "只说明业务码不是成功码 " + want + "，接口因为什么报错没验证过");
+        return new Verdict(asserts.toString(), false,
+                "没试跑，只断言业务码不是成功码——别的原因报错（比如 token 失效）也会通过；跑一次确认后再启用");
     }
 
     private static void putEquals(ObjectNode a, String value) {
@@ -647,52 +910,6 @@ public class AiCaseGenerator {
             a.put("equals", Long.parseLong(value));
         } catch (NumberFormatException e) {
             a.put("equals", value);
-        }
-    }
-
-    /** 数据节点里挑几个有值的字段断言「存在」。值不断言：换一份数据就变 */
-    static void addFieldAsserts(ArrayNode asserts, String body) {
-        JsonNode root;
-        try {
-            root = body == null ? null : JSON.readTree(body);
-        } catch (Exception e) {
-            return;
-        }
-        if (root == null || !root.isObject()) return;
-        String base = null;
-        JsonNode data = null;
-        for (String k : List.of("result", "data")) {
-            if (root.has(k) && !root.get(k).isNull()) {
-                base = "$." + k;
-                data = root.get(k);
-                break;
-            }
-        }
-        if (data == null) return;
-        if (data.isArray()) {
-            if (data.isEmpty() || !data.get(0).isObject()) {
-                asserts.addObject().put("type", "jsonPath").put("path", base).put("exists", true);
-                return;
-            }
-            base = base + "[0]";
-            data = data.get(0);
-        }
-        if (!data.isObject()) {
-            asserts.addObject().put("type", "jsonPath").put("path", base).put("exists", true);
-            return;
-        }
-        int n = 0;
-        Iterator<Map.Entry<String, JsonNode>> it = data.fields();
-        while (it.hasNext() && n < MAX_FIELD_ASSERTS) {
-            var f = it.next();
-            JsonNode v = f.getValue();
-            if (v == null || v.isNull() || (v.isTextual() && v.asText().isEmpty())) continue;
-            if (!f.getKey().matches("[A-Za-z_][\\w]*")) continue;
-            asserts.addObject().put("type", "jsonPath").put("path", base + "." + f.getKey()).put("exists", true);
-            n++;
-        }
-        if (n == 0) {
-            asserts.addObject().put("type", "jsonPath").put("path", base).put("exists", true);
         }
     }
 
@@ -763,12 +980,13 @@ public class AiCaseGenerator {
             }
         });
         for (var p : eps) {
-            if (p.handler().equals(e.getHandler()) && p.path().equals(e.getPath())) {
+            if (Objects.equals(p.handler(), e.getHandler()) && Objects.equals(p.path(), e.getPath())) {
                 return new Parsed(p.params(), p.returnType());
             }
         }
+        if (e.getHandler() == null) return null;
         for (var p : eps) {
-            if (p.handler().equals(e.getHandler())) {
+            if (e.getHandler().equals(p.handler())) {
                 return new Parsed(p.params(), p.returnType());
             }
         }

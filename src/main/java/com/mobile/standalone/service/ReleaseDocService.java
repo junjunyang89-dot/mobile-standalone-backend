@@ -139,6 +139,79 @@ public class ReleaseDocService {
         return rows;
     }
 
+    /** 一个 JIRA 单的原始信息：备注 + 描述全文交给调用方自己解析项目 / 分支 */
+    public record IssueDetail(String key, String url, String summary, String status, String assignee,
+                              String qaAssignee, String text, String dbChanges, String configChanges) {
+    }
+
+    /** 按 Wiki 汇总页版本标题拉全部单（含全部状态）及备注全文 */
+    public List<IssueDetail> listIssueDetails(String versionLabel) {
+        requireCreds();
+        if (versionLabel == null || versionLabel.isBlank()) {
+            throw new IllegalArgumentException("请填写版本定位文案（如 10.9 国内H5）");
+        }
+        String version = versionLabel.trim();
+        GenerateResult out = new GenerateResult();
+        out.setVersion(version);
+        String storageOrHtml = fetchWikiStoragePrefer(props.getIssueListPageId());
+        List<IssueRef> refs = findIssuesUnderVersion(storageOrHtml, version, out, true);
+        if (refs.isEmpty()) {
+            throw new IllegalStateException("在汇总页未找到版本「" + version + "」下的 JIRA 单，请检查文案是否与 Wiki 标题一致");
+        }
+        String jiraBase = resolveJiraBase(refs);
+        List<IssueDetail> rows = new ArrayList<>();
+        for (IssueRef ref : refs) {
+            rows.add(fetchIssueDetail(jiraBase, ref));
+        }
+        return rows;
+    }
+
+    /** 单独刷新一个单 */
+    public IssueDetail fetchIssueDetail(String issueKey) {
+        requireCreds();
+        String key = issueKey == null ? "" : issueKey.trim().toUpperCase(Locale.ROOT);
+        if (!ISSUE_KEY.matcher(key).matches()) {
+            throw new IllegalArgumentException("单号格式不对：" + issueKey);
+        }
+        return fetchIssueDetail(resolveJiraBase(List.of()), new IssueRef(key, null));
+    }
+
+    private IssueDetail fetchIssueDetail(String jiraBase, IssueRef ref) {
+        try {
+            String url = jiraBase + "/rest/api/2/issue/" + URLEncoder.encode(ref.key, StandardCharsets.UTF_8)
+                    + "?expand=names";
+            HttpResponse<String> resp = send(authGet(url));
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                throw new IllegalStateException("JIRA " + ref.key + " HTTP " + resp.statusCode());
+            }
+            JsonNode root = JSON.readTree(resp.body());
+            JsonNode fields = root.path("fields");
+            String qa = findFieldByDisplayName(fields, root.path("names"), "QA Assignee", "QA", "Qa Assignee");
+            StringBuilder text = new StringBuilder();
+            for (JsonNode c : fields.path("comment").path("comments")) {
+                String body = c.path("body").asText("");
+                if (!body.isBlank()) {
+                    text.append(body).append("\n\n");
+                }
+            }
+            String desc = fields.path("description").asText("");
+            if (!desc.isBlank()) {
+                text.append(desc).append("\n");
+            }
+            ParsedComment parsed = parseComment(text.toString());
+            return new IssueDetail(ref.key, trimSlash(jiraBase) + "/browse/" + ref.key,
+                    cleanTaskText(fields.path("summary").asText(ref.key)),
+                    fields.path("status").path("name").asText(""),
+                    fields.path("assignee").path("displayName").asText(""),
+                    qa == null ? "" : qa,
+                    text.toString(), parsed.db, parsed.config);
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("拉取 JIRA " + ref.key + " 失败: " + e.getMessage(), e);
+        }
+    }
+
     /**
      * 重新打开并流转到 Testing，再分配给指定 QA（经办人 + QA Assignee）。
      * 典型路径：已关闭 → Reopen → 重新打开 → Start Progress → 处理中 → Submit for QA → Testing。

@@ -25,9 +25,9 @@
 
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO api_change_reports
-        (project, base_ref, head_ref, summary, report_json, created_at)
+        (project, base_ref, head_ref, summary, report_json, created_at, source)
         VALUES
-        (#{project}, #{baseRef}, #{headRef}, #{summary}, #{reportJson}, #{createdAt})
+        (#{project}, #{baseRef}, #{headRef}, #{summary}, #{reportJson}, #{createdAt}, #{source})
     </insert>
 
     <select id="findById" resultMap="Map">
@@ -38,6 +38,7 @@
         SELECT id, project, base_ref, head_ref, summary, created_at
         FROM api_change_reports
         <where>
+            (source IS NULL OR source &lt;&gt; 'BATCH')
             <if test="project != null and project != ''">
                 AND project = #{project}
             </if>

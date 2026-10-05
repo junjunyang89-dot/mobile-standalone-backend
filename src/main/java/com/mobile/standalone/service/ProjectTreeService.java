@@ -3,6 +3,7 @@ package com.mobile.standalone.service;
 import com.mobile.standalone.entity.ApiProject;
 import com.mobile.standalone.mapper.ApiProjectMapper;
 import com.mobile.standalone.service.apitest.ApiProjectCatalog;
+import com.mobile.standalone.service.apitest.ApiProjectKind;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -78,14 +79,19 @@ public class ProjectTreeService {
         for (Map<String, Object> def : projectService.listCategoryRegistry()) {
             String key = String.valueOf(def.get("key"));
             List<Map<String, Object>> children = byCategory.remove(key);
-            categories.add(categoryNode(key, String.valueOf(def.get("label")),
-                    children == null ? new ArrayList<>() : children));
+            List<Map<String, Object>> kinds = nestKinds(children == null ? List.of() : children);
+            if (kinds.isEmpty()) {
+                continue;
+            }
+            categories.add(categoryNode(key, String.valueOf(def.get("label")), kinds));
         }
-        // 注册表里没有、但项目上确实挂着的分类值：仍旧列出来而不是丢掉。
-        // 静默吞掉的话，那些项目会整个从树上消失，比多一个陌生分类糟得多。
         for (Map.Entry<String, List<Map<String, Object>>> e : byCategory.entrySet()) {
+            List<Map<String, Object>> kinds = nestKinds(e.getValue());
+            if (kinds.isEmpty()) {
+                continue;
+            }
             log.warn("[tree] 分类「{}」未在注册表中，仍按原样展示（{} 个项目）", e.getKey(), e.getValue().size());
-            categories.add(categoryNode(e.getKey(), e.getKey(), e.getValue()));
+            categories.add(categoryNode(e.getKey(), e.getKey(), kinds));
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -110,9 +116,69 @@ public class ProjectTreeService {
         node.put("label", label);
         node.put("type", "CATEGORY");
         node.put("counts", sum);
-        node.put("projectCount", children.size());
+        node.put("projectCount", countProjects(children));
         node.put("children", children);
         return node;
+    }
+
+    private static int countProjects(List<Map<String, Object>> children) {
+        int n = 0;
+        for (Map<String, Object> child : children) {
+            if ("KIND".equals(child.get("type"))) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> inner = (List<Map<String, Object>>) child.get("children");
+                n += inner == null ? 0 : inner.size();
+            } else {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** 空类型不占位。KIND 节点的 key 带上分类前缀，避免两棵产品线下 BACKEND 撞 key */
+    private static List<Map<String, Object>> nestKinds(List<Map<String, Object>> projects) {
+        Map<String, List<Map<String, Object>>> buckets = new LinkedHashMap<>();
+        for (String k : ApiProjectKind.ORDER) {
+            buckets.put(k, new ArrayList<>());
+        }
+        for (Map<String, Object> p : projects) {
+            String kind = ApiProjectKind.normalize(p.get("kind") == null ? null : String.valueOf(p.get("kind")));
+            buckets.computeIfAbsent(kind, x -> new ArrayList<>()).add(p);
+        }
+        String cat = projects.isEmpty() ? "" : parentCategoryKey(projects.get(0));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String k : ApiProjectKind.ORDER) {
+            List<Map<String, Object>> rows = buckets.getOrDefault(k, List.of());
+            if (rows.isEmpty()) {
+                continue;
+            }
+            Map<String, Long> sum = new LinkedHashMap<>();
+            long total = 0;
+            for (Map<String, Object> row : rows) {
+                @SuppressWarnings("unchecked")
+                Map<String, Long> c = (Map<String, Long>) row.get("counts");
+                if (c != null) {
+                    c.forEach((field, v) -> sum.merge(field, v, Long::sum));
+                }
+                total += row.get("total") instanceof Number n ? n.longValue() : 0;
+            }
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("key", (cat.isBlank() ? "" : cat + "/") + k);
+            node.put("label", ApiProjectKind.label(k));
+            node.put("type", "KIND");
+            node.put("kind", k);
+            node.put("counts", sum);
+            node.put("total", total);
+            node.put("projectCount", rows.size());
+            node.put("children", rows);
+            out.add(node);
+        }
+        return out;
+    }
+
+    private static String parentCategoryKey(Map<String, Object> projectNode) {
+        Object k = projectNode.get("categoryKey");
+        return k == null ? "" : String.valueOf(k);
     }
 
     private Map<String, Object> projectNode(ApiProject p, Map<String, Long> counts, long total) {
@@ -135,7 +201,8 @@ public class ProjectTreeService {
         // 展示名读 name 列，不从 code 推导：APP-ESPORTS-iOS 的小写 i 推导不出来
         node.put("label", p.getName() == null || p.getName().isBlank() ? p.getCode() : p.getName());
         node.put("type", "PROJECT");
-        node.put("kind", p.getKind() == null || p.getKind().isBlank() ? "BACKEND" : p.getKind());
+        node.put("kind", ApiProjectKind.of(p));
+        node.put("categoryKey", categoryOf(p));
         node.put("counts", full);
         node.put("total", total);
         node.put("children", modules);

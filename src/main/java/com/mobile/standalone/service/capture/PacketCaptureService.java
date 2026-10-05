@@ -170,6 +170,22 @@ public class PacketCaptureService {
     }
 
     /**
+     * 这场抓包是哪个环境的。只有导入的包会写 {@code .env}；手机现场抓的都按测试环境，返回 null。
+     */
+    public String envOf(String sessionId) {
+        Path out = resolveOut(sessionId);
+        if (out == null) {
+            return null;
+        }
+        Path f = Path.of(out.toAbsolutePath() + ".env");
+        try {
+            return Files.exists(f) ? Files.readString(f, StandardCharsets.UTF_8).trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
      * 找这场抓包的流水文件。
      * <p>
      * 内存里的 {@code lastOut} 一重启就没了，但磁盘和库还在——
@@ -216,6 +232,28 @@ public class PacketCaptureService {
 
     private Path outOf(String sessionId) {
         return resolveOut(sessionId);
+    }
+
+    /**
+     * 已结束那一场的流水，打开历史抓包时用。
+     * <p>
+     * 不碰 {@code lastOut}：看一眼历史不该改掉「上一场」——
+     * 存 token、挂需求单还按 last 取，偷偷换掉的话会拿错那一场的数据。
+     */
+    public List<JsonNode> finishedFlows(String sessionId) {
+        if (sessions.containsKey(sessionId)) {
+            return List.of();
+        }
+        Path out = resolveOut(sessionId);
+        return out == null || !Files.exists(out) ? List.of() : readFlows(out);
+    }
+
+    public java.util.Map<String, Integer> finishedSeenHosts(String sessionId) {
+        return readSeen(resolveOut(sessionId));
+    }
+
+    public java.util.Map<String, Integer> finishedFailedHosts(String sessionId) {
+        return readMap(resolveOut(sessionId), ".failed");
     }
 
     @Getter
@@ -356,10 +394,13 @@ public class PacketCaptureService {
 
     private String iosTip() {
         String ip = lanIp();
+        String host = ip == null ? "本机内网 IP" : ip;
         return "iOS 的代理只能挂在 WiFi 上，没有 USB 直连的办法。"
-                + "请在 手机 设置 → 无线局域网 → 当前网络 → 配置代理 → 手动，"
-                + "服务器填 " + (ip == null ? "（本机内网 IP）" : ip) + "，端口填 " + proxyPort
-                + "。抓完记得改回「关闭」。";
+                + "① 手机 Safari 先临时把代理改成「关闭」，打开 "
+                + "http://" + host + ":3080/api/packet-capture/mitm-ca"
+                + " 安装证书；再到 设置 → 通用 → 关于本机 → 证书信任设置 打开完全信任。"
+                + "② 再把代理改回手动：服务器 " + host + "，端口 " + proxyPort
+                + "。抓完记得改回「关闭」。不要用 mitm.it（直连常 404，且必须先进代理）。";
     }
 
     /** 结束抓包，返回抓到的请求 */
@@ -570,25 +611,71 @@ public class PacketCaptureService {
     }
 
     private String lanIp() {
+        return pickLanIp();
+    }
+
+    /**
+     * 给 iOS 填代理用的本机局域网 IP。
+     * <p>
+     * 不能拿枚举到的第一个 IPv4：Mac 上 USB/雷电网卡经常先冒出 {@code 169.254.x.x}
+     * （链路本地，没人配 DHCP 时自动生成），手机在 WiFi 上根本到不了那个地址。
+     * 优先 RFC1918 私网；再退而求其次用别的非链路本地地址。
+     */
+    static String pickLanIp() {
         try {
-            var ifaces = java.net.NetworkInterface.getNetworkInterfaces();
-            while (ifaces.hasMoreElements()) {
-                var ni = ifaces.nextElement();
+            String bestPrivate = null;
+            String fallback = null;
+            var ifaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces());
+            // en0 / eth0 通常是真正连着 WiFi/有线的那张，优先扫它们
+            ifaces.sort((a, b) -> Integer.compare(lanIfaceScore(b.getName()), lanIfaceScore(a.getName())));
+            for (var ni : ifaces) {
                 if (!ni.isUp() || ni.isLoopback() || ni.isVirtual()) {
                     continue;
                 }
-                var addrs = ni.getInetAddresses();
-                while (addrs.hasMoreElements()) {
-                    var a = addrs.nextElement();
-                    if (a instanceof java.net.Inet4Address && !a.isLoopbackAddress()) {
-                        return a.getHostAddress();
+                for (var a : java.util.Collections.list(ni.getInetAddresses())) {
+                    if (!(a instanceof java.net.Inet4Address) || a.isLoopbackAddress() || a.isLinkLocalAddress()) {
+                        continue;
+                    }
+                    String ip = a.getHostAddress();
+                    if (isRfc1918(ip)) {
+                        if (bestPrivate == null) {
+                            bestPrivate = ip;
+                        }
+                    } else if (fallback == null) {
+                        fallback = ip;
                     }
                 }
             }
+            return bestPrivate != null ? bestPrivate : fallback;
         } catch (Exception ignore) {
             // 拿不到就让人自己填，不要因为这个让整个抓包起不来
+            return null;
         }
-        return null;
+    }
+
+    /** 越大越优先：常见本机网卡名排前面 */
+    static int lanIfaceScore(String name) {
+        if (name == null) return 0;
+        String n = name.toLowerCase(Locale.ROOT);
+        if (n.equals("en0") || n.equals("eth0") || n.equals("wlan0")) return 3;
+        if (n.startsWith("en") || n.startsWith("eth") || n.startsWith("wlan")) return 2;
+        if (n.startsWith("utun") || n.startsWith("awdl") || n.startsWith("llw") || n.startsWith("bridge")) return -1;
+        return 1;
+    }
+
+    static boolean isRfc1918(String ip) {
+        if (ip == null) return false;
+        String[] p = ip.split("\\.");
+        if (p.length != 4) return false;
+        try {
+            int a = Integer.parseInt(p[0]);
+            int b = Integer.parseInt(p[1]);
+            if (a == 10) return true;
+            if (a == 192 && b == 168) return true;
+            return a == 172 && b >= 16 && b <= 31;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     private void exec(String... cmd) {

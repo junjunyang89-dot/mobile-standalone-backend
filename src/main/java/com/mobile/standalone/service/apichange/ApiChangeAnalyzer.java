@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * 分支 vs 基线的接口变更分析：本次提测动了哪些接口、返回体多了/少了哪些字段、涉及哪些表。
@@ -31,6 +32,14 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class ApiChangeAnalyzer {
+
+    /**
+     * {@link OtherChange#getTrivial()} 的一种取值：这个文件在基线最新版里已经一模一样。
+     * <p>
+     * 跟「只改了日志」不是一回事：那是比过了、确实没变；这是<b>没得比</b>——
+     * 改动已经合进基线，拿合并后的基线去比当然一样，不能据此说「不用测」。
+     */
+    public static final String ALREADY_IN_BASE = "基线里已经是同一份代码（多半已合进基线），没有差异";
 
     private static final int GIT_TIMEOUT_SEC = 60;
     /** 单个仓库的变更文件上限：正常一次提测几十个文件，几千个多半是选错了基线 */
@@ -52,12 +61,38 @@ public class ApiChangeAnalyzer {
         private List<TableChange> tables = new ArrayList<>();
         /** 改了但没能归到任何接口上的返回体（可能是被别处引用的公共 DTO） */
         private List<DtoChange> orphanDtos = new ArrayList<>();
+        /** 改了、但整个待测代码里没有别处引用的返回体文件：改了也影响不到任何接口，不进 orphanDtos */
+        private List<String> unusedDtos = new ArrayList<>();
         /**
          * 不是接口变更、但会影响测试的改动：定时任务改了会改变测试环境有什么数据，
          * 缓存 key 变了会出现新老数据混用。这些静默丢掉会让人以为「报告干净＝不用测」。
          */
         private List<OtherChange> otherChanges = new ArrayList<>();
+        /**
+         * 方法级的逻辑改动：哪个方法的判断、公式、配置默认值、定时规则、写库调用改了，以及每一处怎么测。
+         * 文件级的「XxxServiceImpl 改了」回答不了「测什么」，测试还得自己读 diff。
+         */
+        private List<MethodLogicDiff.Change> logicChanges = new ArrayList<>();
         private int changedFiles;
+        /**
+         * 改过的文件在基线最新版里全都一模一样：改动已经合进基线，这份报告比不出任何东西。
+         * 下游据此不能给「低风险、冒烟即可」，而要提示换合并前的基线重新分析。
+         */
+        private boolean alreadyInBase;
+        /**
+         * 深度分析（接口对比分析2 用）：连没改的 Controller 也顺着改了的 Service 找出来、方法级逻辑对比、
+         * 识别「已合进基线」。接口对比分析页不开，结果保持原样。只在分析过程中用，不落库。
+         */
+        @com.fasterxml.jackson.annotation.JsonIgnore
+        private boolean deep;
+        /** 改了但没连到接口的业务类 → 改了哪些方法、谁在调（深度分析才有）；「没连到接口」不等于没人用 */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY)
+        private Map<String, String> implCallers = new LinkedHashMap<>();
+        /** 新读 / 改读的配置在各环境配置文件里配没配（深度分析才有） */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY)
+        private List<ConfigPresence> configPresence = new ArrayList<>();
+        /** 改动文件清单（ADDED / MODIFIED / DELETED），测试评估报告「改动范围」用 */
+        private List<FileChange> files = new ArrayList<>();
         /** 说不清楚的地方都写在这，别让人以为分析是完备的 */
         private List<String> notes = new ArrayList<>();
         /** 从代码里能确证的安全与字段设计问题 */
@@ -85,6 +120,10 @@ public class ApiChangeAnalyzer {
          * 从 endpoints / tables / concurrency / otherChanges 收束，不另跑 git。
          */
         private MustTestGuide.Guide mustTest;
+        /** 分析前拉代码的结果；拉失败时页面要提示「比的是旧代码」 */
+        private Map<String, Object> repoSync;
+        /** 表结构从哪读的、为什么没读到（没关联库、连不上） */
+        private String schemaNote;
     }
 
     @Data
@@ -103,10 +142,19 @@ public class ApiChangeAnalyzer {
         private String payloadType;
         private String file;
         private List<FieldChange> fields = new ArrayList<>();
+        /**
+         * 返回体字段差异的<b>归并</b>——一个要人做的决定一行，而不是一条字段差异一行。
+         * <p>
+         * 前端默认渲染这个；{@link #fields} 留着给「展开看全部」。
+         * 见 {@link DtoChangeRollup}。
+         */
+        private List<DtoChangeRollup.Group> fieldGroups = new ArrayList<>();
         /** 入参变化：新增必填入参会让老客户端直接 400，比返回体多个字段严重得多 */
         private List<ParamChange> params = new ArrayList<>();
         /** 请求体（@RequestBody）的字段变化 */
         private List<FieldChange> bodyFields = new ArrayList<>();
+        /** 请求体字段差异的归并，同 {@link #fieldGroups} */
+        private List<DtoChangeRollup.Group> bodyFieldGroups = new ArrayList<>();
         /** 签名没变但这些实现类改了——逻辑可能变了，仍需回归 */
         private List<String> changedImpls = new ArrayList<>();
         /** 这个接口用到的全部 Service（不只是改了的）：顺着它才能连到表和缓存 key */
@@ -136,6 +184,9 @@ public class ApiChangeAnalyzer {
         private String oldType;
         private String newType;
         private boolean required;
+        /** 仅 TYPE_CHANGED 有值，见 {@link FieldChange#getWireEffect()} */
+        private String wireEffect;
+        private String wireNote;
     }
 
     @Data
@@ -143,7 +194,28 @@ public class ApiChangeAnalyzer {
         /** SCHEDULE / CACHE / CONFIG / MAPPER / SERVICE / OTHER */
         private String kind;
         private String file;
+        /**
+         * 文件名（不含目录）。
+         * <p>
+         * 界面上这一列的宽度只够显示路径开头，于是每一行都是
+         * {@code data-center-service/src/main/java/com/steamcn/datacenter/…} ——
+         * 这一列唯一的信息（<b>是哪个文件</b>）正好被截掉了。
+         * 前端用这个当主显示，完整路径收进 tooltip。
+         */
+        private String fileName;
         private String hint;
+        /**
+         * 没有实质改动时的说明（只挪了位置 / 只改了日志 / 只改了注释空行），否则为 null。
+         * 这类改动照样列出来但排在最后、不进必测清单，免得人对着一行日志去回归。
+         */
+        private String trivial;
+    }
+
+    @Data
+    public static class FileChange {
+        private String path;
+        /** ADDED / MODIFIED / DELETED */
+        private String status;
     }
 
     @Data
@@ -151,6 +223,8 @@ public class ApiChangeAnalyzer {
         private String type;
         private String file;
         private List<FieldChange> fields = new ArrayList<>();
+        /** 归并后的分组，前端默认渲染这个；见 {@link DtoChangeRollup} */
+        private List<DtoChangeRollup.Group> groups = new ArrayList<>();
     }
 
     @Data
@@ -160,6 +234,16 @@ public class ApiChangeAnalyzer {
         private String comment;
         private String oldType;
         private String newType;
+        /**
+         * 仅 TYPE_CHANGED 有值：这次类型变更在 <b>JSON 线上</b>到底变了什么。
+         * SHAPE / NULLABILITY / WIDENING / SAME / UNKNOWN，见 {@link FieldTypeChange}。
+         * <p>
+         * 没有它的话，{@code int → Integer} 和 {@code JSONArray → JSONObject}
+         * 在报告里长得一模一样，而前者 JSON 完全没变、后者客户端必崩。
+         */
+        private String wireEffect;
+        /** 给人看的一句话，{@link FieldTypeChange#describe()} */
+        private String wireNote;
     }
 
     @Data
@@ -171,14 +255,28 @@ public class ApiChangeAnalyzer {
         private boolean ddl;
         /** 具体加了哪列、什么类型——只报表名的话人还得自己翻 SQL */
         private List<DdlChange> ddlDetails = new ArrayList<>();
-        /** 录进来的建表语句；没录过就是空 */
+        /** 建表语句：优先从项目关联的测试库现读，读不到再用手动录入的 */
         private String ddlText;
+        /** 建表语句的来源，如「测试库 app_admin」「手动录入」 */
+        private String ddlSource;
         /** 从建表语句推导出来的测试注意事项 */
         private List<TableTestHints.Hint> testHints = new ArrayList<>();
         /** 人工补充的注意事项 */
         private String remark;
         /** 哪些接口读写这张表——表的注意事项要能落到具体接口上，否则还得人自己翻代码 */
         private List<String> usedByEndpoints = new ArrayList<>();
+        /** 代码这次开始读写的新列（深度分析才有），见 {@link NewColumnScanner} */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY)
+        private List<NewColumn> newColumns = new ArrayList<>();
+    }
+
+    @Data
+    public static class NewColumn {
+        private String column;
+        /** 从哪个文件看出来的 */
+        private String file;
+        /** 分支里的 .sql 有给它加列的语句 */
+        private boolean ddlInBranch;
     }
 
     // ==================== 两种来源 ====================
@@ -202,10 +300,16 @@ public class ApiChangeAnalyzer {
      * 用于拿不到内网、只能把两个分支各拷一份到本地的情况。
      */
     public Report analyzeDirs(String project, String baseDir, String headDir) {
+        return analyzeDirs(project, baseDir, headDir, false);
+    }
+
+    /** @param deep 见 {@link Report#isDeep()} */
+    public Report analyzeDirs(String project, String baseDir, String headDir, boolean deep) {
         Path base = projectRoot(requireDir(baseDir, "基线目录"));
         Path head = projectRoot(requireDir(headDir, "待测目录"));
 
         Report report = new Report();
+        report.setDeep(deep);
         report.setProject(project);
         report.setRepoPath(head.toString());
         report.setBaseRef("目录:" + base.getFileName());
@@ -246,8 +350,75 @@ public class ApiChangeAnalyzer {
                         String rel = xmlIndex.get(FieldTreeBuilder.normalizeKey(simple));
                         return rel == null ? null : readFile(head, rel);
                     }
+
+                    private List<String> headFiles;
+
+                    @Override
+                    public Boolean referenced(String simple, String selfFile) {
+                        if (headFiles == null) {
+                            headFiles = listFiles(head);
+                        }
+                        Pattern word = Pattern.compile("\\b" + Pattern.quote(simple) + "\\b");
+                        for (String rel : headFiles) {
+                            if (isProductionRef(rel, selfFile, deep)) {
+                                String src = readFile(head, rel);
+                                if (src != null && word.matcher(src).find()) {
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+
+                    @Override
+                    public List<String> filesMentioningAny(Set<String> simpleNames) {
+                        if (headFiles == null) {
+                            headFiles = listFiles(head);
+                        }
+                        Pattern word = anyWord(simpleNames);
+                        List<String> out = new ArrayList<>();
+                        for (String rel : headFiles) {
+                            if (!rel.endsWith(".java")) {
+                                continue;
+                            }
+                            String src = readFile(head, rel);
+                            if (src != null && word.matcher(src).find()) {
+                                out.add(rel);
+                            }
+                        }
+                        return out;
+                    }
+
+                    @Override
+                    public List<String> configFiles() {
+                        List<String> out = new ArrayList<>();
+                        try (java.util.stream.Stream<Path> walk = Files.walk(head)) {
+                            for (Path p : (Iterable<Path>) walk.filter(Files::isRegularFile)::iterator) {
+                                String rel = head.relativize(p).toString().replace('\\', '/');
+                                if (!rel.startsWith(".git/") && ConfigPresence.isConfigFile(rel)) {
+                                    out.add(rel);
+                                }
+                            }
+                        } catch (Exception e) {
+                            return null;
+                        }
+                        return out;
+                    }
                 });
         return report;
+    }
+
+    private static Pattern anyWord(Set<String> words) {
+        StringBuilder sb = new StringBuilder("\\b(?:");
+        boolean first = true;
+        for (String w : words) {
+            if (!first) {
+                sb.append('|');
+            }
+            sb.append(Pattern.quote(w));
+            first = false;
+        }
+        return Pattern.compile(sb.append(")\\b").toString());
     }
 
     /** 目录里若没有 pom.xml，但恰好套着一层工程根，就下沉进去——省得人记这层嵌套 */
@@ -409,11 +580,17 @@ public class ApiChangeAnalyzer {
     // ==================== 主流程 ====================
 
     public Report analyze(String project, String repoPath, String baseRef, String headRef) {
+        return analyze(project, repoPath, baseRef, headRef, false);
+    }
+
+    /** @param deep 见 {@link Report#isDeep()} */
+    public Report analyze(String project, String repoPath, String baseRef, String headRef, boolean deep) {
         Path repo = validateRepo(repoPath);
         String base = blankTo(baseRef, "master");
         String head = blankTo(headRef, currentBranch(repo));
 
         Report report = new Report();
+        report.setDeep(deep);
         report.setProject(project);
         report.setRepoPath(repo.toString());
         report.setBaseRef(base);
@@ -457,6 +634,27 @@ public class ApiChangeAnalyzer {
                         String rel = xmlIdx.get(FieldTreeBuilder.normalizeKey(simple));
                         return rel == null ? null : show(repo, head, rel);
                     }
+
+                    @Override
+                    public Boolean referenced(String simple, String selfFile) {
+                        List<String> hits = gitGrepFiles(repo, head, simple);
+                        return hits == null ? null : hits.stream().anyMatch(f -> isProductionRef(f, selfFile, deep));
+                    }
+
+                    @Override
+                    public List<String> filesMentioningAny(Set<String> simpleNames) {
+                        return gitGrepFilesAny(repo, head, simpleNames);
+                    }
+
+                    @Override
+                    public List<String> configFiles() {
+                        String raw = git(repo, "ls-tree", "-r", "--name-only", head);
+                        if (raw == null) {
+                            return null;
+                        }
+                        return java.util.Arrays.stream(raw.split("\n")).map(String::trim)
+                                .filter(ConfigPresence::isConfigFile).toList();
+                    }
                 });
         if (report.getEndpoints().isEmpty() && report.getOrphanDtos().isEmpty()) {
             report.getNotes().add("没扫到接口或返回体变更。若确有接口改动，可能是写法不在已识别的范围内"
@@ -484,6 +682,27 @@ public class ApiChangeAnalyzer {
         default String sourceXml(String simpleName) {
             return null;
         }
+
+        /**
+         * 待测侧除 selfFile 和测试代码外，还有没有文件提到这个类名。
+         * 查不了时返回 null，调用方按「有引用」处理——宁可多报一条，也不能把真改动藏掉。
+         */
+        default Boolean referenced(String simpleName, String selfFile) {
+            return null;
+        }
+
+        /**
+         * 待测侧提到这些类名里任意一个的 .java 文件（整词匹配）。查不了时返回 null。
+         * 只是候选：是不是真注入了、哪个方法用到，调用方再解析确认。
+         */
+        default List<String> filesMentioningAny(Set<String> simpleNames) {
+            return null;
+        }
+
+        /** 待测侧的 application* / bootstrap* 配置文件（相对路径）；查不了时返回 null */
+        default List<String> configFiles() {
+            return null;
+        }
     }
 
     /** git 与目录两种来源共用的装配：解析返回体 -> 关联接口 -> 收表 */
@@ -499,10 +718,25 @@ public class ApiChangeAnalyzer {
                       ClassLocator locator) {
         // 变更文件里出现的所有 Java 简单类名——接口靠它判断「签名没变但实现改了」
         Set<String> changedTypes = new LinkedHashSet<>();
+        int sameAsBase = 0;
         for (String f : changed) {
             if (f.endsWith(".java")) {
                 changedTypes.add(simpleName(f));
             }
+            FileChange fc = new FileChange();
+            fc.setPath(f);
+            String baseText = base.read(f);
+            String headText = head.read(f);
+            fc.setStatus(baseText == null ? "ADDED" : headText == null ? "DELETED" : "MODIFIED");
+            report.getFiles().add(fc);
+            if (baseText != null && normalizeText(baseText).equals(normalizeText(headText))) {
+                sameAsBase++;
+            }
+        }
+        if (report.isDeep() && sameAsBase > 0 && sameAsBase == changed.size()) {
+            report.setAlreadyInBase(true);
+            report.getNotes().add("这个分支改过的 " + sameAsBase + " 个文件，基线最新版里已经一模一样——改动多半已经合进基线，"
+                    + "所以比不出差异。这不代表不用测：如果还没测，把基线换成合并前的提交或上一次发版的 tag 再分析。");
         }
         // 返回体先解析好：接口要靠类型名反查字段
         Map<String, DtoChange> dtoByType = new LinkedHashMap<>();
@@ -526,6 +760,7 @@ public class ApiChangeAnalyzer {
             dc.setType(simpleName(file));
             dc.setFile(file);
             dc.setFields(fc);
+            dc.setGroups(DtoChangeRollup.of(dc.getType(), fc));
             dtoByType.put(dc.getType(), dc);
         }
 
@@ -542,15 +777,29 @@ public class ApiChangeAnalyzer {
             report.getEndpoints().addAll(
                     diffEndpoints(file, baseSrc, headSrc, dtoByType, usedDtoTypes, changedTypes));
         }
+        if (locator != null && report.isDeep()) {
+            attachUnchangedControllers(report, changed, base, head, locator, dtoByType, usedDtoTypes);
+        }
 
         // 没挂到接口上的返回体单独列：可能是公共 DTO 被别处引用，也可能是我没能把它连回接口
         for (Map.Entry<String, DtoChange> e : dtoByType.entrySet()) {
-            if (!usedDtoTypes.contains(e.getKey())) {
-                report.getOrphanDtos().add(e.getValue());
+            if (usedDtoTypes.contains(e.getKey())) {
+                continue;
+            }
+            DtoChange d = e.getValue();
+            // 被删掉的类没法再「被引用」，照常报
+            if (locator != null && head.read(d.getFile()) != null
+                    && Boolean.FALSE.equals(locator.referenced(d.getType(), d.getFile()))) {
+                report.getUnusedDtos().add(d.getFile());
+            } else {
+                report.getOrphanDtos().add(d);
             }
         }
 
         report.setTables(collectTables(changed, base, head, addedLines));
+        if (report.isDeep()) {
+            attachNewColumns(report, changed, base, head);
+        }
         if (locator != null) {
             attachFullFields(report, locator);
             // 必须在 setTables 之后：反向关联要写回 report.tables，
@@ -559,14 +808,22 @@ public class ApiChangeAnalyzer {
             scanRisks(report, changed, head);
         }
         report.setOtherChanges(collectOtherChanges(changed, head, base, report));
+        if (report.isDeep()) {
+            report.setLogicChanges(collectLogicChanges(report, changed, base, head));
+            List<String> cfgFiles = locator == null ? null : locator.configFiles();
+            report.setConfigPresence(ConfigPresence.of(report.getLogicChanges(), cfgFiles, head::read));
+            if (cfgFiles == null && !report.getConfigPresence().isEmpty()) {
+                report.getNotes().add("没能列出待测分支的配置文件，新配置项在各环境有没有配上没检查");
+            }
+        }
         for (EndpointChange e : report.getEndpoints()) {
             e.setRisk(riskOf(e));
+            // 归并放在这里而不是各个 setFields 旁边：上面有三处 setFields/setBodyFields，
+            // 分开写迟早漏一处，而漏掉的表现是那个接口的报告突然退回「一条差异一行」
+            e.setFieldGroups(DtoChangeRollup.of(e.getPayloadType(), e.getFields()));
+            e.setBodyFieldGroups(DtoChangeRollup.of(e.getPayloadType(), e.getBodyFields()));
         }
         report.getEndpoints().sort(java.util.Comparator.comparingInt(e -> RISK_ORDER.indexOf(e.getRisk())));
-        if (!report.getEndpoints().isEmpty() || !report.getOrphanDtos().isEmpty()) {
-            report.getNotes().add("字段按「返回体文件」归集：文件里若有内部类，它们的字段会一并算在该返回体下，"
-                    + "层级不做区分。判断「本次多了哪些字段」够用，要精确到某个内嵌对象请点开文件看。");
-        }
         if (report.getEndpoints().isEmpty() && report.getOrphanDtos().isEmpty()) {
             report.getNotes().add("没扫到接口或返回体变更。若确有接口改动，可能是写法不在已识别的范围内"
                     + "（当前识别 @RestController + @GetMapping/@PostMapping 等），把文件发我加规则。");
@@ -635,6 +892,171 @@ public class ApiChangeAnalyzer {
             }
         }
         return out;
+    }
+
+    /**
+     * 只改了 Service、Controller 一行没动的接口。
+     * <p>
+     * 上面那轮只遍历变更文件里的 Controller，而「改业务逻辑不改签名」恰恰是最常见的改动形态——
+     * 不反查的话这批接口在报告里一条都没有，只剩「其它改动」里一句连不回接口的 SERVICE，
+     * 人会以为报告干净＝不用测。
+     * <p>
+     * 只追一层：Controller 直接注入、且在接口方法体里调用了的类。Service 再调 Service 的链路不追，
+     * 追下去公共 Service 一改就会把半个仓库的接口拉进来，必测清单反而没人看。
+     */
+    private void attachUnchangedControllers(Report report, List<String> changed,
+                                            SideSource base, SideSource head, ClassLocator locator,
+                                            Map<String, DtoChange> dtoByType, Set<String> usedDtoTypes) {
+        Set<String> implTypes = new LinkedHashSet<>();
+        Set<String> words = new LinkedHashSet<>();
+        // 类型名（实现类和接口两种写法）→ 改了的方法；值为 null 表示说不清，按整个类都改了算
+        Map<String, Set<String>> touched = new LinkedHashMap<>();
+        for (String f : changed) {
+            if (!f.endsWith(".java") || JavaApiSourceParser.isTestPath(f)) {
+                continue;
+            }
+            String now = head.read(f);
+            // 删掉的类要是还被注入，Controller 自己也必然改了，上一轮已经报过
+            if (now == null || JavaApiSourceParser.looksLikeController(now)) {
+                continue;
+            }
+            // 只改注释/日志/挪位置的不算：否则补一次注释就拉进一串「实现改了」的接口
+            if (trivialReason(base.read(f), now) != null) {
+                continue;
+            }
+            String type = simpleName(f);
+            implTypes.add(type);
+            words.add(type);
+            Set<String> methods = MethodLogicDiff.touchedMethods(base.read(f), now);
+            touched.put(type, methods);
+            // 改的是 XxxServiceImpl，Controller 里注入的是接口 XxxService
+            if (type.endsWith("Impl") && type.length() > 4) {
+                words.add(type.substring(0, type.length() - 4));
+                touched.putIfAbsent(type.substring(0, type.length() - 4), methods);
+            }
+        }
+        if (words.isEmpty()) {
+            return;
+        }
+        List<String> candidates = locator.filesMentioningAny(words);
+        if (candidates == null) {
+            report.getNotes().add("没能反查「只改了 Service、Controller 没动」的接口（全仓搜索失败），"
+                    + "这类接口不在下面的清单里，请对照「其它改动」里的业务实现手动补。");
+            return;
+        }
+        Set<String> changedFiles = new LinkedHashSet<>(changed);
+        int found = 0;
+        int notCalling = 0;
+        Set<String> linked = new LinkedHashSet<>();
+        for (String file : candidates) {
+            if (changedFiles.contains(file) || JavaApiSourceParser.isTestPath(file)) {
+                continue;
+            }
+            String src = head.read(file);
+            if (!JavaApiSourceParser.looksLikeController(src)) {
+                continue;
+            }
+            Map<String, String> injected = JavaApiSourceParser.injectedFields(src);
+            Map<String, MethodLogicDiff.Member> members = MethodLogicDiff.members(src);
+            for (ApiEndpoint ep : JavaApiSourceParser.parseEndpoints(src)) {
+                List<String> impls = new ArrayList<>();
+                String body = handlerBody(members, ep.handler());
+                boolean skipped = false;
+                for (String svc : ep.usedServices()) {
+                    String hit = implTypes.contains(svc) ? svc : implTypes.contains(svc + "Impl") ? svc + "Impl" : null;
+                    if (hit == null) {
+                        continue;
+                    }
+                    if (!callsTouched(body, injected, svc, touched.get(svc))) {
+                        skipped = true;
+                        continue;
+                    }
+                    impls.add(hit);
+                    linked.add(hit);
+                }
+                if (impls.isEmpty()) {
+                    if (skipped) {
+                        notCalling++;
+                    }
+                    continue;
+                }
+                DtoChange dto = ep.payloadType() == null ? null : dtoByType.get(ep.payloadType());
+                if (dto != null) {
+                    usedDtoTypes.add(ep.payloadType());
+                }
+                DtoChange bodyDto = ep.bodyType() == null ? null : dtoByType.get(ep.bodyType());
+                if (bodyDto != null) {
+                    usedDtoTypes.add(ep.bodyType());
+                }
+                EndpointChange c = toChange("MODIFIED", ep, file, dto);
+                if (bodyDto != null) {
+                    c.setBodyFields(bodyDto.getFields());
+                }
+                c.setChangedImpls(impls);
+                c.setUsedServices(new ArrayList<>(ep.usedServices()));
+                report.getEndpoints().add(c);
+                found++;
+            }
+        }
+        if (found > 0) {
+            report.getNotes().add("有 " + found + " 个接口的 Controller 没改、但它调用的 Service 改了，已按「实现改了」列入。"
+                    + "只追了 Controller 直接注入的那一层；Service 再调 Service 的更深链路没追，"
+                    + "「其它改动」里剩下的业务实现仍需扫一眼。");
+        }
+        if (notCalling > 0) {
+            report.getNotes().add("有 " + notCalling + " 个接口注入了改动的 Service，但接口里调的是它没改的方法，没列入必测。");
+        }
+        for (String type : implTypes) {
+            Set<String> methods = touched.get(type);
+            if (linked.contains(type) || methods == null || methods.isEmpty()) {
+                continue;
+            }
+            Set<String> callers = new LinkedHashSet<>();
+            Pattern call = Pattern.compile("\\.\\s*(?:" + String.join("|", methods.stream().map(Pattern::quote).toList()) + ")\\s*\\(");
+            for (String file : candidates) {
+                if (JavaApiSourceParser.isTestPath(file) || simpleName(file).equals(type)
+                        || simpleName(file).equals(type.replaceFirst("Impl$", ""))) {
+                    continue;
+                }
+                String src = head.read(file);
+                if (src != null && call.matcher(src).find()) {
+                    callers.add(simpleName(file));
+                }
+            }
+            report.getImplCallers().put(type, "改的是 " + String.join("、", methods.stream().map(m -> m + "()").toList())
+                    + (callers.isEmpty() ? "，没找到谁在调" : "，调用方：" + String.join("、", callers)));
+        }
+    }
+
+    /** 接口方法体；同名重载的拼在一起 */
+    private static String handlerBody(Map<String, MethodLogicDiff.Member> members, String handler) {
+        if (handler == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (MethodLogicDiff.Member m : members.values()) {
+            if ("METHOD".equals(m.kind()) && handler.equals(m.name()) && m.body() != null) {
+                sb.append(m.body()).append('\n');
+            }
+        }
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
+    /** 接口里是不是通过注入的 svc 字段调到了改了的方法；方法说不清或方法体找不到时按「调到了」 */
+    private static boolean callsTouched(String body, Map<String, String> injected, String svc, Set<String> methods) {
+        if (methods == null || body == null) {
+            return true;
+        }
+        for (Map.Entry<String, String> e : injected.entrySet()) {
+            if (!svc.equals(e.getValue())) {
+                continue;
+            }
+            Set<String> calls = methods.stream().map(m -> e.getKey() + "." + m).collect(java.util.stream.Collectors.toSet());
+            if (MethodLogicDiff.mentionsAny(body.replaceAll("\\s+", ""), calls, true)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 任一侧为空视为「不同」——新增或删除本来就是变化，而不是崩溃的理由 */
@@ -820,20 +1242,40 @@ public class ApiChangeAnalyzer {
      * 删字段、改类型、<b>新增必填入参</b>归为 BREAKING——最后一类尤其容易被忽略：
      * 老客户端不带这个参数就是直接 400，比返回体多个字段严重得多。
      */
+    /**
+     * 这条字段变更要不要进「可能不兼容」。
+     *
+     * <p>删字段一定要;<b>类型变更要看它在 JSON 线上到底变了什么</b>——
+     * 原来是「TYPE_CHANGED 一律不兼容」,于是一个 DTO 整体换包装类型
+     * 会一次产出二三十条,实测一次提测 79 条里真要问开发的只有一条,
+     * 而噪音的代价是整份报告失去可信度。
+     *
+     * <p>{@link FieldTypeChange#UNKNOWN} 仍然算不兼容:这次改动是降噪,
+     * 它最危险的失败方式就是把真问题一起降没。
+     */
+    private static boolean fieldBreaking(FieldChange f) {
+        if ("REMOVED".equals(f.getChangeType())) {
+            return true;
+        }
+        if (!"TYPE_CHANGED".equals(f.getChangeType())) {
+            return false;
+        }
+        return FieldTypeChange.classify(f.getOldType(), f.getNewType()).breaking();
+    }
+
     static String riskOf(EndpointChange e) {
         // 新接口的入参当然「全是新增必填」，但没有老客户端在调它——判成不兼容是纯噪音，
         // 会把真正的破坏性变更淹掉。这是拿 APP-8928 跑出来才看见的：6 个新接口全被标红。
         if ("ADDED".equals(e.getChangeType())) {
             return "NEW";
         }
-        boolean breaking = e.getFields().stream()
-                .anyMatch(f -> "REMOVED".equals(f.getChangeType()) || "TYPE_CHANGED".equals(f.getChangeType()));
-        breaking = breaking || e.getBodyFields().stream()
-                .anyMatch(f -> "REMOVED".equals(f.getChangeType()) || "TYPE_CHANGED".equals(f.getChangeType()));
+        boolean breaking = e.getFields().stream().anyMatch(ApiChangeAnalyzer::fieldBreaking);
+        breaking = breaking || e.getBodyFields().stream().anyMatch(ApiChangeAnalyzer::fieldBreaking);
         breaking = breaking || e.getParams().stream().anyMatch(p ->
                 ("ADDED".equals(p.getChangeType()) && p.isRequired())
                         || "REMOVED".equals(p.getChangeType())
-                        || "TYPE_CHANGED".equals(p.getChangeType()));
+                        || ("TYPE_CHANGED".equals(p.getChangeType())
+                            && FieldTypeChange.classify(p.getOldType(), p.getNewType()).breaking()));
         if (breaking || "REMOVED".equals(e.getChangeType())) {
             return "BREAKING";
         }
@@ -879,6 +1321,11 @@ public class ApiChangeAnalyzer {
         c.setOldType(oldType);
         c.setNewType(newType);
         c.setRequired(required);
+        if ("TYPE_CHANGED".equals(type)) {
+            FieldTypeChange w = FieldTypeChange.classify(oldType, newType);
+            c.setWireEffect(w.name());
+            c.setWireNote(w.describe());
+        }
         return c;
     }
 
@@ -906,9 +1353,11 @@ public class ApiChangeAnalyzer {
         for (DtoChange d : report.getOrphanDtos()) {
             shown.add(d.getFile());
         }
+        shown.addAll(report.getUnusedDtos());
         List<OtherChange> out = new ArrayList<>();
         for (String file : changed) {
-            if (shown.contains(file)) {
+            // 单测改了不影响线上行为
+            if (shown.contains(file) || isTest(file, report.isDeep())) {
                 continue;
             }
             String src = head.read(file);
@@ -927,8 +1376,187 @@ public class ApiChangeAnalyzer {
             OtherChange c = new OtherChange();
             c.setKind(kind);
             c.setFile(file);
-            c.setHint(hint);
+            c.setFileName(file == null ? null
+                    : file.substring(file.lastIndexOf('/') + 1));
+            String callers = report.getImplCallers().get(simpleName(file));
+            c.setHint(callers != null && kind.startsWith("SERVICE")
+                    ? "业务实现改了，没有接口直接调到改了的方法：" + callers + "——从调用方入口测" : hint);
+            if (file.endsWith(".java")) {
+                c.setTrivial(trivialReason(base.read(file), src));
+            }
             out.add(c);
+        }
+        // 没实质改动的排最后
+        out.sort(java.util.Comparator.comparing(c -> c.getTrivial() != null));
+        return out;
+    }
+
+    /** 一份报告里逻辑改动的上限：上百条时人只会全部跳过 */
+    private static final int MAX_LOGIC_CHANGES = 300;
+
+    /**
+     * 逐个改了的 Java 文件做方法级对比，并把每条改动挂到经过它的接口上。
+     * 返回体 / 单测 / 只改了注释日志的文件不看：前两个有专门的分析，后一个没有逻辑变化。
+     */
+    private List<MethodLogicDiff.Change> collectLogicChanges(Report report, List<String> changed,
+                                                             SideSource base, SideSource head) {
+        List<MethodLogicDiff.Change> out = new ArrayList<>();
+        for (String file : changed) {
+            if (!file.endsWith(".java") || JavaApiSourceParser.isTestPath(file)) {
+                continue;
+            }
+            String now = head.read(file);
+            String was = base.read(file);
+            if (now == null || JavaApiSourceParser.looksLikeDto(file, now) || trivialReason(was, now) != null) {
+                continue;
+            }
+            List<MethodLogicDiff.Change> found = MethodLogicDiff.diff(file, was, now);
+            boolean controller = JavaApiSourceParser.looksLikeController(now);
+            for (MethodLogicDiff.Change c : found) {
+                for (EndpointChange e : report.getEndpoints()) {
+                    boolean hit = controller
+                            ? file.equals(e.getFile()) && (c.getMember().equals(e.getHandler()) || isField(c))
+                            : e.getChangedImpls().contains(c.getClassName());
+                    if (hit) {
+                        c.getEndpoints().add(e.getHttpMethod() + " " + e.getPath());
+                    }
+                }
+            }
+            out.addAll(found);
+            if (out.size() >= MAX_LOGIC_CHANGES) {
+                report.getNotes().add("逻辑改动超过 " + MAX_LOGIC_CHANGES + " 条，只列了前 " + MAX_LOGIC_CHANGES
+                        + " 条。改动这么大通常是基线选错了，或者这一单本身就该拆开测。");
+                return new ArrayList<>(out.subList(0, MAX_LOGIC_CHANGES));
+            }
+        }
+        return out;
+    }
+
+    private static boolean isField(MethodLogicDiff.Change c) {
+        return "CONFIG".equals(c.getKind()) || "CONSTANT".equals(c.getKind());
+    }
+
+    private static final Pattern LOG_CALL = Pattern.compile(
+            "\\b(?:log|logger|LOG|LOGGER)\\s*\\.\\s*(?:trace|debug|info|warn|error)\\s*\\("
+                    + "(?:[^;\"']|\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')*\\)\\s*;"
+                    + "|\\bSystem\\.(?:out|err)\\.print(?:ln)?\\s*\\((?:[^;\"]|\"(?:[^\"\\\\]|\\\\.)*\")*\\)\\s*;");
+
+    /**
+     * 两版 Java 源码之间如果没有实质改动，返回一句说明；有实质改动返回 null。
+     * <p>
+     * 认三种：只改了注释 / 空行 / 缩进 / import；整块方法挪了位置；只增删改了日志语句。
+     * 拿不准的一律算实质改动——语句换了顺序就是逻辑变了，不能当成「挪位置」。
+     */
+    static String trivialReason(String before, String after) {
+        if (before == null || after == null) {
+            return null;
+        }
+        // 变更清单按分叉点算，比对读的是基线最新版：分支上的改动已经合进基线时两边一字不差
+        if (normalizeText(before).equals(normalizeText(after))) {
+            return ALREADY_IN_BASE;
+        }
+        List<String> b = codeLines(before);
+        List<String> a = codeLines(after);
+        if (b.equals(a)) {
+            return "只改了注释、空行或 import，逻辑没变";
+        }
+        if (membersReordered(b, a)) {
+            return "只是挪了方法位置，内容没变";
+        }
+        List<String> bn = codeLines(LOG_CALL.matcher(before).replaceAll(" "));
+        List<String> an = codeLines(LOG_CALL.matcher(after).replaceAll(" "));
+        if (bn.equals(an) || membersReordered(bn, an)) {
+            return "只增删或改了日志，逻辑没变";
+        }
+        return null;
+    }
+
+    /**
+     * 按类成员（方法、字段、内部类，各自连同注解）切开比：类头一样、成员集合一样，只是顺序不同。
+     * 只能整块挪——方法体里语句换了顺序，那个成员本身就不一样了。
+     */
+    static boolean membersReordered(List<String> b, List<String> a) {
+        List<List<String>> sb = splitMembers(b);
+        List<List<String>> sa = splitMembers(a);
+        if (sb == null || sa == null || !sb.get(0).equals(sa.get(0))) {
+            return false;
+        }
+        List<String> mb = new ArrayList<>(sb.get(1));
+        List<String> ma = new ArrayList<>(sa.get(1));
+        java.util.Collections.sort(mb);
+        java.util.Collections.sort(ma);
+        return mb.equals(ma);
+    }
+
+    /** [类头/类尾这些顶层行, 成员文本]；括号对不上时返回 null */
+    private static List<List<String>> splitMembers(List<String> lines) {
+        List<String> frame = new ArrayList<>();
+        List<String> members = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        int depth = 0;
+        for (String line : lines) {
+            int before = depth;
+            depth += braceDelta(line);
+            if (depth < 0) {
+                return null;
+            }
+            if (before == 0) {
+                frame.add(line);
+                continue;
+            }
+            if (before == 1 && depth == 0) {
+                if (cur.length() > 0) {
+                    members.add(cur.toString());
+                    cur.setLength(0);
+                }
+                frame.add(line);
+                continue;
+            }
+            cur.append(line).append('\n');
+            if (depth == 1 && (line.endsWith(";") || line.endsWith("}"))) {
+                members.add(cur.toString());
+                cur.setLength(0);
+            }
+        }
+        if (depth != 0) {
+            return null;
+        }
+        if (cur.length() > 0) {
+            members.add(cur.toString());
+        }
+        return List.of(frame, members);
+    }
+
+    /** 一行里 { 比 } 多几个；字符串和字符字面量里的不算 */
+    private static int braceDelta(String line) {
+        int d = 0;
+        char quote = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (quote != 0) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '{') {
+                d++;
+            } else if (c == '}') {
+                d--;
+            }
+        }
+        return d;
+    }
+
+    private static List<String> codeLines(String src) {
+        List<String> out = new ArrayList<>();
+        for (String line : JavaApiSourceParser.stripCommentsKeepStrings(normalizeText(src)).split("\n")) {
+            String t = line.trim().replaceAll("\\s+", " ");
+            if (!t.isEmpty() && !t.startsWith("import ")) {
+                out.add(t);
+            }
         }
         return out;
     }
@@ -978,6 +1606,13 @@ public class ApiChangeAnalyzer {
         c.setComment(comment);
         c.setOldType(oldType);
         c.setNewType(newType);
+        // 在工厂里算一次：散在各处的话，迟早有一条路径忘了算，
+        // 而忘了算的表现是 wireEffect 为空 → 按 UNKNOWN 处理 → 又变回「全是不兼容」
+        if ("TYPE_CHANGED".equals(type)) {
+            FieldTypeChange w = FieldTypeChange.classify(oldType, newType);
+            c.setWireEffect(w.name());
+            c.setWireNote(w.describe());
+        }
         return c;
     }
 
@@ -1020,6 +1655,37 @@ public class ApiChangeAnalyzer {
             }
         }
         return new ArrayList<>(out.values());
+    }
+
+    private void attachNewColumns(Report report, List<String> changed, SideSource base, SideSource head) {
+        List<NewColumnScanner.Hit> hits = NewColumnScanner.scan(changed, base::read, head::read);
+        if (hits.isEmpty()) {
+            return;
+        }
+        StringBuilder sql = new StringBuilder();
+        for (String f : changed) {
+            if (f.toLowerCase(Locale.ROOT).endsWith(".sql")) {
+                String s = head.read(f);
+                if (s != null) {
+                    sql.append(s).append("\n;\n");
+                }
+            }
+        }
+        for (NewColumnScanner.Hit h : hits) {
+            TableChange tc = report.getTables().stream().filter(x -> x.getTable().equalsIgnoreCase(h.table()))
+                    .findFirst().orElse(null);
+            if (tc == null) {
+                tc = new TableChange();
+                tc.setTable(h.table());
+                tc.getFiles().add(h.file());
+                report.getTables().add(tc);
+            }
+            NewColumn c = new NewColumn();
+            c.setColumn(h.column());
+            c.setFile(h.file());
+            c.setDdlInBranch(NewColumnScanner.declaredIn(sql.toString(), h.table(), h.column()));
+            tc.getNewColumns().add(c);
+        }
     }
 
     private static boolean looksLikeDdl(String diffAdded) {
@@ -1113,6 +1779,49 @@ public class ApiChangeAnalyzer {
         return currentBranch(validateRepo(repoPath));
     }
 
+    /**
+     * 刚 fetch 过的仓库里，本地 master 可能还停在上周，origin/master 才是最新的。
+     * 有同名远程分支就用远程的；没有（纯本地分支、提交号）原样返回。
+     */
+    public String preferRemote(String repoPath, String ref) {
+        if (ref == null || ref.isBlank() || ref.startsWith("origin/")) {
+            return ref;
+        }
+        Path repo = validateRepo(repoPath);
+        String remote = "origin/" + ref.trim();
+        return git(repo, "rev-parse", "--verify", "--quiet", remote + "^{commit}") != null ? remote : ref;
+    }
+
+    public enum MergeStatus { MERGED, OPEN, GONE }
+
+    /**
+     * 分支是否已经合进基线。只是给「分支已上线」按钮一个提示，上线仍由人确认：
+     * 刚拉出来还没提交的分支也会被判成 MERGED，但那种分支不会有分析出来的改动。
+     */
+    public MergeStatus mergeStatus(String repoPath, String branch, String base) {
+        Path repo = validateRepo(repoPath);
+        String head = preferRemote(repoPath, branch);
+        if (git(repo, "rev-parse", "--verify", "--quiet", head + "^{commit}") == null) {
+            return MergeStatus.GONE;
+        }
+        String b = preferRemote(repoPath, base == null || base.isBlank() ? "master" : base.trim());
+        return git(repo, "merge-base", "--is-ancestor", head, b) != null ? MergeStatus.MERGED : MergeStatus.OPEN;
+    }
+
+    /** 分支下拉用：origin/xxx 和本地 xxx 只出一条，按最近提交排 */
+    public static List<String> displayBranches(List<String> raw) {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        if (raw != null) {
+            for (String b : raw) {
+                if (b == null || b.isBlank()) {
+                    continue;
+                }
+                out.add(b.startsWith("origin/") ? b.substring("origin/".length()) : b);
+            }
+        }
+        return new ArrayList<>(out);
+    }
+
     private String currentBranch(Path repo) {
         String b = git(repo, "rev-parse", "--abbrev-ref", "HEAD");
         return b == null || b.isBlank() ? "HEAD" : b.trim();
@@ -1127,7 +1836,7 @@ public class ApiChangeAnalyzer {
 
     private Path validateRepo(String repoPath) {
         if (repoPath == null || repoPath.isBlank()) {
-            throw new IllegalArgumentException("请先在「接口项目」里配置该项目的本地仓库路径");
+            throw new IllegalArgumentException("这个项目还没有本地仓库：去「项目管理」填 GitLab 地址，或点「同步代码」");
         }
         Path p = Path.of(repoPath.trim()).toAbsolutePath().normalize();
         if (!Files.isDirectory(p)) {
@@ -1141,6 +1850,53 @@ public class ApiChangeAnalyzer {
 
     /** 只读地跑一条 git 命令；失败返回 null（文件在该版本不存在是正常情况，不该抛异常） */
     private String git(Path repo, String... args) {
+        return git(repo, false, args);
+    }
+
+    /** 待测版本里提到这个类名的文件；git 出错时返回 null */
+    private List<String> gitGrepFiles(Path repo, String ref, String word) {
+        return gitGrepFiles(repo, ref, List.of("grep", "-l", "-w", "-F", "-e", word, ref, "--", "*.java", "*.xml"));
+    }
+
+    /** 待测版本里提到这些类名中任意一个的 .java 文件；git 出错时返回 null */
+    private List<String> gitGrepFilesAny(Path repo, String ref, Set<String> words) {
+        List<String> args = new ArrayList<>(List.of("grep", "-l", "-w", "-F"));
+        for (String w : words) {
+            args.add("-e");
+            args.add(w);
+        }
+        args.addAll(List.of(ref, "--", "*.java"));
+        return gitGrepFiles(repo, ref, args);
+    }
+
+    private List<String> gitGrepFiles(Path repo, String ref, List<String> args) {
+        String raw = git(repo, true, args.toArray(new String[0]));
+        if (raw == null) {
+            return null;
+        }
+        List<String> out = new ArrayList<>();
+        String prefix = ref + ":";
+        for (String line : raw.split("\n")) {
+            String f = line.trim();
+            if (!f.isEmpty()) {
+                out.add(f.startsWith(prefix) ? f.substring(prefix.length()) : f);
+            }
+        }
+        return out;
+    }
+
+    static boolean isProductionRef(String file, String selfFile, boolean deep) {
+        return !file.equals(selfFile) && !isTest(file, deep)
+                && (file.endsWith(".java") || file.endsWith(".xml"));
+    }
+
+    /** 接口对比分析页沿用原来的判断（只认 /src/test/）；深度分析连单模块仓库根下的 src/test/ 也算 */
+    private static boolean isTest(String file, boolean deep) {
+        return deep ? JavaApiSourceParser.isTestPath(file) : file.contains("/src/test/");
+    }
+
+    /** grepStyle：退出码 1 表示「没搜到」而不是出错（git grep 的约定） */
+    private String git(Path repo, boolean grepStyle, String... args) {
         List<String> cmd = new ArrayList<>(List.of("git", "-c", "core.quotepath=false", "-C", repo.toString()));
         cmd.addAll(List.of(args));
         try {
@@ -1160,7 +1916,10 @@ public class ApiChangeAnalyzer {
                 log.warn("[api-change] git 超时: {}", String.join(" ", cmd));
                 return null;
             }
-            return p.exitValue() == 0 ? sb.toString() : null;
+            if (p.exitValue() == 0) {
+                return sb.toString();
+            }
+            return grepStyle && p.exitValue() == 1 ? "" : null;
         } catch (Exception e) {
             log.warn("[api-change] git 执行失败 {}: {}", String.join(" ", args), e.getMessage());
             return null;

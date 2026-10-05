@@ -7,6 +7,34 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ApiTestRunnerServiceTest {
 
+    private static com.mobile.standalone.entity.ApiTestEnv envWithToken(String t) {
+        var e = new com.mobile.standalone.entity.ApiTestEnv();
+        e.setDefaultToken(t);
+        return e;
+    }
+
+    @Test
+    void tokenVariable_fallsBackToEnvDefaultSoQueryTokenResolves() throws Exception {
+        var vars = ApiTestRunnerService.withToken(new java.util.LinkedHashMap<>(), null, null, envWithToken(" env-t "));
+        assertEquals("env-t", vars.get("token"));
+        String url = ApiTestRunnerService.buildUrl("https://gwapi-staging.pwesports.cn",
+                "/apppush/user/message/msgClassNew", "{\"token\":\"{{token}}\"}",
+                s -> com.mobile.standalone.service.apitest.VariableResolver.resolve(s, java.util.Map.of(), vars));
+        assertEquals("https://gwapi-staging.pwesports.cn/apppush/user/message/msgClassNew?token=env-t", url);
+    }
+
+    @Test
+    void tokenVariable_priorityOverrideThenLoginThenProjectVarThenEnv() {
+        var env = envWithToken("env-t");
+        assertEquals("manual", ApiTestRunnerService.withToken(
+                new java.util.LinkedHashMap<>(java.util.Map.of("token", "var-t")), "manual", "login-t", env).get("token"));
+        assertEquals("login-t", ApiTestRunnerService.withToken(
+                new java.util.LinkedHashMap<>(java.util.Map.of("token", "var-t")), null, "login-t", env).get("token"));
+        assertEquals("var-t", ApiTestRunnerService.withToken(
+                new java.util.LinkedHashMap<>(java.util.Map.of("token", "var-t")), null, null, env).get("token"));
+        assertNull(ApiTestRunnerService.withToken(new java.util.LinkedHashMap<>(), null, null, envWithToken("")).get("token"));
+    }
+
     @Test
     void buildUrl_relativeWithQuery() throws Exception {
         String url = ApiTestRunnerService.buildUrl(

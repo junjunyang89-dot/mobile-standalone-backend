@@ -12,6 +12,8 @@
         <result property="requirementRef" column="requirement_ref"/>
         <result property="caseKind" column="case_kind"/>
         <result property="sourceBranch" column="source_branch"/>
+        <result property="intent" column="intent"/>
+        <result property="expectNote" column="expect_note"/>
         <result property="method" column="method"/>
         <result property="path" column="path"/>
         <result property="urlId" column="url_id"/>
@@ -98,6 +100,13 @@
         ORDER BY source_branch
     </select>
 
+    <update id="promoteToRegression">
+        UPDATE api_test_cases
+           SET collection_id = #{collectionId}, case_kind = 'REGRESSION', source_branch = NULL
+         WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
+
     <select id="findByEndpointId" resultMap="ApiTestCaseMap">
         SELECT * FROM api_test_cases WHERE endpoint_id = #{endpointId}
         ORDER BY sort_order, created_at
@@ -116,13 +125,13 @@
 
     <insert id="insert">
         INSERT INTO api_test_cases
-        (id, project, environment, name, description, requirement_ref, case_kind, source_branch,
+        (id, project, environment, name, description, requirement_ref, case_kind, source_branch, intent, expect_note,
          method, path, url_id, query, headers, body,
          assertions, extract_json, field_notes, enabled, test_only, sort_order, created_by, endpoint_id, created_at, updated_at)
         VALUES
         (#{id}, #{project}, #{environment}, #{name}, #{description}, #{requirementRef},
          <!-- 空值交给列默认值 UNCLASSIFIED，别在这儿写死 -->
-         COALESCE(#{caseKind}, 'UNCLASSIFIED'), #{sourceBranch},
+         COALESCE(#{caseKind}, 'UNCLASSIFIED'), #{sourceBranch}, #{intent}, #{expectNote},
          #{method}, #{path}, #{urlId},
          #{query}, #{headers}, #{body},
          #{assertions}, #{extractJson}, #{fieldNotes}, #{enabled}, #{testOnly}, #{sortOrder}, #{createdBy}, #{endpointId},
@@ -148,7 +157,17 @@
               而那正是它该有的语义：它是来历，不是可编辑属性。
             -->
             case_kind = COALESCE(#{caseKind}, case_kind),
-            source_branch = COALESCE(#{sourceBranch}, source_branch),
+            <!--
+              source_branch 不用 COALESCE：空值在这里是「明确要清空」（前端传空串，
+              service 规范化成 null）。套上 COALESCE 的话，清空会静默失效 ——
+              点了「清除来源分支」，界面显示清了，库里还是老值，刷新又回来。
+              「没带这个字段」的情况由 updateCase 从库里沿用，已经在服务层兜住了。
+              case_kind 保留 COALESCE：它是 NOT NULL，没有「清空」这个语义。
+            -->
+            source_branch = #{sourceBranch},
+            <!-- 同上：前端编辑框不带这两个字段，整体覆盖时别把它们抹成 null -->
+            intent = COALESCE(#{intent}, intent),
+            expect_note = COALESCE(#{expectNote}, expect_note),
             method = #{method},
             path = #{path},
             url_id = #{urlId},

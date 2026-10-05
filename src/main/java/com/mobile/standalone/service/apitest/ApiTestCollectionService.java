@@ -101,6 +101,8 @@ public class ApiTestCollectionService {
             m.put("endpointId", c.getEndpointId());
             m.put("caseKind", c.getCaseKind());
             m.put("sourceBranch", c.getSourceBranch());
+            m.put("intent", c.getIntent());
+            m.put("expectNote", c.getExpectNote());
             m.put("updatedAt", c.getUpdatedAt());
             out.add(m);
         }
@@ -124,6 +126,9 @@ public class ApiTestCollectionService {
         Map<String, Map<String, Map<String, Object>>> collectionsByProjectBranch = new LinkedHashMap<>();
         indexTestCollections(collectionsByProjectReq, collectionsByProjectBranch,
                 mapper.findAll(null, ApiTestCollection.SCOPE_TEST, null, includeArchived, null, null));
+        Map<String, String> baseBranches = projectBaseBranches();
+        collectionsByProjectBranch.forEach((code, byBranch) ->
+                byBranch.keySet().removeIf(b -> BaselineBranches.isBaseline(b, baseBranches.get(code))));
 
         Map<String, List<Map<String, Object>>> branchesByProject = new LinkedHashMap<>();
         for (Map<String, Object> r : endpointService.summaryByBranch()) {
@@ -132,7 +137,7 @@ public class ApiTestCollectionService {
                 continue;
             }
             String branch = treeStr(r.get("branch"));
-            if (branch.isBlank()) {
+            if (branch.isBlank() || BaselineBranches.isBaseline(branch, baseBranches.get(code))) {
                 continue;
             }
             Map<String, Object> item = branchLeafItem(code, branch);
@@ -361,14 +366,24 @@ public class ApiTestCollectionService {
 
     private List<Map<String, Object>> interfacePreviewsForBranch(String project, String branch, String collectionId) {
         List<Map<String, Object>> endpoints = new ArrayList<>();
+        java.util.Set<String> ofBranch = endpointService.endpointIdsOfBranch(project, branch);
+        Map<String, List<Map<String, Object>>> changes = endpointService.branchesOfEndpoints(ofBranch);
         for (var ep : endpointService.search(project, null, null, null)) {
-            if (!branch.equals(treeStr(ep.getSourceBranch()))) {
+            if (!ofBranch.contains(ep.getId()) && !branch.equals(treeStr(ep.getSourceBranch()))) {
                 continue;
             }
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("httpMethod", ep.getHttpMethod());
             row.put("path", ep.getPath());
             row.put("summary", ep.getSummary());
+            row.put("endpointId", ep.getId());
+            Map<String, Object> own = changes.getOrDefault(ep.getId(), List.of()).stream()
+                    .filter(c -> branch.equals(treeStr(c.get("branch"))))
+                    .findFirst().orElse(null);
+            if (own != null) {
+                row.put("changeFlag", own.get("changeFlag"));
+                row.put("changeNote", own.get("changeNote"));
+            }
             endpoints.add(row);
         }
         return mergeInterfacePreviews(endpoints, collectionId);
@@ -400,6 +415,10 @@ public class ApiTestCollectionService {
             }
             if (ep.get("endpointId") != null) {
                 preview.put("endpointId", ep.get("endpointId"));
+            }
+            if (ep.get("changeFlag") != null) {
+                preview.put("changeFlag", ep.get("changeFlag"));
+                preview.put("changeNote", ep.get("changeNote"));
             }
             grouped.put(key, preview);
         }
@@ -477,6 +496,9 @@ public class ApiTestCollectionService {
             }
 
             Map<String, int[]> coreByController = coreCoverageByController(code);
+            Map<String, List<Map<String, Object>>> changesByEndpoint = endpointService.branchesOfEndpoints(
+                    cases.stream().map(r -> treeStr(r.get("endpointId"))).collect(java.util.stream.Collectors.toSet()));
+            String baseBranch = projectBaseBranches().get(treeProjectCode(code));
             List<Map<String, Object>> controllers = new ArrayList<>();
             for (Map.Entry<String, List<Map<String, Object>>> ce : byController.entrySet()) {
                 Map<String, Object> ctrlNode = new LinkedHashMap<>();
@@ -499,6 +521,22 @@ public class ApiTestCollectionService {
                 }
                 ctrlNode.put("searchText", String.join("\n", words));
                 ctrlNode.put("statusTag", "已上线");
+                Set<String> changedIds = new LinkedHashSet<>();
+                Set<String> changeBranches = new LinkedHashSet<>();
+                for (Map<String, Object> row : ce.getValue()) {
+                    String epId = treeStr(row.get("endpointId"));
+                    for (Map<String, Object> ch : changesByEndpoint.getOrDefault(epId, List.of())) {
+                        String br = treeStr(ch.get("branch"));
+                        if (!br.isBlank() && !BaselineBranches.isBaseline(br, baseBranch)) {
+                            changedIds.add(epId);
+                            changeBranches.add(br);
+                        }
+                    }
+                }
+                if (!changedIds.isEmpty()) {
+                    ctrlNode.put("changeCount", changedIds.size());
+                    ctrlNode.put("changeBranches", new ArrayList<>(changeBranches));
+                }
                 // 执行报告页靠它建接口树，截断的话排在后面的接口永远看不到报告；同一接口多条用例只留一条
                 List<Map<String, Object>> previews = new ArrayList<>();
                 java.util.Set<String> seenIface = new java.util.HashSet<>();
@@ -602,6 +640,7 @@ public class ApiTestCollectionService {
         try {
             for (ApiEndpoint ep : endpointService.search(project, null, null, null)) {
                 if (ep.isRetired() || "DEPRECATED".equals(ep.getStatus())
+                        || (ep.getSourceBranch() != null && !ep.getSourceBranch().isBlank())
                         || ApiEndpointService.levelOf(ep) != EndpointLevel.CORE) {
                     continue;
                 }
@@ -659,6 +698,20 @@ public class ApiTestCollectionService {
             if (p.getCategory() != null && !p.getCategory().isBlank()) {
                 out.put(p.getCode(), p.getCategory().trim().toUpperCase(Locale.ROOT));
             }
+        }
+        return out;
+    }
+
+    private Map<String, String> projectBaseBranches() {
+        Map<String, String> out = new HashMap<>();
+        try {
+            for (ApiProject p : projectMapper.findAll(null)) {
+                if (p.getBaseBranch() != null && !p.getBaseBranch().isBlank()) {
+                    out.put(treeProjectCode(p.getCode()), p.getBaseBranch().trim());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[collection] 取项目基线分支失败: {}", e.getMessage());
         }
         return out;
     }
@@ -743,8 +796,30 @@ public class ApiTestCollectionService {
         out.put("caseTotal", rows.size());
         out.put("page", safePage);
         out.put("size", safeSize);
-        out.put("items", groups.subList(Math.min(from, total), Math.min(from + safeSize, total)));
+        List<Map<String, Object>> items = groups.subList(Math.min(from, total), Math.min(from + safeSize, total));
+        attachBranchChanges(items);
+        out.put("items", items);
         return out;
+    }
+
+    /** 全量里的接口被哪些在测分支改了：页面上打标记，悬停看是哪个分支、改了什么 */
+    private void attachBranchChanges(List<Map<String, Object>> items) {
+        List<String> ids = items.stream().map(g -> treeStr(g.get("endpointId"))).filter(s -> !s.isBlank()).toList();
+        Map<String, List<Map<String, Object>>> byEndpoint = endpointService.branchesOfEndpoints(ids);
+        Map<String, String> baseBranches = projectBaseBranches();
+        for (Map<String, Object> g : items) {
+            List<Map<String, Object>> changes = byEndpoint.get(treeStr(g.get("endpointId")));
+            if (changes == null || changes.isEmpty()) {
+                continue;
+            }
+            String code = treeProjectCode(g.get("project"));
+            List<Map<String, Object>> own = changes.stream()
+                    .filter(c -> !BaselineBranches.isBaseline(treeStr(c.get("branch")), baseBranches.get(code)))
+                    .toList();
+            if (!own.isEmpty()) {
+                g.put("branchChanges", own);
+            }
+        }
     }
 
     static List<Map<String, Object>> filterLiveRows(List<Map<String, Object>> rows, String controller,
@@ -781,6 +856,8 @@ public class ApiTestCollectionService {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("method", method);
                 m.put("path", path);
+                m.put("project", r.get("project"));
+                m.put("endpointId", null);
                 m.put("title", interfaceTitle(r));
                 m.put("level", null);
                 m.put("cases", new ArrayList<Map<String, Object>>());
@@ -789,6 +866,9 @@ public class ApiTestCollectionService {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> cases = (List<Map<String, Object>>) g.get("cases");
             cases.add(r);
+            if (g.get("endpointId") == null && r.get("endpointId") != null) {
+                g.put("endpointId", r.get("endpointId"));
+            }
             if ("CORE".equals(r.get("level"))) {
                 g.put("level", "CORE");
             }
@@ -1222,6 +1302,76 @@ public class ApiTestCollectionService {
         out.put("requirementMarked", marked);
         out.put("sourceBranch", branch);
         out.put("endpointsPromotedToMaster", promoted);
+        return out;
+    }
+
+    /**
+     * 分支已上线：老接口换成分支版本、新增接口进全量，分支下的用例挪进项目的全量集合并转成回归用例，
+     * 分支集合归档。
+     */
+    @Transactional
+    public Map<String, Object> releaseBranch(String project, String branch) {
+        if (project == null || project.isBlank() || branch == null || branch.isBlank()) {
+            throw new IllegalArgumentException("项目和分支都必填");
+        }
+        String code = treeProjectCode(project);
+        String br = branch.trim();
+        ApiProject p = projectMapper.findByCode(project.trim());
+        if (BaselineBranches.isBaseline(br, p == null ? null : p.getBaseBranch())) {
+            throw new IllegalArgumentException("「" + br + "」是基线分支，没有上线这一步");
+        }
+
+        Set<String> rawProjects = new LinkedHashSet<>();
+        rawProjects.add(project.trim());
+        endpointService.projectsOfBranch(br).stream()
+                .filter(raw -> code.equals(treeProjectCode(raw)))
+                .forEach(rawProjects::add);
+        int updated = 0;
+        int added = 0;
+        int deprecated = 0;
+        for (String raw : rawProjects) {
+            ApiEndpointService.PromoteResult r = endpointService.promoteBranchToMaster(raw, br);
+            updated += r.updated();
+            added += r.added();
+            deprecated += r.deprecated();
+        }
+        ApiEndpointService.PromoteResult promoted = new ApiEndpointService.PromoteResult(updated, added, deprecated);
+
+        LinkedHashSet<String> caseIds = new LinkedHashSet<>();
+        List<ApiTestCollection> branchCols = mapper.findAll(null, ApiTestCollection.SCOPE_TEST, null, false, null, null)
+                .stream()
+                .filter(c -> br.equals(treeStr(c.getSourceBranch())) && code.equals(treeProjectCode(c.getProject())))
+                .toList();
+        for (ApiTestCollection c : branchCols) {
+            caseIds.addAll(mapper.caseIdsOf(c.getId(), false));
+        }
+        for (String raw : rawProjects) {
+            for (ApiTestCase c : caseMapper.findByProject(raw)) {
+                if (br.equals(treeStr(c.getSourceBranch()))) {
+                    caseIds.add(c.getId());
+                }
+            }
+        }
+        int moved = 0;
+        if (!caseIds.isEmpty()) {
+            ApiTestCollection live = ensureDefaultLiveCollection(project.trim());
+            moved = caseMapper.promoteToRegression(live.getId(), new ArrayList<>(caseIds));
+        }
+        int archived = 0;
+        for (ApiTestCollection c : branchCols) {
+            archived += mapper.archiveById(c.getId());
+        }
+        log.info("[api-test] 分支 {}（{}）已上线：接口更新 {}、新增 {}、废弃 {}；用例进全量 {}；归档集合 {}",
+                br, code, promoted.updated(), promoted.added(), promoted.deprecated(), moved, archived);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("project", code);
+        out.put("branch", br);
+        out.put("endpointsUpdated", promoted.updated());
+        out.put("endpointsAdded", promoted.added());
+        out.put("endpointsDeprecated", promoted.deprecated());
+        out.put("casesMoved", moved);
+        out.put("collectionsArchived", archived);
         return out;
     }
 

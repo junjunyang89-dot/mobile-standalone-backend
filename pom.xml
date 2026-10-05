@@ -96,6 +96,12 @@
             <version>1.17.2</version>
         </dependency>
 
+        <!-- 测试工具「Kafka 查询」。只引纯客户端：引 spring-kafka 会带上自动配置，启动时去连 localhost:9092 -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+        </dependency>
+
         <!-- Spring Boot Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

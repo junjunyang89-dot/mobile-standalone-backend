@@ -44,6 +44,41 @@ class SourceEndpointScannerTest {
     }
 
     @Test
+    void dropsSwaggerOfflineAndHealthButKeepsBusinessInSameController(@TempDir Path root) throws Exception {
+        Path pkg = Files.createDirectories(root.resolve("svc/src/main/java/demo"));
+        Files.writeString(pkg.resolve("HealthController.java"), """
+                package demo;
+                @RestController
+                public class HealthController {
+                    @GetMapping({"/acty/basic/healthCheck","/basic/healthCheck"})
+                    public String healthCheck() { return "success"; }
+                    @GetMapping("/loadMajorHotComments")
+                    public String load() { return null; }
+                }
+                """);
+        Files.writeString(pkg.resolve("NacosStopEndpoint.java"), """
+                package demo;
+                @RestController
+                public class NacosStopEndpoint {
+                    @GetMapping("/basic/offline")
+                    public String offline(String secret) { return null; }
+                }
+                """);
+        Files.writeString(pkg.resolve("DisableSwaggerUiController.java"), """
+                package demo;
+                @RestController
+                public class DisableSwaggerUiController {
+                    @GetMapping("${disable.swagger.path:/swagger-ui.html}")
+                    public void getSwagger(HttpServletResponse r) { }
+                }
+                """);
+
+        var paths = SourceEndpointScanner.scan(root).endpoints().stream().map(e -> e.path()).toList();
+
+        assertEquals(java.util.List.of("/loadMajorHotComments"), paths);
+    }
+
+    @Test
     void skipsTestSources(@TempDir Path root) throws Exception {
         Path testPkg = Files.createDirectories(root.resolve("svc/src/test/java/demo"));
         Files.writeString(testPkg.resolve("DeadlockHighLightsController.java"), CONTROLLER);

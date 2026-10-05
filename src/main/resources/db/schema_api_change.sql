@@ -44,3 +44,20 @@ CREATE TABLE IF NOT EXISTS api_change_reports (
     INDEX idx_project_created (project, created_at),
     INDEX idx_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='接口变更分析报告快照';
+
+CREATE TABLE IF NOT EXISTS api_field_marks (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    mark_key CHAR(40) NOT NULL COMMENT 'sha1(kind|project|method|path|side|field|change_sig)',
+    kind VARCHAR(16) NOT NULL COMMENT 'TAG 业务标签 / CONFIRM 已确认',
+    project VARCHAR(64) NOT NULL DEFAULT '' COMMENT '项目 code',
+    http_method VARCHAR(16) NOT NULL,
+    path VARCHAR(512) NOT NULL,
+    side VARCHAR(16) NOT NULL COMMENT 'REQUEST / RESPONSE',
+    field VARCHAR(255) NOT NULL,
+    change_sig VARCHAR(512) NULL COMMENT '仅 CONFIRM：base..head|变更类型|旧类型|新类型',
+    biz_tag VARCHAR(128) NULL COMMENT '仅 TAG：关联的前端页面/模块',
+    updated_by VARCHAR(64) NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY udx_mark_key (mark_key),
+    INDEX idx_project_kind (project, kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='接口对比：字段业务标签与确认记录';

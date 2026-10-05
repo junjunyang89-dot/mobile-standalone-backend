@@ -50,6 +50,38 @@ public class ApiChangeReportService {
         } catch (Exception e) {
             log.warn("[api-change-reports] 建表失败: {}", e.getMessage());
         }
+        try {
+            jdbcTemplate.execute("ALTER TABLE api_change_reports ADD COLUMN source VARCHAR(16) NULL");
+        } catch (Exception ignored) {
+            /* 列已存在 */
+        }
+        markBatchReports();
+    }
+
+    public static final String SOURCE_BATCH = "BATCH";
+
+    private static final java.util.regex.Pattern REPORT_ID = java.util.regex.Pattern.compile("\"reportId\"\\s*:\\s*(\\d+)");
+
+    /** 加 source 列之前，接口对比分析2 存下的报告没打标记：按批次里记的 reportId 补上 */
+    private void markBatchReports() {
+        try {
+            java.util.Set<Long> ids = new java.util.LinkedHashSet<>();
+            for (String payload : jdbcTemplate.queryForList("SELECT payload FROM api_change_batches", String.class)) {
+                java.util.regex.Matcher m = REPORT_ID.matcher(payload == null ? "" : payload);
+                while (m.find()) {
+                    ids.add(Long.parseLong(m.group(1)));
+                }
+            }
+            int n = 0;
+            for (Long id : ids) {
+                n += jdbcTemplate.update("UPDATE api_change_reports SET source = ? WHERE id = ? AND source IS NULL", SOURCE_BATCH, id);
+            }
+            if (n > 0) {
+                log.info("[api-change-reports] 补标了 {} 份接口对比分析2 的报告", n);
+            }
+        } catch (Exception e) {
+            log.debug("[api-change-reports] 补标接口对比分析2 报告跳过: {}", e.getMessage());
+        }
     }
 
     /**
@@ -59,6 +91,11 @@ public class ApiChangeReportService {
      */
     @Transactional
     public Long saveSnapshot(String projectCode, ApiChangeAnalyzer.Report report) {
+        return saveSnapshot(projectCode, report, null);
+    }
+
+    @Transactional
+    public Long saveSnapshot(String projectCode, ApiChangeAnalyzer.Report report, String source) {
         if (report == null) {
             return null;
         }
@@ -74,6 +111,7 @@ public class ApiChangeReportService {
             row.setSummary(buildSummary(report));
             row.setReportJson(JSON.writeValueAsString(report));
             row.setCreatedAt(LocalDateTime.now());
+            row.setSource(source);
             reportMapper.insert(row);
             report.setReportId(row.getId());
             log.info("[api-change-reports] 已保存 id={} project={} {}",
@@ -118,6 +156,20 @@ public class ApiChangeReportService {
         return out;
     }
 
+    /** 读回完整报告；不存在或解析不了返回 null */
+    public ApiChangeAnalyzer.Report loadReport(Long id) {
+        ApiChangeReport row = id == null ? null : reportMapper.findById(id);
+        if (row == null) {
+            return null;
+        }
+        try {
+            return JSON.readValue(row.getReportJson(), ApiChangeAnalyzer.Report.class);
+        } catch (Exception e) {
+            log.warn("[api-change-reports] 报告 {} 解析失败: {}", id, e.getMessage());
+            return null;
+        }
+    }
+
     @Transactional
     public void delete(Long id) {
         if (reportMapper.findById(id) == null) {
@@ -126,7 +178,7 @@ public class ApiChangeReportService {
         reportMapper.deleteById(id);
     }
 
-    static String buildSummary(ApiChangeAnalyzer.Report report) {
+    public static String buildSummary(ApiChangeAnalyzer.Report report) {
         int ep = report.getEndpoints() == null ? 0 : report.getEndpoints().size();
         int breaking = 0;
         if (report.getEndpoints() != null) {
@@ -137,7 +189,8 @@ public class ApiChangeReportService {
             }
         }
         int tables = report.getTables() == null ? 0 : report.getTables().size();
-        int other = report.getOtherChanges() == null ? 0 : report.getOtherChanges().size();
+        int other = report.getOtherChanges() == null ? 0
+                : (int) report.getOtherChanges().stream().filter(o -> o.getTrivial() == null).count();
         int findings = report.getFindings() == null ? 0 : report.getFindings().size();
         return String.format("接口 %d · 高风险 %d · 表 %d · 其它 %d · 风险点 %d",
                 ep, breaking, tables, other, findings);

@@ -9,6 +9,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -33,7 +35,21 @@ public class CursorAskController {
             String sessionId = str(body.get("sessionId"));
             String cwd = str(body.get("cwd"));
             String mode = str(body.get("mode"));
-            return ResponseEntity.ok(cursorAskService.chat(message, sessionId, cwd, mode));
+            List<String> dirs = new ArrayList<>();
+            if (body.get("dirs") instanceof List<?> l) {
+                l.forEach(o -> {
+                    if (str(o) != null) dirs.add(str(o));
+                });
+            }
+            List<Map<String, String>> images = new ArrayList<>();
+            if (body.get("images") instanceof List<?> l) {
+                for (Object o : l) {
+                    if (o instanceof Map<?, ?> m) {
+                        images.add(Map.of("data", String.valueOf(m.get("data")), "mimeType", String.valueOf(m.get("mimeType"))));
+                    }
+                }
+            }
+            return ResponseEntity.ok(cursorAskService.chat(message, sessionId, cwd, mode, dirs, images));
         } catch (IllegalArgumentException | IllegalStateException e) {
             return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(e.getMessage())));
         } catch (Exception e) {

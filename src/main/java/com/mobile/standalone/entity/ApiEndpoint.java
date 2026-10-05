@@ -21,7 +21,13 @@ public class ApiEndpoint {
     /** 归属项目，与 api_projects.code 对应 */
     private String project;
     private String httpMethod;
+    /** 客户端实际调的路径（抓包到的，带网关前缀）；用例按它发请求 */
     private String path;
+    /**
+     * 源码 Controller 里声明的路径，不带网关前缀。源码扫描、对比分析按它认接口——
+     * 只按 {@code path} 认的话，抓包的 {@code /steamcn/a/b} 和代码的 {@code /a/b} 会变成两条。
+     */
+    private String codePath;
     /** Controller 方法，如 {@code AiController.aiTranslate} */
     private String handler;
     /** 源码文件相对路径，定位问题时直接跳 */
@@ -87,6 +93,10 @@ public class ApiEndpoint {
     /** 人工定的自动化级别（CORE/IMPORTANT/NORMAL/UNUSED），空＝按调用方自动算 */
     private String levelManual;
     private String levelSetBy;
+
+    /** 按基线分支全量扫描时代码里已经没有了：什么时候发现的、在哪个分支 */
+    private LocalDateTime goneAt;
+    private String goneRef;
 
     private LocalDateTime lastSyncedAt;
     private LocalDateTime createdAt;

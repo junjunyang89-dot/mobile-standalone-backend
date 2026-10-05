@@ -38,6 +38,8 @@ public final class CallerRefScanner {
     private static final Set<String> CODE_EXTS = Set.of(
             "js", "mjs", "cjs", "jsx", "ts", "tsx", "vue", "java", "kt", "swift", "m", "mm", "h", "ets", "dart", "go", "py");
 
+    private static final Set<String> BACKEND_EXTS = Set.of("java", "kt");
+
     private static final Set<String> JS_EXTS = Set.of("js", "mjs", "cjs", "jsx", "ts", "tsx", "vue", "ets");
 
     private static final long MAX_FILE_BYTES = 1_000_000;
@@ -77,7 +79,8 @@ public final class CallerRefScanner {
 
     /**
      * @param roots   搜哪些目录，一般是后端仓库的上一级（所有仓库并排放着）
-     * @param exclude 接口自己所在的仓库，它自己的 Controller 不算调用方
+     * @param exclude 接口自己所在的仓库：它的后端代码（Java / Kotlin）不算调用方，
+     *                但仓库里自带的前端（如 app-admin/frontend）照样搜——那是真正的调用方
      * @return 接口路径 → 调用位置；没找到的路径不在 map 里
      */
     public static Map<String, List<Ref>> scan(Collection<String> endpointPaths, List<Path> roots, Path exclude)
@@ -97,9 +100,6 @@ public final class CallerRefScanner {
             Files.walkFileTree(base, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    if (ex != null && dir.equals(ex)) {
-                        return FileVisitResult.SKIP_SUBTREE;
-                    }
                     if (!dir.equals(base) && SKIP_DIRS.contains(dir.getFileName().toString())) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
@@ -111,6 +111,9 @@ public final class CallerRefScanner {
                     String name = file.getFileName().toString();
                     String ext = extOf(name);
                     if (!CODE_EXTS.contains(ext) || name.contains(".min.") || attrs.size() > MAX_FILE_BYTES) {
+                        return FileVisitResult.CONTINUE;
+                    }
+                    if (ex != null && BACKEND_EXTS.contains(ext) && file.startsWith(ex)) {
                         return FileVisitResult.CONTINUE;
                     }
                     if (++files[0] > MAX_FILES) {
@@ -263,7 +266,7 @@ public final class CallerRefScanner {
         return fn != null ? fn : var;
     }
 
-    static String normalize(String raw) {
+    public static String normalize(String raw) {
         Matcher d = SPRING_DEFAULT.matcher(raw);
         String s = HOST.matcher(d.matches() ? d.group(1) : raw).replaceFirst("");
         int q = s.indexOf('?');

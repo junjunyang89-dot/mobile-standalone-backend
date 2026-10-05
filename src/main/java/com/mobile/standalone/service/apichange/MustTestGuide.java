@@ -27,12 +27,17 @@ public final class MustTestGuide {
                        String title, String why, List<String> notes) {
     }
 
-    public record Guide(int p0, int p1, int p2, String hint, List<Item> items) {
+    /**
+     * @param commonNotes 对所有接口都成立的通用做法。<b>整份报告说一次</b>，
+     *                    不在每一行重复——重复的后果是把本接口特有的注意事项挤到下面
+     */
+    public record Guide(int p0, int p1, int p2, String hint,
+                        List<String> commonNotes, List<Item> items) {
     }
 
     public static Guide of(Report report) {
         if (report == null) {
-            return new Guide(0, 0, 0, "没有分析报告", List.of());
+            return new Guide(0, 0, 0, "没有分析报告", List.of(), List.of());
         }
         List<Item> items = new ArrayList<>();
         for (EndpointChange e : report.getEndpoints()) {
@@ -44,7 +49,9 @@ public final class MustTestGuide {
             }
         }
         for (OtherChange o : report.getOtherChanges()) {
-            items.add(fromOther(o));
+            if (o.getTrivial() == null) {
+                items.add(fromOther(o));
+            }
         }
         items.sort(Comparator
                 .comparingInt((Item i) -> rank(i.priority()))
@@ -52,7 +59,7 @@ public final class MustTestGuide {
         int p0 = (int) items.stream().filter(i -> "P0".equals(i.priority())).count();
         int p1 = (int) items.stream().filter(i -> "P1".equals(i.priority())).count();
         int p2 = (int) items.stream().filter(i -> "P2".equals(i.priority())).count();
-        return new Guide(p0, p1, p2, hint(p0, p1, p2), List.copyOf(items));
+        return new Guide(p0, p1, p2, hint(p0, p1, p2), COMMON_NOTES, List.copyOf(items));
     }
 
     static String hint(int p0, int p1, int p2) {
@@ -62,6 +69,17 @@ public final class MustTestGuide {
         return "先测 P0（老客户端会坏 / 下线 / 并发写），再测 P1（新接口、实现变了、表结构），"
                 + "P2 是加字段和旁路，有空冒烟。P0 " + p0 + " / P1 " + p1 + " / P2 " + p2;
     }
+
+    /**
+     * 对每个接口都成立的做法。整份报告顶部说一次。
+     *
+     * <p>原来这两条是加在每一行的 notes 里的,于是 99 条必测项每一条的前两句
+     * 一模一样。人读第二行就开始跳,而真正本接口特有的那几条
+     * (并发写同一个缓存 key、新入参的默认值)排在它们下面,被一起跳过去了。
+     */
+    static final List<String> COMMON_NOTES = List.of(
+            "先打一条真实入参，断言业务码成功，不要只看 HTTP 200",
+            "缺必填、类型错误时，错误码和文案要能看懂");
 
     private static Item fromEndpoint(EndpointChange e, List<ConcurrencyRiskScanner.Risk> risks) {
         String sig = sig(e.getHttpMethod(), e.getPath());
@@ -79,8 +97,10 @@ public final class MustTestGuide {
             addBreakingNotes(e, notes, why);
         } else if ("NEW".equals(e.getRisk()) || "ADDED".equals(e.getChangeType())) {
             why.add("本次新增的接口");
-            notes.add("先打一条真实入参，断言业务码成功，不要只看 HTTP 200");
-            notes.add("缺必填、类型错误时错误码和文案要能看懂");
+            // 「断言业务码不要只看 200」「错误码文案要能看懂」这两条对每个接口都一样，
+            // 是规范不是本接口的注意事项。留在每行里会把真正特有的那几条
+            // （并发写缓存 key、新入参默认值）挤到下面，人只看前两条就划走了。
+            // 它们提到 Guide.commonNotes，整份报告说一次。
         } else if ("IMPL".equals(e.getRisk())) {
             why.add("路径和入参没变，但实现类改了，业务结果可能变");
             notes.add("用线上同等请求（老入参）打测试环境，对比关键业务字段，不要只比状态码");
@@ -125,8 +145,12 @@ public final class MustTestGuide {
             if ("REMOVED".equals(f.getChangeType())) {
                 notes.add("返回少了字段 " + f.getName() + "：用老包或旧断言打，看解析会不会挂");
             } else if ("TYPE_CHANGED".equals(f.getChangeType())) {
-                notes.add("返回字段 " + f.getName() + " 类型 " + f.getOldType() + " → " + f.getNewType()
-                        + "：前端按老类型解析会静默错，抓包对照新旧各打一次");
+                // 不能一律说「解析会静默错」：int → Integer 的 JSON 一模一样，
+                // 这句话对它是假的，而假的注意事项比没有更糟 —— 人照着查一圈
+                // 什么都查不到，下次整张表就都不信了
+                FieldTypeChange w = FieldTypeChange.classify(f.getOldType(), f.getNewType());
+                notes.add("返回字段 " + f.getName() + " " + f.getOldType() + " → " + f.getNewType()
+                        + "：" + w.describe());
             }
         }
         for (FieldChange f : e.getBodyFields()) {

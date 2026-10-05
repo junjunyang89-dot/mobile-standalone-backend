@@ -7,6 +7,9 @@ import com.mobile.standalone.service.capture.CaptureResourceKind;
 import com.mobile.standalone.service.capture.PacketCaptureService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,6 +42,53 @@ public class PacketCaptureController {
     private final com.mobile.standalone.service.ApiTestCaseService caseService;
     private final com.mobile.standalone.service.capture.CaptureStore captureStore;
     private final CaptureCatalogService catalogService;
+    private final com.mobile.standalone.mapper.ApiEndpointMapper endpointMapper;
+    private final com.mobile.standalone.service.capture.CaptureImportService importService;
+
+    /**
+     * 导入别的工具抓的包（HAR 或「Request…Response」文本），落成一场已结束的抓包，
+     * 之后看详情、收录、AI 生成用例都和历史抓包一样走。
+     *
+     * @param env PROD（默认）/ TEST。生产的包只给 GET 生成用例
+     */
+    @PostMapping("/import")
+    public ResponseEntity<?> importFile(@RequestParam("file") org.springframework.web.multipart.MultipartFile file,
+                                        @RequestParam(value = "env", required = false, defaultValue = "PROD") String env) {
+        if (file == null || file.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "没有选文件"));
+        }
+        try {
+            String content = new String(file.getBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            var r = importService.importContent(content, file.getOriginalFilename(), env);
+            return ResponseEntity.ok(Map.of("sessionId", r.sessionId(), "flows", r.flows(),
+                    "hosts", r.hosts(), "env", r.env()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            log.warn("[capture] 导入失败: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(Map.of("message", "导入失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 下发本机 mitmproxy CA，给 iOS 装证书用。
+     * <p>
+     * 不依赖 mitm.it：官网直连经常 404，而且必须先把代理通了才能打开——
+     * 代理又偏偏要等证书装好才稳。手机直连电脑后端下载，绕开这个死结。
+     */
+    @GetMapping("/mitm-ca")
+    public ResponseEntity<?> mitmCa() {
+        java.nio.file.Path cer = java.nio.file.Path.of(System.getProperty("user.home"),
+                ".mitmproxy", "mitmproxy-ca-cert.cer");
+        if (!java.nio.file.Files.isRegularFile(cer)) {
+            return ResponseEntity.status(404).body(Map.of("message",
+                    "本机还没有 mitmproxy 证书。先在电脑上跑一次抓包（会生成 ~/.mitmproxy），或执行：mitmdump"));
+        }
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"mitmproxy-ca.cer\"")
+                .contentType(MediaType.parseMediaType("application/x-x509-ca-cert"))
+                .body(new FileSystemResource(cer));
+    }
 
     @PostMapping("/start")
     public ResponseEntity<?> start(@RequestBody Map<String, Object> body) {
@@ -166,9 +216,41 @@ public class PacketCaptureController {
                 "fieldsExtracted", fieldsExtracted));
     }
 
+    /** 早期收录带进来的 OPTIONS 预检，清理前先给人看 */
+    @GetMapping("/preflight-endpoints")
+    public ResponseEntity<?> preflightEndpoints() {
+        return ResponseEntity.ok(Map.of("items", catalogService.preflightEndpoints()));
+    }
+
+    /** body {includeCases}：false 只删没挂用例的；/purge 结尾，权限规则里要管理员 */
+    @PostMapping("/preflight-endpoints/purge")
+    public ResponseEntity<?> purgePreflightEndpoints(@RequestBody(required = false) Map<String, Object> body) {
+        boolean includeCases = body != null && Boolean.TRUE.equals(body.get("includeCases"));
+        return ResponseEntity.ok(catalogService.purgePreflight(includeCases));
+    }
+
+    /** 收录前预览：body {flows: [{method, path, url?}]}，只返回已经在清单（或待归类）里的那些；url 用来按域名猜归属 */
+    @PostMapping("/save-endpoints/preview")
+    public ResponseEntity<?> previewSaveEndpoints(@RequestBody Map<String, Object> body) {
+        List<CaptureCatalogService.FlowRef> flows = new ArrayList<>();
+        if (body.get("flows") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> m && str(m.get("path")) != null) {
+                    flows.add(new CaptureCatalogService.FlowRef(null,
+                            str(m.get("method")), str(m.get("path")), null, null, str(m.get("url"))));
+                }
+            }
+        }
+        return ResponseEntity.ok(Map.of(
+                "known", catalogService.knownEndpoints(flows),
+                "guesses", catalogService.guessProjects(flows)));
+    }
+
     /**
      * 抓到的接口收进接口清单（不挂需求单）。
-     * body: {sessionId, project, flows: [{seq, method, path, query}]}，project 只给认不出归属的接口兜底。
+     * body: {sessionId, project, flows: [{seq, method, path, query, project, url}], urls?: [{project, environment, baseUrl}]}。
+     * 行上的 project 是人选的，以它为准；外层 project 只给没选、又认不出归属的接口兜底。
+     * 带了 urls（哪怕是空数组）就只按人定的回填地址；不带才按抓包域名自动回填测试环境。
      */
     @PostMapping("/save-endpoints")
     public ResponseEntity<?> saveEndpoints(@RequestBody Map<String, Object> body) {
@@ -177,7 +259,8 @@ public class PacketCaptureController {
             for (Object o : list) {
                 if (o instanceof Map<?, ?> m && str(m.get("path")) != null) {
                     flows.add(new CaptureCatalogService.FlowRef(intOrNull(m.get("seq")),
-                            str(m.get("method")), str(m.get("path")), str(m.get("query"))));
+                            str(m.get("method")), str(m.get("path")), str(m.get("query")),
+                            str(m.get("project")), str(m.get("url"))));
                 }
             }
         }
@@ -187,7 +270,21 @@ public class PacketCaptureController {
         List<Map<String, Object>> rows = catalogService.save(
                 str(body.get("sessionId")), str(body.get("project")), flows);
         long saved = rows.stream().filter(r -> r.get("endpointId") != null).count();
-        return ResponseEntity.ok(Map.of("saved", saved, "unresolved", rows.size() - saved, "items", rows));
+        List<Map<String, Object>> urls;
+        if (body.get("urls") instanceof List<?> plans) {
+            List<CaptureCatalogService.UrlPlan> list = new ArrayList<>();
+            for (Object o : plans) {
+                if (o instanceof Map<?, ?> m) {
+                    list.add(new CaptureCatalogService.UrlPlan(
+                            str(m.get("project")), str(m.get("environment")), str(m.get("baseUrl"))));
+                }
+            }
+            urls = catalogService.applyUrlPlans(list);
+        } else {
+            urls = catalogService.backfillCaptureUrls(rows, captureService.envOf(str(body.get("sessionId"))));
+        }
+        return ResponseEntity.ok(Map.of("saved", saved, "unresolved", rows.size() - saved, "items", rows,
+                "urls", urls));
     }
 
     @GetMapping("/current")
@@ -218,59 +315,14 @@ public class PacketCaptureController {
         String reqNo = body == null ? null : str(body.get("requirementNo"));
         String project = body == null ? null : str(body.get("project"));
 
-        // 同一个接口一次操作里会被调好几次（列表页翻页、重试），去重后才是「涉及了哪些接口」
-        // 同一个接口一次操作会被调好几次（轮询、翻页、重试）。
-        // 去重后才是「涉及了哪些接口」，但<b>次数要留着</b>——
-        // 「12 次调用 → 4 个接口」和「只抓到 4 个请求」是完全不同的两件事，
-        // 不说清楚的话人会以为抓漏了
-        Map<String, Integer> callCounts = new LinkedHashMap<>();
-        for (JsonNode r : rows) {
-            String k = r.path("method").asText("GET") + " " + r.path("path").asText("");
-            callCounts.merge(k, 1, Integer::sum);
-        }
-        Set<String> seen = new LinkedHashSet<>();
+        List<Map<String, Object>> distinct = distinctFlows(rows);
         List<RequirementEndpointService.Link> links = new ArrayList<>();
-        List<Map<String, Object>> distinct = new ArrayList<>();
-        for (JsonNode r : rows) {
-            String method = r.path("method").asText("GET");
-            String path = r.path("path").asText("");
-            if (path.isBlank() || !seen.add(method + " " + path)) {
-                continue;
-            }
-            Map<String, Object> d = new LinkedHashMap<>();
-            // 抓包工具那两页要的东西全带上：手机上能看到的，这里也要能看到
-            d.put("seq", r.path("seq").asInt());
-            d.put("method", method);
-            d.put("path", path);
-            d.put("host", r.path("host").asText(""));
-            d.put("url", r.path("url").asText(""));
-            d.put("query", r.path("query").asText(""));
-            d.put("httpVersion", r.path("httpVersion").asText(""));
-            d.put("remote", r.path("remote").asText(""));
-            d.put("status", r.path("status").asInt());
-            d.put("reason", r.path("reason").asText(""));
-            d.put("durationMs", r.path("durationMs").asInt());
-            d.put("at", r.path("at").asLong());
-            d.put("traceId", r.path("traceId").asText(null));
-            d.put("reqContentType", r.path("reqContentType").asText(""));
-            d.put("respContentType", r.path("respContentType").asText(""));
-            d.put("reqBytes", r.path("reqBytes").asInt());
-            d.put("respBytes", r.path("respBytes").asInt());
-            d.put("respKind", r.path("respKind").asText(""));
-            d.put("respTruncated", r.path("respTruncated").asBoolean());
-            d.put("bodyNote", r.path("bodyNote").asText(""));
-            d.put("hasDetail", r.path("hasDetail").asBoolean(true));
-            d.put("calls", callCounts.getOrDefault(method + " " + path, 1));
-            String respKind = String.valueOf(d.get("respKind"));
-            String kind = CaptureResourceKind.of(path,
-                    respKind.isBlank() ? r.path("respContentType").asText("") : respKind);
-            d.put("kind", kind);
-            distinct.add(d);
+        for (Map<String, Object> d : distinct) {
             // JS/CSS/图片不是接口，挂上去会把需求单的涉及接口刷成静态资源清单
-            if (CaptureResourceKind.isApi(kind)) {
+            if (CaptureResourceKind.isApi(String.valueOf(d.get("kind")))) {
                 links.add(new RequirementEndpointService.Link(
-                        null, method, path, r.path("host").asText(""), null, null,
-                        r.path("seq").asInt(), "last"));
+                        null, String.valueOf(d.get("method")), String.valueOf(d.get("path")),
+                        String.valueOf(d.get("host")), null, null, (Integer) d.get("seq"), "last"));
             }
         }
 
@@ -307,6 +359,120 @@ public class PacketCaptureController {
                 "linkWarn", linkWarn == null ? "" : linkWarn,
                 "seenHosts", captureService.lastSeenHosts(),
                 "failedHosts", captureService.lastFailedHosts()));
+    }
+
+    /**
+     * 重新打开一场已结束的抓包，返回和「结束抓包」同一个形状。
+     * <p>
+     * 抓一次要人在手机上把操作走一遍，页面一刷新或者开了新的一场，之前的结果就看不到了，
+     * 只能再抓。文件本来就在盘上，翻出来就行。
+     */
+    @GetMapping("/sessions/{sessionId}/result")
+    public ResponseEntity<?> sessionResult(@PathVariable String sessionId) {
+        Map<String, Object> meta = captureStore.get(sessionId);
+        if (meta == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "没有这场抓包：" + sessionId));
+        }
+        List<JsonNode> rows = captureService.finishedFlows(sessionId);
+        if (rows.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("message",
+                    "这场抓包的文件已经不在了（超过保留期被清理，或正在抓还没结束）"));
+        }
+        List<Map<String, Object>> distinct = distinctFlows(rows);
+        markCataloged(distinct);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("sessionId", sessionId);
+        out.put("total", rows.size());
+        out.put("distinct", distinct.size());
+        out.put("flows", distinct);
+        out.put("hosts", meta.get("hosts") == null ? "" : String.valueOf(meta.get("hosts")));
+        out.put("seenHosts", captureService.finishedSeenHosts(sessionId));
+        out.put("failedHosts", captureService.finishedFailedHosts(sessionId));
+        String env = captureService.envOf(sessionId);
+        out.put("env", env == null ? "TEST" : env);
+        out.put("imported", com.mobile.standalone.service.capture.CaptureImportService.PLATFORM
+                .equals(meta.get("platform")));
+        return ResponseEntity.ok(out);
+    }
+
+    /**
+     * 历史那场里已经收录过的接口，标上项目和清单 id，页面才能接着生成用例。
+     * 同一个 method+path 挂在好几个项目下时不猜，留给人在收录弹窗里选。
+     */
+    private void markCataloged(List<Map<String, Object>> flows) {
+        for (Map<String, Object> d : flows) {
+            if (!CaptureResourceKind.isApi(String.valueOf(d.get("kind")))) {
+                continue;
+            }
+            try {
+                List<com.mobile.standalone.entity.ApiEndpoint> owners = endpointMapper
+                        .findByMethodPath(String.valueOf(d.get("method")), String.valueOf(d.get("path")))
+                        .stream()
+                        .filter(e -> !CaptureCatalogService.INBOX.equals(e.getProject()))
+                        .toList();
+                if (owners.size() == 1) {
+                    d.put("project", owners.get(0).getProject());
+                    d.put("endpointId", owners.get(0).getId());
+                }
+            } catch (Exception e) {
+                log.debug("[capture] 查收录状态失败 {} {}: {}", d.get("method"), d.get("path"), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 去重后的流水。
+     * <p>
+     * 同一个接口一次操作会被调好几次（轮询、翻页、重试）。
+     * 去重后才是「涉及了哪些接口」，但<b>次数要留着</b>——
+     * 「12 次调用 → 4 个接口」和「只抓到 4 个请求」是完全不同的两件事，
+     * 不说清楚的话人会以为抓漏了
+     */
+    private static List<Map<String, Object>> distinctFlows(List<JsonNode> rows) {
+        Map<String, Integer> callCounts = new LinkedHashMap<>();
+        for (JsonNode r : rows) {
+            String k = r.path("method").asText("GET") + " " + r.path("path").asText("");
+            callCounts.merge(k, 1, Integer::sum);
+        }
+        Set<String> seen = new LinkedHashSet<>();
+        List<Map<String, Object>> distinct = new ArrayList<>();
+        for (JsonNode r : rows) {
+            String method = r.path("method").asText("GET");
+            String path = r.path("path").asText("");
+            if (path.isBlank() || !seen.add(method + " " + path)) {
+                continue;
+            }
+            Map<String, Object> d = new LinkedHashMap<>();
+            // 抓包工具那两页要的东西全带上：手机上能看到的，这里也要能看到
+            d.put("seq", r.path("seq").asInt());
+            d.put("method", method);
+            d.put("path", path);
+            d.put("host", r.path("host").asText(""));
+            d.put("url", r.path("url").asText(""));
+            d.put("query", r.path("query").asText(""));
+            d.put("httpVersion", r.path("httpVersion").asText(""));
+            d.put("remote", r.path("remote").asText(""));
+            d.put("status", r.path("status").asInt());
+            d.put("reason", r.path("reason").asText(""));
+            d.put("durationMs", r.path("durationMs").asInt());
+            d.put("at", r.path("at").asLong());
+            d.put("traceId", r.path("traceId").asText(null));
+            d.put("reqContentType", r.path("reqContentType").asText(""));
+            d.put("respContentType", r.path("respContentType").asText(""));
+            d.put("reqBytes", r.path("reqBytes").asInt());
+            d.put("respBytes", r.path("respBytes").asInt());
+            d.put("respKind", r.path("respKind").asText(""));
+            d.put("respTruncated", r.path("respTruncated").asBoolean());
+            d.put("bodyNote", r.path("bodyNote").asText(""));
+            d.put("hasDetail", r.path("hasDetail").asBoolean(true));
+            d.put("calls", callCounts.getOrDefault(method + " " + path, 1));
+            String respKind = String.valueOf(d.get("respKind"));
+            String kind = CaptureResourceKind.of(path,
+                    respKind.isBlank() ? r.path("respContentType").asText("") : respKind);
+            d.put("kind", kind);
+            distinct.add(d);
+        }
+        return distinct;
     }
 
     /**
@@ -354,9 +520,22 @@ public class PacketCaptureController {
         for (int seq = 1; seq <= 30 && token == null; seq++) {
             token = tokenFrom(reqHeadersOf(sessionId, seq));
         }
+        // 有的网关 token 走 query（?token=…），请求头里没有
+        if (token == null) {
+            List<JsonNode> rows = captureService.finishedFlows(sessionId);
+            if (rows.isEmpty()) {
+                rows = captureService.peek(sessionId);
+            }
+            for (JsonNode r : rows) {
+                token = tokenFromQuery(r.path("query").asText(""));
+                if (token != null) {
+                    break;
+                }
+            }
+        }
         if (token == null) {
             return ResponseEntity.badRequest().body(Map.of(
-                    "message", "这次抓包的请求头里没找到 token。"
+                    "message", "这次抓包的请求头和 URL 参数里都没找到 token。"
                             + "如果接口本来就不需要登录态，那不用存"));
         }
         try {
@@ -388,6 +567,26 @@ public class PacketCaptureController {
                 // Bearer xxx 只取后面那截：环境里存裸 token，注入时会自己拼 Bearer
                 String v = e.getValue().trim();
                 return v.regionMatches(true, 0, "Bearer ", 0, 7) ? v.substring(7).trim() : v;
+            }
+        }
+        return null;
+    }
+
+    private static final List<String> TOKEN_QUERY_KEYS = List.of("token", "accesstoken", "access_token");
+
+    static String tokenFromQuery(String query) {
+        if (query == null || query.isBlank()) {
+            return null;
+        }
+        for (String pair : query.split("&")) {
+            int i = pair.indexOf('=');
+            if (i <= 0) {
+                continue;
+            }
+            String k = java.net.URLDecoder.decode(pair.substring(0, i), java.nio.charset.StandardCharsets.UTF_8);
+            String v = java.net.URLDecoder.decode(pair.substring(i + 1), java.nio.charset.StandardCharsets.UTF_8);
+            if (TOKEN_QUERY_KEYS.contains(k.toLowerCase(java.util.Locale.ROOT)) && !v.isBlank()) {
+                return v.trim();
             }
         }
         return null;

@@ -14,6 +14,7 @@ import com.mobile.standalone.mapper.ApiTestCaseMapper;
 import com.mobile.standalone.service.apitest.ApiTestCollectionService;
 import com.mobile.standalone.service.EnvVariableService;
 import com.mobile.standalone.service.apitest.JsonPaths;
+import com.mobile.standalone.service.apitest.FieldTypeAsserts;
 import com.mobile.standalone.service.apitest.VariableResolver;
 import com.mobile.standalone.util.TestEnvironment;
 import lombok.RequiredArgsConstructor;
@@ -97,6 +98,7 @@ public class ApiTestRunnerService {
     }
     private final com.mobile.standalone.service.apitest.EndpointVerifyService verifyService;
     private final com.mobile.standalone.service.apitest.ApiAuthService authService;
+    private final com.mobile.standalone.service.apitest.DbConnectionService dbConnections;
 
     /** 一个项目这一轮的登录态：token 塞进哪些头，或者登录为什么失败了 */
     private record AuthCtx(String token, Map<String, String> headers, String error) {
@@ -206,13 +208,9 @@ public class ApiTestRunnerService {
                 String pj0 = c.getProject() == null ? "" : c.getProject();
                 // 登一次管一轮：同项目的用例共用，别每条用例都去登录接口打一次
                 AuthCtx auth = authByProject.computeIfAbsent(pj0, pj -> authFor(pj, envKey));
-                Map<String, String> envVars = varsByProject.computeIfAbsent(pj0, pj -> {
-                    Map<String, String> v = new LinkedHashMap<>(variableService.resolveValues(envKey, pj));
-                    if (auth.token() != null) {
-                        v.put("token", auth.token());
-                    }
-                    return v;
-                });
+                Map<String, String> envVars = varsByProject.computeIfAbsent(pj0, pj -> withToken(
+                        new LinkedHashMap<>(variableService.resolveValues(envKey, pj)),
+                        req.getTokenOverride(), auth.token(), env));
                 cr = executeOne(c, env, req.getTokenOverride(), req.getUrlIdOverride(), envVars, runtime,
                         auth.headers());
                 if (auth.error() != null && !"PASSED".equals(cr.getStatus())) {
@@ -319,10 +317,8 @@ public class ApiTestRunnerService {
         ApiTestCase effective = withExtractOverride(c, extractJsonOverride);
         String pj = effective.getProject() == null ? "" : effective.getProject();
         AuthCtx auth = authFor(pj, envKey);
-        Map<String, String> envVars = new LinkedHashMap<>(variableService.resolveValues(envKey, pj));
-        if (auth.token() != null) {
-            envVars.put("token", auth.token());
-        }
+        Map<String, String> envVars = withToken(
+                new LinkedHashMap<>(variableService.resolveValues(envKey, pj)), null, auth.token(), env);
         Map<String, String> runtime = new LinkedHashMap<>();
         if (seedRuntime != null) {
             for (Map.Entry<String, String> e : seedRuntime.entrySet()) {
@@ -406,6 +402,168 @@ public class ApiTestRunnerService {
         return copy;
     }
 
+    public record BurstShot(int index, String value, String status, Integer httpStatus, Long durationMs,
+                            String body, String error) {
+    }
+
+    public record BurstResult(String url, String environment, String varyParam, List<BurstShot> shots,
+                              int distinctBodies, String verdict) {
+    }
+
+    /**
+     * 并发打同一条用例：N 个请求先全部就绪，再同时放出去。
+     * <p>
+     * 不记执行历史——这是排查工具，不是回归。只许打测试环境：并发写生产就是真把数据写乱。
+     *
+     * @param varyParam 每个请求换一个值的参数（query 或 body 顶层字段）；空＝N 个一模一样的请求
+     * @param values    轮流填给 varyParam 的值
+     */
+    public BurstResult burst(String caseId, int count, String environment, String varyParam, List<String> values) {
+        ApiTestCase base = caseService.getCase(caseId);
+        if (base == null) {
+            throw new IllegalArgumentException("用例不存在：" + caseId);
+        }
+        String envKey = TestEnvironment.normalize(environment == null || environment.isBlank() ? "TEST" : environment);
+        if (!TestEnvironment.TEST.equals(envKey)) {
+            throw new IllegalArgumentException("并发测试只在测试环境跑：并发写生产就是真把数据写乱");
+        }
+        ApiTestEnv env = caseService.getEnv(envKey);
+        if (env == null || Boolean.FALSE.equals(env.getEnabled())
+                || env.getBaseUrl() == null || env.getBaseUrl().isBlank()) {
+            throw new IllegalStateException("环境 " + envKey + " 没配好 baseUrl");
+        }
+        int n = Math.max(2, Math.min(count, 20));
+        String vary = varyParam == null || varyParam.isBlank() ? null : varyParam.trim();
+        List<String> vals = values == null ? List.of() : values.stream()
+                .filter(v -> v != null && !v.isBlank()).map(String::trim).toList();
+        if (vary != null && vals.isEmpty()) {
+            throw new IllegalArgumentException("选了要变化的参数 " + vary + "，但没给值");
+        }
+        String pj = base.getProject() == null ? "" : base.getProject();
+        AuthCtx auth = authFor(pj, envKey);
+        Map<String, String> envVars = withToken(
+                new LinkedHashMap<>(variableService.resolveValues(envKey, pj)), null, auth.token(), env);
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(n);
+        var go = new java.util.concurrent.CountDownLatch(1);
+        List<java.util.concurrent.Future<CaseResult>> futures = new ArrayList<>();
+        List<String> used = new ArrayList<>();
+        try {
+            for (int i = 0; i < n; i++) {
+                String value = vary == null ? null : vals.get(i % vals.size());
+                used.add(value);
+                ApiTestCase c = withParam(base, vary, value);
+                futures.add(pool.submit(() -> {
+                    go.await();
+                    return executeOne(c, env, null, null, new LinkedHashMap<>(envVars), new LinkedHashMap<>(),
+                            auth.headers());
+                }));
+            }
+            go.countDown();
+            List<BurstShot> shots = new ArrayList<>();
+            String url = null;
+            for (int i = 0; i < n; i++) {
+                CaseResult cr;
+                try {
+                    cr = futures.get(i).get(90, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    shots.add(new BurstShot(i + 1, used.get(i), "BLOCKED", null, null, null,
+                            "没等到响应：" + e.getMessage()));
+                    continue;
+                }
+                if (url == null) {
+                    url = cr.getUrl();
+                }
+                shots.add(new BurstShot(i + 1, used.get(i), cr.getStatus(), cr.getHttpStatus(), cr.getDurationMs(),
+                        truncate(cr.getBodyPreview(), 600), cr.getError()));
+            }
+            int distinct = (int) shots.stream().map(BurstShot::body).filter(b -> b != null).distinct().count();
+            return new BurstResult(url, envKey, vary, shots, distinct, burstVerdict(shots, distinct, vary));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    static String burstVerdict(List<BurstShot> shots, int distinct, String vary) {
+        long passed = shots.stream().filter(s -> "PASSED".equals(s.status())).count();
+        long blocked = shots.stream().filter(s -> "BLOCKED".equals(s.status())).count();
+        StringBuilder sb = new StringBuilder();
+        sb.append(shots.size()).append(" 个请求：通过 ").append(passed);
+        if (blocked > 0) {
+            sb.append("，没跑成 / 被限流 ").append(blocked);
+        }
+        long failed = shots.size() - passed - blocked;
+        if (failed > 0) {
+            sb.append("，失败 ").append(failed);
+        }
+        sb.append("；返回体 ").append(distinct).append(" 种。");
+        if (passed == shots.size() && vary != null) {
+            sb.append("接口都成功了，不代表没问题：现在去库和缓存里各查一次 ").append(vary)
+                    .append("，两边必须是同一个值；不一致就是并发下写乱了顺序。");
+        } else if (passed > 0 && failed > 0) {
+            sb.append("同样的请求有的成功有的失败——看失败那几条是不是锁冲突 / 唯一索引冲突，以及报错是否友好。");
+        }
+        return sb.toString();
+    }
+
+    /** 复制一份用例，把 param 换成 value：query 里有就改 query，body 顶层有就改 body，都没有按方法加 */
+    static ApiTestCase withParam(ApiTestCase base, String param, String value) {
+        ApiTestCase c = new ApiTestCase();
+        org.springframework.beans.BeanUtils.copyProperties(base, c);
+        if (param == null) {
+            return c;
+        }
+        try {
+            com.fasterxml.jackson.databind.node.ObjectNode query = objectOf(c.getQuery());
+            com.fasterxml.jackson.databind.node.ObjectNode body = objectOf(c.getBody());
+            boolean get = c.getMethod() == null || "GET".equalsIgnoreCase(c.getMethod());
+            if (query.has(param) || (get && !body.has(param))) {
+                query.put(param, value);
+                c.setQuery(JSON.writeValueAsString(query));
+            } else {
+                if (body.path(param).isNumber() && value != null && value.matches("-?\\d+")) {
+                    body.put(param, Long.parseLong(value));
+                } else {
+                    body.put(param, value);
+                }
+                c.setBody(JSON.writeValueAsString(body));
+            }
+        } catch (Exception e) {
+            throw new IllegalArgumentException("改不了参数 " + param + "：" + e.getMessage());
+        }
+        return c;
+    }
+
+    private static com.fasterxml.jackson.databind.node.ObjectNode objectOf(String json) throws Exception {
+        if (json == null || json.isBlank()) {
+            return JSON.createObjectNode();
+        }
+        JsonNode n = JSON.readTree(json);
+        if (n instanceof com.fasterxml.jackson.databind.node.ObjectNode o) {
+            return o;
+        }
+        throw new IllegalArgumentException("不是 JSON 对象");
+    }
+
+    /**
+     * 给 {@code {{token}}} 一个值：本轮手填 → 自动登录 → 项目变量 → 环境默认 token。
+     * <p>
+     * 只放进请求头的话，token 走 query（?token=…）的网关拿不到；
+     * 抓包生成的用例在 query 里写的是 {@code {{token}}}，靠这里取值。
+     */
+    static Map<String, String> withToken(Map<String, String> vars, String tokenOverride, String loginToken,
+                                         ApiTestEnv env) {
+        if (tokenOverride != null && !tokenOverride.isBlank()) {
+            vars.put("token", tokenOverride.trim());
+        } else if (loginToken != null) {
+            vars.put("token", loginToken);
+        } else if ((vars.get("token") == null || vars.get("token").isBlank())
+                && env != null && env.getDefaultToken() != null && !env.getDefaultToken().isBlank()) {
+            vars.put("token", env.getDefaultToken().trim());
+        }
+        return vars;
+    }
+
     /* caseKind 在这里快照：见 ApiTestRunCase.caseKind 的注释——
        查询时去 join 用例表的话，用例被升级成回归用例之后，历史运行的分桶会跟着变 */
     private CaseResult executeOne(ApiTestCase c, ApiTestEnv env, String tokenOverride, String urlIdOverride,
@@ -416,6 +574,8 @@ public class ApiTestRunnerService {
         cr.setName(c.getName());
         cr.setMethod(c.getMethod());
         cr.setCaseKind(c.getCaseKind());
+        cr.setIntent(c.getIntent());
+        cr.setExpectNote(c.getExpectNote());
         long t0 = System.currentTimeMillis();
         try {
             String baseUrl = resolveBaseUrl(c, env, urlIdOverride);
@@ -424,6 +584,12 @@ public class ApiTestRunnerService {
                             s -> VariableResolver.resolve(s, runtime, envVars)),
                     runtime, envVars);
             cr.setUrl(url);
+            String infra = com.mobile.standalone.service.apitest.InfraEndpoints.reason(url);
+            if (infra != null) {
+                cr.setStatus("BLOCKED");
+                cr.setError("没发请求：" + infra);
+                return cr;
+            }
             Map<String, String> headers = mergeHeaders(env, c, tokenOverride, authHeaders);
             headers.replaceAll((k, v) -> VariableResolver.resolve(v, runtime, envVars));
             HttpRequest.Builder b = HttpRequest.newBuilder()
@@ -448,7 +614,7 @@ public class ApiTestRunnerService {
             // 放在发请求前面这一步没得商量：请求发出去数据就变了，那时再查已经晚了
             String resolvedAssertions =
                     withBizCodeAssertion(c, VariableResolver.resolve(c.getAssertions(), runtime, envVars));
-            Map<String, Object> dbBefore = queryDbBaseline(resolvedAssertions, env);
+            Map<String, Object> dbBefore = queryDbBaseline(resolvedAssertions, env, c.getProject());
 
             HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             cr.setHttpStatus(resp.statusCode());
@@ -488,7 +654,7 @@ public class ApiTestRunnerService {
                 // 提前返回也会走 finally，durationMs 照样会被设上
                 return cr;
             }
-            DbContext dbCtx = queryDbAfter(assertions, env, dbBefore, assertMsgs);
+            DbContext dbCtx = queryDbAfter(assertions, env, c.getProject(), dbBefore, assertMsgs);
             boolean ok = evaluateAssertions(assertions, resp.statusCode(), resp.body(),
                     resp.headers().map(), elapsed, dbCtx, assertMsgs);
             if (!dbCtx.errors().isEmpty()) {
@@ -770,62 +936,91 @@ public class ApiTestRunnerService {
         }
     }
 
+    /** 一条库断言：查哪个连接（空＝按项目自动选）+ SQL */
+    record DbRef(String conn, String sql) {
+        String key() {
+            return dbKey(conn, sql);
+        }
+    }
+
+    /** 同一条 SQL 查两个库是两件事，结果不能串 */
+    static String dbKey(String conn, String sql) {
+        return conn == null || conn.isBlank() ? sql : conn.trim() + "\u0001" + sql;
+    }
+
+    private com.mobile.standalone.service.apitest.DbConnectionService.Pick pickDb(
+            ApiTestEnv env, String project, String conn,
+            Map<String, com.mobile.standalone.service.apitest.DbConnectionService.Pick> cache) {
+        String k = conn == null ? "" : conn.trim().toLowerCase(java.util.Locale.ROOT);
+        return cache.computeIfAbsent(k, x ->
+                dbConnections.pick(env == null ? null : env.getEnvironment(), project, conn));
+    }
+
     /** 请求前的基线。只有 {@code dbDelta} 需要——普通 db 断言查一次就够 */
-    private Map<String, Object> queryDbBaseline(String assertionsJson, ApiTestEnv env) {
+    private Map<String, Object> queryDbBaseline(String assertionsJson, ApiTestEnv env, String project) {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
-        for (String sql : dbSqlOf(assertionsJson, "dbDelta")) {
-            var r = dbAssert.query(env, sql);
+        Map<String, com.mobile.standalone.service.apitest.DbConnectionService.Pick> picks = new java.util.HashMap<>();
+        for (DbRef ref : dbRefsOf(assertionsJson, "dbDelta")) {
+            var p = pickDb(env, project, ref.conn(), picks);
+            if (p.conn() == null) {
+                continue;
+            }
+            var r = dbAssert.query(com.mobile.standalone.service.apitest.DbAssertRunner.Target.of(p.conn()), ref.sql());
             if (r.ok()) {
-                out.put(sql, r.value());
+                out.put(ref.key(), r.value());
             }
         }
         return out;
     }
 
     /** 请求后再查一遍，普通 db 取值、dbDelta 算差 */
-    private DbContext queryDbAfter(String assertionsJson, ApiTestEnv env,
+    private DbContext queryDbAfter(String assertionsJson, ApiTestEnv env, String project,
                                    Map<String, Object> before, List<String> msgs) {
-        List<String> plain = dbSqlOf(assertionsJson, "db");
-        List<String> delta = dbSqlOf(assertionsJson, "dbDelta");
+        List<DbRef> plain = dbRefsOf(assertionsJson, "db");
+        List<DbRef> delta = dbRefsOf(assertionsJson, "dbDelta");
         if (plain.isEmpty() && delta.isEmpty()) {
             return DbContext.empty();
         }
-        List<String> errors = new ArrayList<>();
-        if (!dbAssert.configured(env)) {
-            // 用了数据库断言却没配库，必须报出来。静默跳过＝这条断言等于不存在，
-            // 而用例还是绿的——那比没有这个功能更危险
-            errors.add("用了数据库断言，但环境 " + (env == null ? "?" : env.getEnvironment())
-                    + " 还没配测试库连接");
-            msgs.add("FAIL " + errors.get(0));
-            return new DbContext(Map.of(), Map.of(), errors);
-        }
+        // 选不到库必须报出来。静默跳过＝这条断言等于不存在，
+        // 而用例还是绿的——那比没有这个功能更危险
+        java.util.LinkedHashSet<String> errors = new java.util.LinkedHashSet<>();
+        Map<String, com.mobile.standalone.service.apitest.DbConnectionService.Pick> picks = new java.util.HashMap<>();
         Map<String, Object> values = new java.util.LinkedHashMap<>();
         Map<String, Object> deltas = new java.util.LinkedHashMap<>();
-        for (String sql : plain) {
-            var r = dbAssert.query(env, sql);
-            if (r.ok()) {
-                values.put(sql, r.value());
-            } else {
-                errors.add("库查询失败：" + r.error());
-                msgs.add("FAIL 库查询失败：" + r.error());
-            }
-        }
-        for (String sql : delta) {
-            var r = dbAssert.query(env, sql);
-            if (!r.ok()) {
-                errors.add("库查询失败：" + r.error());
-                msgs.add("FAIL 库查询失败：" + r.error());
+        for (DbRef ref : plain) {
+            var p = pickDb(env, project, ref.conn(), picks);
+            if (p.conn() == null) {
+                errors.add("选库失败：" + p.error());
                 continue;
             }
-            Object b = before.get(sql);
-            // 基线没查到就不给差值：给个 0 会被断言当成「没变化」，那是编出来的结论
-            deltas.put(sql, b == null ? null : num(r.value()) - num(b));
+            var r = dbAssert.query(com.mobile.standalone.service.apitest.DbAssertRunner.Target.of(p.conn()), ref.sql());
+            if (r.ok()) {
+                values.put(ref.key(), r.value());
+            } else {
+                errors.add("库查询失败（" + p.conn().getName() + "）：" + r.error());
+            }
         }
-        return new DbContext(values, deltas, errors);
+        for (DbRef ref : delta) {
+            var p = pickDb(env, project, ref.conn(), picks);
+            if (p.conn() == null) {
+                errors.add("选库失败：" + p.error());
+                continue;
+            }
+            var r = dbAssert.query(com.mobile.standalone.service.apitest.DbAssertRunner.Target.of(p.conn()), ref.sql());
+            if (!r.ok()) {
+                errors.add("库查询失败（" + p.conn().getName() + "）：" + r.error());
+                continue;
+            }
+            Object b = before.get(ref.key());
+            // 基线没查到就不给差值：给个 0 会被断言当成「没变化」，那是编出来的结论
+            deltas.put(ref.key(), b == null ? null : num(r.value()) - num(b));
+        }
+        errors.forEach(e -> msgs.add("FAIL " + e));
+        return new DbContext(values, deltas, new ArrayList<>(errors));
     }
 
-    private List<String> dbSqlOf(String assertionsJson, String type) {
-        List<String> out = new ArrayList<>();
+    private List<DbRef> dbRefsOf(String assertionsJson, String type) {
+        List<DbRef> out = new ArrayList<>();
         try {
             JsonNode arr = assertionsJson == null || assertionsJson.isBlank()
                     ? JSON.createArrayNode() : JSON.readTree(assertionsJson);
@@ -835,8 +1030,9 @@ public class ApiTestRunnerService {
             for (JsonNode a : arr) {
                 if (type.equals(text(a, "type"))) {
                     String sql = text(a, "sql");
-                    if (sql != null && !sql.isBlank() && !out.contains(sql)) {
-                        out.add(sql);
+                    DbRef ref = new DbRef(text(a, "conn"), sql);
+                    if (sql != null && !sql.isBlank() && out.stream().noneMatch(x -> x.key().equals(ref.key()))) {
+                        out.add(ref);
                     }
                 }
             }
@@ -896,6 +1092,10 @@ public class ApiTestRunnerService {
             }
             default -> false;
         };
+    }
+
+    private static String connTag(String conn) {
+        return conn == null || conn.isBlank() ? "" : "@" + conn.trim();
     }
 
     private String opDesc(JsonNode a) {
@@ -990,7 +1190,15 @@ public class ApiTestRunnerService {
                     case "jsonPath" -> {
                         String path = text(a, "path");
                         JsonNode node = readJsonPath(body, path);
-                        if (a.has("op")) {
+                        if ("type".equals(text(a, "op"))) {
+                            // 类型要看 JSON 节点本身，转成字符串就分不清 584 和 "584" 了
+                            String want = text(a, "value");
+                            String got = FieldTypeAsserts.typeOf(node);
+                            pass = want != null && want.trim().equalsIgnoreCase(got);
+                            detail = "jsonPath " + path + " 类型是 " + want + " 实际=" + got
+                                    + (node != null && node.isValueNode() && !node.isNull()
+                                    ? "（" + truncate(node.asText(), 40) + "）" : "");
+                        } else if (a.has("op")) {
                             // 新写法：{path, op, value}，算子和 db 断言同一套
                             // （多了 gte/lte/matches/notContains/notEmpty）。
                             // 老写法 {path, equals} 那些继续走下面的分支，不动存量用例
@@ -1037,16 +1245,18 @@ public class ApiTestRunnerService {
                     }
                     case "db" -> {
                         String sql = text(a, "sql");
-                        Object actual = db.values().get(sql);
+                        String conn = text(a, "conn");
+                        Object actual = db.values().get(dbKey(conn, sql));
                         pass = compare(a, actual);
-                        detail = "db[" + truncate(sql, 60) + "] " + opDesc(a) + " 实际=" + actual;
+                        detail = "db" + connTag(conn) + "[" + truncate(sql, 60) + "] " + opDesc(a) + " 实际=" + actual;
                     }
                     case "dbDelta" -> {
                         String sql = text(a, "sql");
-                        Object actual = db.deltas().get(sql);
+                        String conn = text(a, "conn");
+                        Object actual = db.deltas().get(dbKey(conn, sql));
                         // 基线没查到时 delta 是 null，不能当 0——那会把「没查到」说成「没变化」
                         pass = actual != null && compare(a, actual);
-                        detail = "dbDelta[" + truncate(sql, 60) + "] " + opDesc(a)
+                        detail = "dbDelta" + connTag(conn) + "[" + truncate(sql, 60) + "] " + opDesc(a)
                                 + " 实际=" + (actual == null ? "基线没查到" : actual);
                     }
                     default -> {

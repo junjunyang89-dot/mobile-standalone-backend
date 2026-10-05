@@ -91,6 +91,23 @@ class CallerRefScannerTest {
                 .containsExactly("admin");
     }
 
+    /** app-admin 这种仓库里自带前端：它自己的 Controller 不算调用方，前端算 */
+    @Test
+    void frontendInsideExcludedRepoStillCounts() throws Exception {
+        write("app-admin/src/main/java/TalkController.java", "@GetMapping(\"/steamcn/community/talk/getTalkList\")\n");
+        write("app-admin/frontend/api/talk.js",
+                "export function getTalkList(p) { return request({ url: '/steamcn/community/talk/getTalkList', params: p }) }\n");
+        write("app-admin/frontend/views/talk.vue", "import { getTalkList } from '@/api/talk'\ngetTalkList({})\n");
+
+        Map<String, List<CallerRefScanner.Ref>> r = CallerRefScanner.scan(
+                List.of("/steamcn/community/talk/getTalkList"), List.of(root), root.resolve("app-admin"));
+
+        List<CallerRefScanner.Ref> refs = r.get("/steamcn/community/talk/getTalkList");
+        assertThat(refs).hasSize(1);
+        assertThat(refs.get(0).repo()).isEqualTo("app-admin");
+        assertThat(refs.get(0).file()).isEqualTo("frontend/api/talk.js");
+    }
+
     @Test
     void otherServiceOwnMappingAndExcludedRepoAreNotCallers() throws Exception {
         write("data-center/src/AiController.java", "@GetMapping(\"/appdatacenter/ai/getAiComment\")\n");

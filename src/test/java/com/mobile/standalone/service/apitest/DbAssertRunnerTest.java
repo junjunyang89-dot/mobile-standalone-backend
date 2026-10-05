@@ -3,6 +3,8 @@ package com.mobile.standalone.service.apitest;
 import com.mobile.standalone.entity.ApiTestEnv;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -71,7 +73,31 @@ class DbAssertRunnerTest {
 
         assertThat(r.ok()).isFalse();
         assertThat(r.error()).contains("还没配");
-        assertThat(runner.configured(env)).isFalse();
+        assertThat(runner.configured(DbAssertRunner.Target.of(env))).isFalse();
+    }
+
+    @Test
+    void 只读GRANT算符合要求() {
+        assertThat(DbAssertRunner.grantsLookReadOnly(List.of(
+                "GRANT USAGE ON *.* TO `qa`@`%`",
+                "GRANT SELECT ON `data_center`.* TO `qa`@`%`"))).isTrue();
+    }
+
+    @Test
+    void 带写权限的GRANT要标出来() {
+        assertThat(DbAssertRunner.grantsLookReadOnly(List.of(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON `data_center`.* TO `qa`@`%`"))).isFalse();
+        assertThat(DbAssertRunner.grantsLookReadOnly(List.of(
+                "GRANT ALL PRIVILEGES ON *.* TO `root`@`%`"))).isFalse();
+    }
+
+    @Test
+    void 测通文案带版本和只读结论() {
+        var p = DbAssertRunner.Probe.ok(42, "MySQL", "8.0.34", true);
+        assertThat(p.message()).isEqualTo("连接成功 42ms —— MySQL 8.0.34，账号权限：只有读权限（符合要求）");
+        var write = DbAssertRunner.Probe.ok(10, "MySQL", "8.0.34-log", false);
+        assertThat(write.message()).contains("有写权限");
+        assertThat(DbAssertRunner.formatVersion("MySQL", "8.0.34-log")).isEqualTo("MySQL 8.0.34");
     }
 
     private void assertThatRejected(String sql) {

@@ -90,6 +90,8 @@ public class ApiTestRunService {
             ensureColumn("api_test_run_cases", "case_kind",
                     "VARCHAR(16) NULL COMMENT '运行时这条用例的种类；"
                             + "空＝没记录（历史运行，或用例查不到的 BLOCKED）'");
+            ensureColumn("api_test_run_cases", "intent", "VARCHAR(16) NULL COMMENT '运行时用例的意图 NORMAL / NEGATIVE'");
+            ensureColumn("api_test_run_cases", "expect_note", "VARCHAR(600) NULL COMMENT '运行时用例的期望行为说明'");
             ensureColumn("api_test_runs", "skipped",
                     "INT NOT NULL DEFAULT 0 COMMENT '线上执行跳过的只在测试跑用例数'");
             ensureColumn("api_test_runs", "trigger_type", "VARCHAR(16) NULL COMMENT 'MANUAL | SCHEDULE'");
@@ -312,6 +314,8 @@ public class ApiTestRunService {
                 row.setError(truncate(cr.getError(), 1024));
                 // 快照，不是引用：用例以后被分诊、改种类，这次运行的分桶也不该变
                 row.setCaseKind(cr.getCaseKind());
+                row.setIntent(cr.getIntent());
+                row.setExpectNote(truncate(cr.getExpectNote(), 600));
                 // 断言逐条存下来。只存一句 error 的话，四条断言挂了三条也只看得到一条
                 row.setAssertionResults(truncate(
                         cr.getAssertionResults() == null ? null

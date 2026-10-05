@@ -9,8 +9,9 @@ import java.time.LocalDateTime;
  */
 @Data
 public class ApiProject {
-    /** BACKEND=后端仓库；CLIENT=客户端（不进接口清单） */
+    /** BACKEND=后端仓库；FRONTEND=H5/前端站；CLIENT=客户端（后两者不扫接口） */
     public static final String KIND_BACKEND = "BACKEND";
+    public static final String KIND_FRONTEND = "FRONTEND";
     public static final String KIND_CLIENT = "CLIENT";
 
     /** 编码，如 data-center */
@@ -18,7 +19,7 @@ public class ApiProject {
     /** 展示名 */
     private String name;
     private String description;
-    /** BACKEND / CLIENT；留空按 BACKEND */
+    /** BACKEND / FRONTEND / CLIENT；留空按 BACKEND */
     private String kind;
     /** 所属分类：APP / PVP / WEB / OTHER；留空则按编码自动归类 */
     private String category;

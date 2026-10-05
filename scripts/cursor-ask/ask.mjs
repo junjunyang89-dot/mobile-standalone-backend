@@ -4,8 +4,9 @@
  *   node ask.mjs < input.json
  *
  * 输入：
- *   { apiKey, cwd, message, agentId?, model?, mode? }
+ *   { apiKey, cwd, message, agentId?, model?, mode?, dirs?, images? }
  *   mode: "ask"（默认只读）| "k8s"（可写 k8s-config）
+ *   dirs: 除 cwd 外还能读的代码目录；images: [{ data: base64, mimeType }]
  * 输出（stdout 单行 JSON）：
  *   { ok, agentId, runId, status, answer, error? }
  */
@@ -78,6 +79,12 @@ async function main() {
   const agentIdIn = input.agentId ? String(input.agentId).trim() : "";
   const prefix = mode === "k8s" ? K8S_PREFIX : ASK_PREFIX;
   const prompt = agentIdIn ? message : `${prefix}\n${message}`;
+  const dirs = Array.isArray(input.dirs) ? input.dirs.map((d) => resolve(String(d))) : [];
+  const images = Array.isArray(input.images)
+    ? input.images
+        .filter((x) => x && x.data && String(x.mimeType || "").startsWith("image/"))
+        .map((x) => ({ data: String(x.data), mimeType: String(x.mimeType) }))
+    : [];
 
   if (!apiKey) {
     out({ ok: false, error: "缺少 CURSOR_API_KEY / apiKey" });
@@ -93,6 +100,7 @@ async function main() {
     model,
     local: {
       cwd,
+      ...(dirs.length ? { dirs } : {}),
       settingSources: [],
     },
     // ask：禁改文件；k8s：允许 edit，仍禁 delete
@@ -108,7 +116,7 @@ async function main() {
       ? await Agent.resume(agentIdIn, options)
       : await Agent.create(options);
 
-    const run = await agent.send(prompt, {
+    const run = await agent.send(images.length ? { text: prompt, images } : prompt, {
       local: { force: true },
     });
     const result = await run.wait();

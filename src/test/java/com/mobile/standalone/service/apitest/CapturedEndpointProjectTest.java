@@ -77,7 +77,9 @@ class CapturedEndpointProjectTest {
         var controller = new PacketCaptureController(mock(PacketCaptureService.class), service, endpoints,
                 mock(com.mobile.standalone.service.ApiTestCaseService.class),
                 mock(com.mobile.standalone.service.capture.CaptureStore.class),
-                mock(CaptureCatalogService.class));
+                mock(CaptureCatalogService.class),
+                mock(com.mobile.standalone.mapper.ApiEndpointMapper.class),
+                mock(com.mobile.standalone.service.capture.CaptureImportService.class));
 
         ResponseEntity<?> r = controller.link(Map.of(
                 "requirementNo", "APP-8999",
@@ -95,7 +97,9 @@ class CapturedEndpointProjectTest {
         var controller = new PacketCaptureController(mock(PacketCaptureService.class), service, endpoints,
                 mock(com.mobile.standalone.service.ApiTestCaseService.class),
                 mock(com.mobile.standalone.service.capture.CaptureStore.class),
-                mock(CaptureCatalogService.class));
+                mock(CaptureCatalogService.class),
+                mock(com.mobile.standalone.mapper.ApiEndpointMapper.class),
+                mock(com.mobile.standalone.service.capture.CaptureImportService.class));
 
         ResponseEntity<?> r = controller.link(Map.of(
                 "requirementNo", "APP-8999",

@@ -46,6 +46,22 @@ def _size(msg):
         return len(getattr(msg, "raw_content", b"") or b"")
 
 
+def _body_text(msg):
+    """按 Content-Encoding 解压后的文本。
+
+    raw_content 是线上传输的原始字节，gzip / br 压缩过的直接 decode 就是乱码。
+    解不开（声明了编码但内容不对）时退回原始字节，至少不丢东西。
+    """
+    data = None
+    try:
+        data = msg.get_content(strict=False)
+    except Exception:  # noqa: BLE001
+        data = None
+    if data is None:
+        data = msg.raw_content or b""
+    return data.decode("utf-8", errors="replace")
+
+
 class FlowWriter:
     def __init__(self):
         self.out_path = None
@@ -144,8 +160,7 @@ class FlowWriter:
             if self._is_text(flow.response.headers):
                 # 全文留下：对局详情这种几 MB 的 JSON 截断后既对不上字段，
                 # 也解析不成树，等于没抓到。二进制仍不进 body。
-                raw = flow.response.raw_content or b""
-                body = raw.decode("utf-8", errors="replace")
+                body = _body_text(flow.response)
             else:
                 info["bodyNote"] = "%s 是二进制内容，不留响应体" % (info["respKind"] or "该类型")
 
@@ -168,8 +183,7 @@ class FlowWriter:
     def _req_body(self, flow):
         if not self._is_text(flow.request.headers):
             return ""
-        raw = flow.request.raw_content or b""
-        return raw.decode("utf-8", errors="replace")
+        return _body_text(flow.request)
 
     def _load_overrides(self):
         """规则在会话开始时读一次。
@@ -212,7 +226,7 @@ class FlowWriter:
             path_only = flow.request.path.split("?")[0]
             body = ""
             try:
-                body = (flow.response.raw_content or b"").decode("utf-8", errors="replace")
+                body = _body_text(flow.response)
             except Exception:  # noqa: BLE001
                 body = ""
             res = api_override.apply_overrides(

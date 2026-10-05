@@ -15,11 +15,11 @@
     <insert id="insertRunCase">
         INSERT INTO api_test_run_cases
         (id, run_id, case_id, name, method, path, url, status, http_status, duration_ms, error,
-         case_kind, assertion_results, body_preview, req_headers, req_body, resp_headers, created_at)
+         case_kind, intent, expect_note, assertion_results, body_preview, req_headers, req_body, resp_headers, created_at)
         VALUES
         (#{id}, #{runId}, #{caseId}, #{name}, #{method}, #{path}, #{url}, #{status},
          #{httpStatus}, #{durationMs}, #{error},
-         #{caseKind},
+         #{caseKind}, #{intent}, #{expectNote},
          #{assertionResults}, #{bodyPreview}, #{reqHeaders}, #{reqBody}, #{respHeaders}, #{createdAt})
     </insert>
 
@@ -172,6 +172,7 @@
     <select id="findCasesByRun" resultType="com.mobile.standalone.entity.ApiTestRunCase">
         SELECT id, run_id AS runId, case_id AS caseId, name, method, path, url,
                status, http_status AS httpStatus, duration_ms AS durationMs, error,
+               intent, expect_note AS expectNote,
                assertion_results AS assertionResults, body_preview AS bodyPreview,
                req_headers AS reqHeaders, req_body AS reqBody, resp_headers AS respHeaders,
                created_at AS createdAt

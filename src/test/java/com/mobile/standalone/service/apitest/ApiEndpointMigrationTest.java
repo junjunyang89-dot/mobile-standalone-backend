@@ -94,7 +94,6 @@ class ApiEndpointMigrationTest {
 
         verify(mapper, never()).update(any());
         verify(mapper, never()).deleteById(anyString());
-        verify(mapper, never()).markDeprecatedNotIn(anyString(), any());
     }
 
     /** 表还没建好时（比如列还没补上）安静跳过，不能把整个启动带崩 */

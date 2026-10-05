@@ -35,6 +35,9 @@ public class ApiTestRunCase {
      * 于是「没记录」被悄悄算进回归桶的分母。
      */
     private String caseKind;
+    /** 运行时用例的意图（NORMAL / NEGATIVE）和期望行为说明，快照理由同 caseKind */
+    private String intent;
+    private String expectNote;
     /**
      * 每条断言的结果、以及实际发出去/收到的内容。
      * <p>

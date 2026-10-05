@@ -87,12 +87,17 @@ class ProjectTreeServiceTest {
                 .filter(c -> "APP".equals(c.get("key"))).findFirst().orElseThrow();
         assertThat(app.get("type")).isEqualTo("CATEGORY");
 
-        Map<String, Object> proj = children(app).get(0);
+        Map<String, Object> kind = children(app).get(0);
+        assertThat(kind.get("type")).isEqualTo("KIND");
+        assertThat(kind.get("label")).isEqualTo("客户端");
+
+        Map<String, Object> proj = children(kind).get(0);
         assertThat(proj.get("type")).isEqualTo("PROJECT");
         assertThat(proj.get("kind")).isEqualTo("CLIENT");
         // 展示名读 name 列而不是从 code 推导——推导会把 iOS 变成 IOS
         assertThat(proj.get("label")).isEqualTo("APP-ESPORTS-iOS");
         assertThat(children(proj)).allSatisfy(m -> assertThat(m.get("type")).isEqualTo("MODULE"));
+        assertThat(children(app).stream().map(k -> k.get("label"))).doesNotContain("前端", "后端");
     }
 
     @Test
@@ -111,6 +116,8 @@ class ProjectTreeServiceTest {
         Map<String, Long> counts = (Map<String, Long>) app.get("counts");
         assertThat(counts.get("apiCases")).isEqualTo(15L);
         assertThat(app.get("projectCount")).isEqualTo(2);
+        assertThat(children(app)).hasSize(1);
+        assertThat(children(app).get(0).get("label")).isEqualTo("后端");
     }
 
     /** 空项目默认保留：「一条用例都没有」正是要看见的信息 */
@@ -120,8 +127,8 @@ class ProjectTreeServiceTest {
         when(projectMapper.findAll(null)).thenReturn(List.of(
                 project("app-empty", "EMPTY", "APP", "BACKEND")));
 
-        assertThat(children(nodes(service.build(true)).get(0))).hasSize(1);
-        assertThat(children(nodes(service.build(false)).get(0))).isEmpty();
+        assertThat(children(children(nodes(service.build(true)).get(0)).get(0))).hasSize(1);
+        assertThat(nodes(service.build(false))).isEmpty();
     }
 
     /** 注册表里没有的分类值不能静默吞掉，否则那些项目会整个从树上消失 */
@@ -142,7 +149,7 @@ class ProjectTreeServiceTest {
         off.setEnabled(false);
         when(projectMapper.findAll(null)).thenReturn(List.of(off));
 
-        assertThat(children(nodes(service.build(true)).get(0))).isEmpty();
+        assertThat(nodes(service.build(true))).isEmpty();
     }
 
     /** 某张来源表查不出来时，该项计 0，树照常返回 */
@@ -154,7 +161,7 @@ class ProjectTreeServiceTest {
         when(jdbcTemplate.queryForList(contains("ui_elements")))
                 .thenThrow(new RuntimeException("表还没建"));
 
-        Map<String, Object> proj = children(nodes(service.build(true)).get(0)).get(0);
+        Map<String, Object> proj = children(children(nodes(service.build(true)).get(0)).get(0)).get(0);
         @SuppressWarnings("unchecked")
         Map<String, Long> counts = (Map<String, Long>) proj.get("counts");
         assertThat(counts.get("uiElements")).isEqualTo(0L);

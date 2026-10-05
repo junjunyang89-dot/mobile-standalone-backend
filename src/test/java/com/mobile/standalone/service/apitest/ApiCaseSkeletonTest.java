@@ -30,14 +30,26 @@ class ApiCaseSkeletonTest {
         assertThat(d.note()).contains("抓包");
     }
 
-    /** 配了业务码就有真断言了，可以直接启用 */
+    /** 只有按项目约定写的业务码：没在这个接口上验过，带上断言但停用 */
     @Test
-    void 有业务码时带上code断言并启用() {
+    void 只有约定业务码时停用并标成未验证() {
         ApiCaseSkeleton.Draft d = ApiCaseSkeleton.build(in("$.code", "0", List.of()));
 
+        assertThat(d.enabled()).isFalse();
+        assertThat(d.assertions()).contains("\"path\":\"$.code\"").contains("\"equals\":0")
+                .contains("\"source\":\"convention\"");
+        assertThat(d.name()).contains("待验证");
+    }
+
+    /** 抓包响应里业务码就是成功值：这条业务码断言算验过 */
+    @Test
+    void 抓包里业务码对得上时算验证过() {
+        ApiCaseSkeleton.Draft d = ApiCaseSkeleton.build(new ApiCaseSkeleton.Input(
+                "GET", "/demo", null, "$.code", "0", List.of(), Map.of("code", 0)));
+
         assertThat(d.enabled()).isTrue();
-        assertThat(d.assertions()).contains("\"path\":\"$.code\"").contains("\"equals\":0");
-        assertThat(d.name()).doesNotContain("待补断言");
+        assertThat(d.assertions()).contains("\"equals\":0,\"source\":\"capture\"");
+        assertThat(d.assertions()).doesNotContain("convention");
     }
 
     /** 非数字的业务码要当字符串比，否则 JSON 是坏的 */
@@ -57,7 +69,8 @@ class ApiCaseSkeletonTest {
         assertThat(d.enabled()).isTrue();
         assertThat(d.assertions())
                 .contains("\"path\":\"$.orderId\"")
-                .contains("\"exists\":true");
+                .contains("\"exists\":true")
+                .contains("\"source\":\"fields\"");
     }
 
     /**

@@ -19,4 +19,6 @@ public class ApiChangeReport {
     /** 完整 Report JSON */
     private String reportJson;
     private LocalDateTime createdAt;
+    /** null = 接口对比分析页；BATCH = 接口对比分析2（不进接口对比分析页的历史列表） */
+    private String source;
 }

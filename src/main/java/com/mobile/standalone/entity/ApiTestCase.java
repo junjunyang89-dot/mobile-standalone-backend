@@ -40,6 +40,15 @@ public class ApiTestCase {
      * </ul>
      */
     private String sourceBranch;
+    /**
+     * 这条用例测的是什么输入：NORMAL（正常用法）/ NEGATIVE（异常输入：缺参、传错、越界）。
+     * <p>
+     * 和 caseKind 不是一回事：caseKind 是用例的生命周期，intent 是这次请求本身正不正常。
+     * 「缺少 matchId 返回成功」这种，不标出来人分不清它是在测正常流程还是在测异常。空值＝没标。
+     */
+    private String intent;
+    /** 期望行为的出处：「代码行为：… （Dota2LiveServiceImpl.java:80）。疑似问题：…」 */
+    private String expectNote;
     /** GET/POST/PUT/PATCH/DELETE */
     private String method;
     /** 相对路径，如 /appdatacenter/deadlock/...；也可写绝对 URL（则忽略 URL/环境 baseUrl） */

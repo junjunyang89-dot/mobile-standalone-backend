@@ -37,6 +37,8 @@ public final class PermissionRules {
             "/tmp/screenshots", "tmp/screenshots", "/ui-element-previews",
             "/handbook-images", "/agent-uploads", "/bug-images", "/issue-images",
             "/knowledge-note-images",
+            // iOS 抓包装 CA：手机浏览器要直连下载，带不上登录态；证书本来就是给人装的
+            "/packet-capture/mitm-ca",
             // 本机调试用的免登录查询。只放行 /open，列表/增删改仍要登录
             "/debug-tests/open");
 
@@ -76,7 +78,7 @@ public final class PermissionRules {
     private static final List<String> READ_ONLY_POST_SUFFIXES = List.of(
             "/analyze", "/analyze-dirs", "/diff", "/preview", "/preview-order",
             "/import/parse-text", "/inspector-xml/parse", "/resolve-dependencies",
-            "/table-schemas/preview", "/ask");
+            "/table-schemas/preview", "/ask", "/insight");
 
     /**
      * 登录后人人可用的自助操作，不看角色。
@@ -142,7 +144,10 @@ public final class PermissionRules {
             // 抓包会改手机的代理设置，只读账号不该能碰真机
             Map.entry("/packet-capture", PlatformRole.TESTER),
             Map.entry("/status-monitor", PlatformRole.TESTER),
-            Map.entry("/incident-playbooks", PlatformRole.TESTER));
+            Map.entry("/incident-playbooks", PlatformRole.TESTER),
+            // 缓存和消息里常有 token、手机号；查询接口本身也是 POST，只读账号调不动
+            Map.entry("/redis-tool", PlatformRole.TESTER),
+            Map.entry("/kafka-tool", PlatformRole.TESTER));
 
     /**
      * 路径里出现 {@code .} / {@code ..} 段、反斜杠、或解码后仍残留的 {@code %}——正常业务路径不会有，一律拒绝。

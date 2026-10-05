@@ -8,8 +8,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 项目管理页分类。内置只有「电竞APP」（key 仍是 APP，库里和各处查询都按这个 key）；
- * POGPOG 等是在分类管理里建的自定义分类。
+ * 项目管理页分类。内置只有「电竞」（key 仍是 APP，库里和各处查询都按这个 key）；
+ * POGPOG 等是在分类管理里建的自定义分类。树上再按仓库类型分成后端 / 前端 / 客户端。
  * <p>
  * 早先还有 PVP / WEB / 其他 三个内置分类，已下线。库里残留的这三个值一律当成 APP，
  * 否则项目上挂着旧值时，树会把已删掉的分类又原样渲染出来。
@@ -22,14 +22,14 @@ public final class ApiProjectCatalog {
     public record Category(String key, String label) {
     }
 
-    public static final Category APP = new Category("APP", "电竞APP");
+    public static final Category APP = new Category("APP", "电竞");
 
     private static final List<Category> ORDER = List.of(APP);
 
     /** 已下线的内置分类 key */
     public static final Set<String> RETIRED_CATEGORY_KEYS = Set.of("PVP", "WEB", "OTHER");
 
-    /** 没有手动分类的项目一律归到电竞APP */
+    /** 没有手动分类的项目一律归到电竞 */
     public static String categoryKeyOf(String projectCode) {
         return APP.key();
     }
@@ -43,7 +43,7 @@ public final class ApiProjectCatalog {
         return ORDER.stream().filter(c -> c.key().equals(key)).findFirst().orElse(APP);
     }
 
-    /** 手动分类优先；未配置或是已下线的旧值时归到电竞APP */
+    /** 手动分类优先；未配置或是已下线的旧值时归到电竞 */
     public static String resolveCategoryKey(String projectCode, String storedCategory) {
         if (storedCategory != null && !storedCategory.isBlank()) {
             String k = storedCategory.trim();
@@ -97,9 +97,7 @@ public final class ApiProjectCatalog {
 
     /** APP 分类下推荐的项目编码顺序（含尚未入库的占位） */
     public static List<String> appProjectSlots() {
-        List<String> slots = new ArrayList<>(ApiAppCatalog.groups().get(0).projectCodes());
-        slots.add("app-global-data");
-        return slots;
+        return new ArrayList<>(ApiAppCatalog.groups().get(0).projectCodes());
     }
 
     /**

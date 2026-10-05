@@ -4,6 +4,7 @@ import com.mobile.standalone.service.apichange.ApiChangeAnalyzer.EndpointChange;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer.FieldChange;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer.ParamChange;
 import com.mobile.standalone.service.apichange.ApiChangeAnalyzer.Report;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -46,7 +47,31 @@ class MustTestGuideTest {
         EndpointChange e = ep("GET", "/feed", "ADDED", "NEW");
         MustTestGuide.Guide g = MustTestGuide.of(report(e));
         assertThat(g.p1()).isEqualTo(1);
-        assertThat(g.items().get(0).notes()).anyMatch(n -> n.contains("不要只看 HTTP 200"));
+        // 这条提醒还在，只是从「每一行重复一遍」挪到了报告级的 commonNotes：
+        // 它对 99 条必测项全都一样，是规范不是本接口的注意事项，
+        // 留在每行里会把真正特有的那几条挤到下面，人只看前两条就划走了
+        assertThat(g.commonNotes()).anyMatch(n -> n.contains("不要只看 HTTP 200"));
+        assertThat(g.items().get(0).notes())
+                .as("通用规范不该再出现在单条里，否则这次改动等于没做")
+                .noneMatch(n -> n.contains("不要只看 HTTP 200"));
+    }
+
+    @Test
+    @DisplayName("通用做法整份报告只说一次,不进每一行")
+    void 通用做法不逐行重复() {
+        Report r = new Report();
+        r.getEndpoints().add(ep("GET", "/a", "ADDED", "NEW"));
+        r.getEndpoints().add(ep("GET", "/b", "ADDED", "NEW"));
+        r.getEndpoints().add(ep("GET", "/c", "ADDED", "NEW"));
+        MustTestGuide.Guide g = MustTestGuide.of(r);
+        assertThat(g.commonNotes()).isNotEmpty();
+        for (MustTestGuide.Item it : g.items()) {
+            for (String common : g.commonNotes()) {
+                assertThat(it.notes())
+                        .as("「%s」在单条里又出现了一次", common)
+                        .doesNotContain(common);
+            }
+        }
     }
 
     @Test

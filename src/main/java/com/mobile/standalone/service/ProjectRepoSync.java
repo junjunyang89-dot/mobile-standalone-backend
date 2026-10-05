@@ -103,6 +103,38 @@ public class ProjectRepoSync {
         return result("FETCH", local);
     }
 
+    /**
+     * 对比分析前顺手拉一次。拉不下来（没网、没凭据）不拦分析，只把原因带回去：
+     * 本地已有仓库时用旧代码比也比不比强，但页面上得说清楚是旧的。
+     * {@code maxAgeMs} 内拉过的不再拉，选项目、点分析各拉一遍没有意义。
+     */
+    public Map<String, Object> syncQuietly(String code, long maxAgeMs) {
+        String key = code == null ? "" : code.trim().toLowerCase(Locale.ROOT);
+        Long last = lastSynced.get(key);
+        long now = System.currentTimeMillis();
+        if (last != null && now - last < maxAgeMs) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ok", true);
+            m.put("action", "RECENT");
+            m.put("message", "刚拉过最新代码");
+            return m;
+        }
+        try {
+            Map<String, Object> r = new LinkedHashMap<>(sync(code));
+            r.put("ok", true);
+            lastSynced.put(key, now);
+            return r;
+        } catch (Exception e) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ok", false);
+            m.put("action", "FAILED");
+            m.put("message", "拉取最新代码失败，用的是本地已有代码：" + e.getMessage());
+            return m;
+        }
+    }
+
+    private final Map<String, Long> lastSynced = new java.util.concurrent.ConcurrentHashMap<>();
+
     private static Map<String, Object> result(String action, Path repo) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("action", action);

@@ -104,6 +104,31 @@ class JavaApiSourceParserTest {
         assertEquals("/basic", eps.get(0).path());
     }
 
+    /** news-publish 的 NewsController：一长串 @ApiImplicitParams 把签名推到上千字符之后 */
+    @Test
+    void 注解很长时也能认出方法名() {
+        String params = "            @ApiImplicitParam(name = \"gameType\", value = \"游戏类型（1-dota，2-csgo）\", defaultValue = \"1\"),\n"
+                .repeat(20);
+        List<ApiEndpoint> eps = JavaApiSourceParser.parseEndpoints("""
+                @RestController
+                @RequestMapping("/news")
+                public class C {
+                    @GetMapping("/getNewsList")
+                    @ApiOperation("分页获取新闻列表")
+                    @ApiImplicitParams({
+                """ + params + """
+                            @ApiImplicitParam(name = "pageSize", value = "每页数量", defaultValue = "10")
+                    })
+                    public ResponseResult<JSONObject> getNewsList(int gameType, int pageSize) { return null; }
+                    @PostMapping("/next")
+                    public ResponseResult<String> next() { return null; }
+                }
+                """);
+
+        assertEquals("getNewsList", eps.get(0).handler());
+        assertEquals("next", eps.get(1).handler());
+    }
+
     /** @RequestMapping 不写 method 其实是「全部动词」，标 ANY 比瞎猜一个 GET 诚实 */
     @Test
     void RequestMapping按method参数取动词否则标ANY() {
@@ -430,5 +455,55 @@ class JavaApiSourceParserTest {
         var fields = JavaApiSourceParser.injectedFields(src);
         assertEquals(2, fields.size());
         assertEquals("UserService", fields.get("userService"));
+    }
+
+    @Test
+    void 参数说明里带括号和逗号不会混进类型() {
+        String args = """
+                @RequestParam(value = "heroId", required = false) Integer heroId,
+                @RequestParam(required = false, defaultValue = "0") @ApiParam(value = "模式(默认)1.标准2.街斗4.天梯,非法回退0") Integer mode,
+                @ApiParam("近几天)") @RequestParam(name = "recentNDays") final Integer days,
+                HttpServletRequest request
+                """;
+        List<ApiParam> ps = JavaApiSourceParser.parseParams(args);
+        assertEquals(3, ps.size());
+        assertEquals(new ApiParam("QUERY", "heroId", "Integer", false), ps.get(0));
+        assertEquals(new ApiParam("QUERY", "mode", "Integer", false), ps.get(1));
+        assertEquals(new ApiParam("QUERY", "recentNDays", "Integer", true), ps.get(2));
+    }
+
+    @Test
+    void 参数列表里字符串带右括号也取得到完整签名() {
+        String src = """
+                @RestController
+                @RequestMapping("/hero")
+                public class HeroController {
+                    @GetMapping("/winrate")
+                    public ResponseResult<WinrateVO> winrate(@ApiParam("模式:1.标准)") @RequestParam Integer mode,
+                                                             @RequestParam String rank) {
+                        return null;
+                    }
+                }
+                """;
+        var eps = JavaApiSourceParser.parseEndpoints(src);
+        assertEquals(1, eps.size());
+        assertEquals(List.of("mode", "rank"), eps.get(0).params().stream().map(ApiParam::name).toList());
+        assertEquals("Integer", eps.get(0).params().get(0).type());
+    }
+
+    @Test
+    void 注释掉的字段不算() {
+        String src = """
+                @Data
+                public class Bf6PlatformUser {
+                    private int platformId;
+                    private String url = "http://x/y"; // private String fake;
+                //    private String avatarUrl;
+                    /* private String status; */
+                    private String titleUserId;
+                }
+                """;
+        assertEquals(List.of("platformId", "url", "titleUserId"),
+                JavaApiSourceParser.parseFields(src).stream().map(DtoField::name).toList());
     }
 }

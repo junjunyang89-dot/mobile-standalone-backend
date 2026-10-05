@@ -32,6 +32,7 @@
         SELECT p.* FROM api_projects p
         <where>
             <if test="enabledOnly != null and enabledOnly">AND p.enabled = 1</if>
+            AND p.code &lt;&gt; 'capture-inbox'
             AND (p.kind IS NULL OR p.kind = '' OR p.kind = 'BACKEND')
             AND (
                 (p.repo_path IS NOT NULL AND TRIM(p.repo_path) != '')

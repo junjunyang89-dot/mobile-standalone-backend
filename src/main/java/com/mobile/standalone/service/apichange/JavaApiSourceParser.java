@@ -79,12 +79,11 @@ public final class JavaApiSourceParser {
 
     /** 入参上的注解：@RequestParam / @PathVariable / @RequestBody */
     private static final Pattern PARAM_ANNO = Pattern.compile(
-            "@(RequestParam|PathVariable|RequestBody|RequestHeader)"
-                    + "(?:\\s*\\(([^)]*)\\))?");
+            "@(RequestParam|PathVariable|RequestBody|RequestHeader)\\b");
 
     private static final Pattern PARAM_REQUIRED_FALSE = Pattern.compile("required\\s*=\\s*false");
     private static final Pattern PARAM_NAME_IN_ANNO = Pattern.compile(
-            "(?:value\\s*=\\s*|name\\s*=\\s*)?\"([^\"]+)\"");
+            "(?:^\\s*|\\b(?:value|name)\\s*=\\s*)\"([^\"]+)\"");
 
     public static boolean looksLikeController(String source) {
         return source != null && (source.contains("@RestController") || source.contains("@Controller"));
@@ -136,10 +135,15 @@ public final class JavaApiSourceParser {
             String methodName = null;
             List<ApiParam> params = List.of();
             Set<String> services = Set.of();
-            if (sm.find() && sm.start() < 800) {
+            // 不能按固定字符数截：一长串 @ApiImplicitParams 能把签名推到上千字符之后。
+            // 只要签名在下一个映射注解之前，就是这个接口的
+            Matcher next = METHOD_MAPPING.matcher(after);
+            int nextMapping = next.find() ? next.start() : Integer.MAX_VALUE;
+            if (sm.find() && sm.start() < nextMapping) {
                 returnType = sm.group(1).replaceAll("\\s+", "");
                 methodName = sm.group(2);
-                String argText = balanced(after, sm.end() - 1, '(', ')');
+                int argEnd = skipParens(after, sm.end() - 1);
+                String argText = argEnd < 0 ? "" : after.substring(sm.end(), argEnd - 1);
                 params = parseParams(argText);
                 services = usedServices(methodBody(after, sm.end()), injected);
             }
@@ -311,17 +315,25 @@ public final class JavaApiSourceParser {
                 continue;
             }
             String anno = am.group(1);
-            String annoArgs = am.group(2) == null ? "" : am.group(2);
+            String annoArgs = "";
+            int end = am.end();
+            int open = skipSpaces(seg, end);
+            if (open < seg.length() && seg.charAt(open) == '(') {
+                int close = skipParens(seg, open);
+                if (close < 0) {
+                    continue;
+                }
+                annoArgs = seg.substring(open + 1, close - 1);
+                end = close;
+            }
             String source = switch (anno) {
                 case "RequestParam" -> "QUERY";
                 case "PathVariable" -> "PATH";
                 case "RequestBody" -> "BODY";
                 default -> "HEADER";
             };
-            // 注解后面剩下的就是「类型 名字」
-            String rest = seg.substring(am.end()).trim();
-            // 可能还有别的注解（@Valid @NotNull）
-            rest = rest.replaceAll("@[A-Za-z_$][\\w$]*(?:\\s*\\([^)]*\\))?\\s*", "").trim();
+            // 注解后面剩下的就是「类型 名字」，可能还夹着 @Valid、@ApiParam("…") 这类注解
+            String rest = stripAnnotations(seg.substring(end)).replaceAll("\\bfinal\\s+", "").trim();
             String[] tokens = rest.split("\\s+");
             if (tokens.length < 2) {
                 continue;
@@ -347,6 +359,12 @@ public final class JavaApiSourceParser {
         StringBuilder cur = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
+            if (c == '"' || c == '\'') {
+                int e = skipLiteral(s, i);
+                cur.append(s, i, e + 1);
+                i = e;
+                continue;
+            }
             if (c == '<' || c == '(' || c == '[') depth++;
             else if (c == '>' || c == ')' || c == ']') depth--;
             if (c == ',' && depth == 0) {
@@ -360,6 +378,73 @@ public final class JavaApiSourceParser {
             out.add(cur.toString());
         }
         return out;
+    }
+
+    /** 去掉所有注解（含括号里的参数），括号按配对算，字符串里的括号、逗号不算 */
+    static String stripAnnotations(String s) {
+        StringBuilder out = new StringBuilder();
+        int i = 0;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c == '@' && i + 1 < s.length() && Character.isJavaIdentifierStart(s.charAt(i + 1))) {
+                int j = i + 1;
+                while (j < s.length() && (Character.isJavaIdentifierPart(s.charAt(j)) || s.charAt(j) == '.')) {
+                    j++;
+                }
+                int k = skipSpaces(s, j);
+                if (k < s.length() && s.charAt(k) == '(') {
+                    int close = skipParens(s, k);
+                    j = close < 0 ? s.length() : close;
+                }
+                out.append(' ');
+                i = j;
+            } else {
+                out.append(c);
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    /** open 处是 (，返回配对的 ) 之后的下标；配不上返回 -1 */
+    static int skipParens(String s, int open) {
+        if (s == null || open < 0 || open >= s.length() || s.charAt(open) != '(') {
+            return -1;
+        }
+        int depth = 0;
+        for (int i = open; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"' || c == '\'') {
+                i = skipLiteral(s, i);
+            } else if (c == '(') {
+                depth++;
+            } else if (c == ')' && --depth == 0) {
+                return i + 1;
+            }
+        }
+        return -1;
+    }
+
+    /** quote 处是引号，返回配对引号的下标（跳过转义） */
+    private static int skipLiteral(String s, int quote) {
+        char q = s.charAt(quote);
+        for (int i = quote + 1; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\') {
+                i++;
+            } else if (c == q) {
+                return i;
+            }
+        }
+        return s.length() - 1;
+    }
+
+    private static int skipSpaces(String s, int from) {
+        int i = from;
+        while (i < s.length() && Character.isWhitespace(s.charAt(i))) {
+            i++;
+        }
+        return i;
     }
 
     // ---------- DDL ----------
@@ -401,6 +486,21 @@ public final class JavaApiSourceParser {
      * 定时任务改了会直接改变测试环境里有什么数据；缓存 key 变了会出现新老数据混用——
      * 这两类都不是接口变更，但对测试同样要紧，不该被静默丢掉。
      */
+    /**
+     * 是不是测试代码。
+     * <p>
+     * 单模块仓库的路径从仓库根算起是 {@code src/test/...}，前面没有斜杠——
+     * 只认 {@code /src/test/} 的话，这类仓库的单测会被当成业务实现报出来
+     * （路径里带 /service/ 的直接归成 SERVICE）。
+     */
+    public static boolean isTestPath(String path) {
+        if (path == null) {
+            return false;
+        }
+        String p = path.replace('\\', '/');
+        return p.startsWith("src/test/") || p.contains("/src/test/");
+    }
+
     public static String classifyFile(String path, String source) {
         String p = path == null ? "" : path.toLowerCase(Locale.ROOT);
         String src = source == null ? "" : source;
@@ -522,7 +622,7 @@ public final class JavaApiSourceParser {
      * 变更清单里能直接标出「新增 winRate（胜率）」，比只报一个英文名有用得多。
      */
     private static final Pattern FIELD = Pattern.compile(
-            "(?:/\\*\\*(?<doc>(?:[^*]|\\*(?!/))*)\\*/\\s*)?"          // 可选 javadoc
+            "(?:/\\*\\*(?<doc>(?:[^*]|\\*(?!/))*)\\*/\\s*|//(?<line>[^\\n;]*)\\n\\s*)?"  // 可选 javadoc / 单行注释
                     + "(?:@[A-Za-z_$][\\w$]*(?:\\s*\\([^)]*\\))?\\s*)*"      // 可选注解
                     + "private\\s+(?:final\\s+)?"
                     + "(?<type>[A-Za-z_$][\\w$]*(?:\\s*<[^;]*?>)?(?:\\[\\])?)\\s+"
@@ -560,8 +660,13 @@ public final class JavaApiSourceParser {
             return out;
         }
         Set<String> seen = new LinkedHashSet<>();
+        boolean[] commented = commentMask(source);
         Matcher m = FIELD.matcher(source);
         while (m.find()) {
+            // 「//    private String avatarUrl;」这种注释掉的字段不会出现在返回里
+            if (commented[m.start("type")]) {
+                continue;
+            }
             String name = m.group("name");
             if (name == null || !seen.add(name)) {
                 continue;
@@ -582,7 +687,7 @@ public final class JavaApiSourceParser {
             // 抓包看到的是 @JsonProperty 改过的名字；@JsonIgnore 的字段压根不出现在 JSON 里。
             // 不认这两个注解，字段表就会跟抓包对不上——而对不上比没有更糟，人会怀疑整份报告。
             String annos = m.group(0);
-            out.add(new DtoField(name, type, cleanDoc(m.group("doc")),
+            out.add(new DtoField(name, type, commentOf(m.group("doc"), m.group("line"), annos),
                     jsonNameOf(annos, name), annos.contains("@JsonIgnore")));
         }
         return out;
@@ -590,6 +695,21 @@ public final class JavaApiSourceParser {
 
     private static final Pattern JSON_PROPERTY = Pattern.compile(
             "@JsonProperty\\s*\\(\\s*(?:value\\s*=\\s*)?\"([^\"]+)\"");
+    private static final Pattern DOC_ANNOTATION = Pattern.compile(
+            "@(?:ApiModelProperty\\s*\\(\\s*(?:value\\s*=\\s*)?|Schema\\s*\\([^)]*?description\\s*=\\s*)\"([^\"]+)\"");
+
+    /** javadoc 优先，其次 @ApiModelProperty / @Schema，最后上一行的 // 注释 */
+    private static String commentOf(String doc, String line, String annotations) {
+        String c = cleanDoc(doc);
+        if (c != null) {
+            return c;
+        }
+        Matcher m = DOC_ANNOTATION.matcher(annotations);
+        if (m.find() && !m.group(1).isBlank()) {
+            return m.group(1).trim();
+        }
+        return line == null || line.isBlank() ? null : line.trim();
+    }
 
     private static String jsonNameOf(String annotations, String fallback) {
         Matcher m = JSON_PROPERTY.matcher(annotations);
@@ -716,5 +836,41 @@ public final class JavaApiSourceParser {
         return source
                 .replaceAll("(?s)/\\*.*?\\*/", " ")
                 .replaceAll("(?m)//[^\\n]*", " ");
+    }
+
+    /** 注释换成空格、换行保留；和 {@link #stripComments} 不同，字符串里的 "http://" 不会被当成注释切掉 */
+    static String stripCommentsKeepStrings(String source) {
+        boolean[] mask = commentMask(source);
+        StringBuilder sb = new StringBuilder(source.length());
+        for (int i = 0; i < source.length(); i++) {
+            char c = source.charAt(i);
+            sb.append(mask[i] && c != '\n' ? ' ' : c);
+        }
+        return sb.toString();
+    }
+
+    /** 每个字符是否落在注释里；字符串里的 // 不算 */
+    static boolean[] commentMask(String s) {
+        boolean[] mask = new boolean[s.length()];
+        int i = 0;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c == '"' || c == '\'') {
+                i = skipLiteral(s, i) + 1;
+            } else if (c == '/' && i + 1 < s.length() && s.charAt(i + 1) == '/') {
+                int end = s.indexOf('\n', i);
+                end = end < 0 ? s.length() : end;
+                java.util.Arrays.fill(mask, i, end, true);
+                i = end;
+            } else if (c == '/' && i + 1 < s.length() && s.charAt(i + 1) == '*') {
+                int end = s.indexOf("*/", i + 2);
+                end = end < 0 ? s.length() : end + 2;
+                java.util.Arrays.fill(mask, i, end, true);
+                i = end;
+            } else {
+                i++;
+            }
+        }
+        return mask;
     }
 }

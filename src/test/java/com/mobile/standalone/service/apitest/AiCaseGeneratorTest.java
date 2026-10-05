@@ -178,11 +178,12 @@ class AiCaseGeneratorTest {
     }
 
     @Test
-    void unrunSuccessEnabledOnlyWhenDataKnown() {
+    void unrunSuccessIsNeverEnabledAndSaysWhy() {
         var ok = AiCaseGenerator.unrun(ac("SUCCESS"), "$.code", "0", List.of("matchId"), List.of("matchId=88（抓包）"));
-        assertTrue(ok.enabled());
-        assertTrue(ok.assertions().contains("\"equals\":200"));
-        assertTrue(ok.assertions().contains("\"path\":\"$.code\",\"equals\":0"));
+        assertFalse(ok.enabled());
+        assertTrue(ok.note().contains("没验证过"));
+        assertTrue(ok.assertions().contains("\"equals\":200,\"source\":\"default\""));
+        assertTrue(ok.assertions().contains("\"path\":\"$.code\",\"equals\":0,\"source\":\"convention\""));
 
         var guess = AiCaseGenerator.unrun(ac("SUCCESS"), "$.code", "0", List.of("matchId"), List.of());
         assertFalse(guess.enabled());
@@ -190,10 +191,20 @@ class AiCaseGeneratorTest {
     }
 
     @Test
-    void unrunErrorAssertsNotSuccessCode() {
+    void unrunErrorAssertsNotSuccessCodeButStaysDisabled() {
         var v = AiCaseGenerator.unrun(ac("ERROR"), "$.code", "0", List.of(), List.of());
-        assertTrue(v.enabled());
-        assertTrue(v.assertions().contains("\"notEquals\":0"));
+        assertFalse(v.enabled());
+        assertTrue(v.assertions().contains("\"notEquals\":0,\"source\":\"convention\""));
+        assertTrue(v.note().contains("token"));
         assertFalse(AiCaseGenerator.unrun(ac("ERROR"), null, null, List.of(), List.of()).enabled());
+    }
+
+    @Test
+    void tryRunAssertionsAreMarkedWithWhatTheRunReturned() {
+        var v = AiCaseGenerator.judge(ac("ERROR"),
+                result(200, "{\"code\":1002,\"message\":\"参数错误\"}"), "$.code", "0", List.of(), List.of());
+        assertTrue(v.assertions().contains("\"source\":\"tryrun\""));
+        assertTrue(v.assertions().contains("code=1002"));
+        assertFalse(v.assertions().contains("convention"));
     }
 }

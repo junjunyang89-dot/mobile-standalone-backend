@@ -4,14 +4,20 @@ import com.mobile.standalone.entity.ApiProject;
 import com.mobile.standalone.mapper.ApiProjectMapper;
 import com.mobile.standalone.service.apitest.ApiAppCatalog;
 import com.mobile.standalone.service.apitest.ApiProjectCatalog;
+import com.mobile.standalone.service.apitest.ApiProjectKind;
+import com.mobile.standalone.service.apitest.CaptureCatalogService;
+import com.mobile.standalone.service.apitest.ControllerBackfillService;
 import com.mobile.standalone.entity.ApiEndpoint;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -41,6 +47,9 @@ public class ApiProjectService {
     private final ApiProjectMapper projectMapper;
     private final JdbcTemplate jdbcTemplate;
 
+    @Value("${cursor.ask.cwd:${user.home}/projects/qa_coding/app_coding}")
+    private String workspace;
+
     @PostConstruct
     public void ensureTableAndSeed() {
         try {
@@ -63,7 +72,7 @@ public class ApiProjectService {
             ensureColumn("base_branch", "VARCHAR(128) NULL COMMENT '对比基线分支，默认 master'");
             ensureColumn("success_code_path", "VARCHAR(128) NULL COMMENT '业务成功码路径，如 $.code'");
             ensureColumn("success_code_value", "VARCHAR(64) NULL COMMENT '业务成功码的值，如 0'");
-            ensureColumn("kind", "VARCHAR(16) NULL DEFAULT 'BACKEND' COMMENT 'BACKEND=后端仓库 CLIENT=客户端'");
+            ensureColumn("kind", "VARCHAR(16) NULL DEFAULT 'BACKEND' COMMENT 'BACKEND=后端 FRONTEND=前端 CLIENT=客户端'");
             ensureColumn("category", "VARCHAR(64) NULL COMMENT '分类 key，留空按编码自动归类'");
             ensureCategoryTableAndSeed();
             retireLegacyCategories();
@@ -72,6 +81,8 @@ public class ApiProjectService {
             widenProjectCategoryColumn();
             seedIfEmpty();
             markLegacyClientProjects();
+            markFrontendProjects();
+            ensureFrontendCatalog();
             log.info("[api-projects] 表已就绪");
         } catch (Exception e) {
             log.warn("[api-projects] 建表失败: {}", e.getMessage());
@@ -127,16 +138,109 @@ public class ApiProjectService {
         }
     }
 
+    /** H5 / 前端站标成 FRONTEND，不扫接口；网关仍是 BACKEND，扫描时再跳过 */
+    private void markFrontendProjects() {
+        for (String code : ApiProjectKind.FRONTEND_CODES) {
+            try {
+                int n = jdbcTemplate.update(
+                        "UPDATE api_projects SET kind = ? WHERE LOWER(code) = ? AND (kind IS NULL OR kind = '' OR kind = 'BACKEND')",
+                        ApiProject.KIND_FRONTEND, code);
+                if (n > 0) {
+                    log.info("[api-projects] 已将 {} 标记为 FRONTEND", code);
+                }
+            } catch (Exception e) {
+                log.debug("[api-projects] 标记 FRONTEND 跳过 {}: {}", code, e.getMessage());
+            }
+        }
+    }
+
+    /** 前端仓库写进项目管理：有则补 GitLab / 本地路径，没有就新建。不扫接口。 */
+    private void ensureFrontendCatalog() {
+        LocalDateTime now = LocalDateTime.now();
+        int order = 200;
+        for (ApiProjectKind.FrontendCatalog e : ApiProjectKind.FRONTEND_CATALOG) {
+            try {
+                ApiProject p = projectMapper.findByCode(e.code());
+                if (p == null) {
+                    p = new ApiProject();
+                    p.setCode(e.code());
+                    p.setName(e.name());
+                    p.setDescription(e.description());
+                    p.setKind(ApiProject.KIND_FRONTEND);
+                    p.setCategory(ApiProjectCatalog.APP.key());
+                    p.setGitUrl(e.gitUrl());
+                    p.setRepoPath(localRepoPath(e.code()));
+                    p.setEnabled(true);
+                    p.setSortOrder(order);
+                    p.setCreatedAt(now);
+                    p.setUpdatedAt(now);
+                    projectMapper.insert(p);
+                    log.info("[api-projects] 已录入前端仓库 {}", e.code());
+                } else {
+                    boolean ch = false;
+                    if (p.getGitUrl() == null || p.getGitUrl().isBlank()) {
+                        p.setGitUrl(e.gitUrl());
+                        ch = true;
+                    }
+                    if (p.getRepoPath() == null || p.getRepoPath().isBlank()) {
+                        String local = localRepoPath(e.code());
+                        if (local != null) {
+                            p.setRepoPath(local);
+                            ch = true;
+                        }
+                    }
+                    if (p.getKind() == null || p.getKind().isBlank() || ApiProject.KIND_BACKEND.equals(p.getKind())) {
+                        p.setKind(ApiProject.KIND_FRONTEND);
+                        ch = true;
+                    }
+                    if (p.getCategory() == null || p.getCategory().isBlank()) {
+                        p.setCategory(ApiProjectCatalog.APP.key());
+                        ch = true;
+                    }
+                    if (ch) {
+                        p.setUpdatedAt(now);
+                        projectMapper.update(p);
+                        log.info("[api-projects] 已补全前端仓库 {}", e.code());
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("[api-projects] 录入前端仓库 {} 失败: {}", e.code(), ex.getMessage());
+            }
+            order += 10;
+        }
+    }
+
+    private String localRepoPath(String code) {
+        if (workspace == null || workspace.isBlank() || code == null) {
+            return null;
+        }
+        Path ws = Path.of(workspace.trim());
+        if (!Files.isDirectory(ws)) {
+            return null;
+        }
+        for (String name : ControllerBackfillService.repoNameCandidates(code)) {
+            Path dir = ws.resolve(name);
+            if (ControllerBackfillService.looksLikeSourceRepo(dir)) {
+                return dir.toAbsolutePath().normalize().toString();
+            }
+        }
+        return null;
+    }
+
     public List<ApiProject> list(Boolean enabledOnly) {
-        return projectMapper.findAll(enabledOnly);
+        return projectMapper.findAll(enabledOnly).stream()
+                .filter(p -> !CaptureCatalogService.INBOX.equals(p.getCode()))
+                .toList();
     }
 
-    /** 接口清单下拉：只要后端仓库，且已配本地路径或已有接口记录 */
+    /** 接口清单下拉：只要会扫接口的后端仓库，且已配本地路径或已有接口记录 */
     public List<ApiProject> listForCatalog(Boolean enabledOnly) {
-        return projectMapper.findForCatalog(enabledOnly);
+        return projectMapper.findForCatalog(enabledOnly).stream()
+                .filter(ApiProjectKind::scansEndpoints)
+                .toList();
     }
 
-    /** 项目管理页：按注册分类分组，含空分类与 APP catalog 占位 */
+    /** 项目管理页：分类 → 后端/前端/客户端（空类型不占位）→ 已建项目 */
     public Map<String, Object> buildTree(Boolean enabledOnly) {
         List<Map<String, Object>> rows = list(enabledOnly).stream().map(this::toTreeRow).toList();
         Map<String, List<Map<String, Object>>> buckets = ApiProjectCatalog.bucketProjects(new ArrayList<>(rows));
@@ -147,7 +251,11 @@ public class ApiProjectService {
             String key = String.valueOf(def.get("key"));
             List<Map<String, Object>> projects = new ArrayList<>(buckets.getOrDefault(key, List.of()));
             if (ApiProjectCatalog.APP.key().equals(key)) {
-                projects = orderAppCategoryProjects(projects, key);
+                projects = orderAppCategoryProjects(projects, key, filedElsewhere(rows));
+            }
+            projects = realProjects(projects);
+            if (projects.isEmpty()) {
+                continue;
             }
             categories.add(buildCategoryVo(
                     key,
@@ -165,7 +273,7 @@ public class ApiProjectService {
             categories.add(buildCategoryVo(
                     e.getKey(),
                     categoryLabel(e.getKey()),
-                    new ArrayList<>(e.getValue()),
+                    realProjects(e.getValue()),
                     false,
                     null));
             handled.add(e.getKey());
@@ -321,7 +429,7 @@ public class ApiProjectService {
 
     /**
      * PVP / WEB / 其他已下线：注册表和项目上的旧值都清掉。
-     * APP 还叫旧默认名时改成「电竞APP」；人手改过的名字不动。
+     * APP 还叫旧默认名时改成「电竞」；人手改过的名字不动。
      */
     private void retireLegacyCategories() {
         for (String key : ApiProjectCatalog.RETIRED_CATEGORY_KEYS) {
@@ -334,7 +442,7 @@ public class ApiProjectService {
         }
         jdbcTemplate.update(
                 "UPDATE api_project_categories SET label = ? "
-                        + "WHERE cat_key = 'APP' AND label IN ('APP', 'APP 后端', 'APP后端')",
+                        + "WHERE cat_key = 'APP' AND label IN ('APP', 'APP 后端', 'APP后端', '电竞APP')",
                 ApiProjectCatalog.APP.label());
     }
 
@@ -537,29 +645,48 @@ public class ApiProjectService {
         return t;
     }
 
+    /** 在项目管理里手动挂到电竞以外分类的项目：电竞的固定槽位不能再把它们拉回来 */
+    private static Set<String> filedElsewhere(List<Map<String, Object>> rows) {
+        Set<String> out = new HashSet<>();
+        for (Map<String, Object> row : rows) {
+            String code = String.valueOf(row.get("code"));
+            Object cat = row.get("category");
+            if (!ApiProjectCatalog.APP.key().equals(
+                    ApiProjectCatalog.resolveCategoryKey(code, cat == null ? null : String.valueOf(cat)))) {
+                out.add(code);
+            }
+        }
+        return out;
+    }
+
     private List<Map<String, Object>> orderAppCategoryProjects(
-            List<Map<String, Object>> projects, String categoryKey) {
+            List<Map<String, Object>> projects, String categoryKey, Set<String> elsewhere) {
         Map<String, Map<String, Object>> byCode = new LinkedHashMap<>();
         for (Map<String, Object> row : projects) {
             byCode.put(String.valueOf(row.get("code")), row);
         }
         List<Map<String, Object>> ordered = new ArrayList<>();
         for (String slot : ApiProjectCatalog.appProjectSlots()) {
+            if (elsewhere.contains(slot)) {
+                continue;
+            }
             Map<String, Object> hit = byCode.remove(slot);
             if (hit != null) {
                 ordered.add(hit);
-            } else {
-                Map<String, Object> placeholder = new LinkedHashMap<>();
-                placeholder.put("code", slot);
-                placeholder.put("name", slot);
-                placeholder.put("missing", true);
-                placeholder.put("enabled", false);
-                placeholder.put("category", categoryKey);
-                ordered.add(placeholder);
             }
         }
         ordered.addAll(byCode.values());
         return ordered;
+    }
+
+    private static List<Map<String, Object>> realProjects(List<Map<String, Object>> projects) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> p : projects) {
+            if (!Boolean.TRUE.equals(p.get("missing"))) {
+                out.add(p);
+            }
+        }
+        return out;
     }
 
     private Map<String, Object> buildCategoryVo(
@@ -575,6 +702,7 @@ public class ApiProjectService {
         catVo.put("key", key);
         catVo.put("label", label);
         catVo.put("projects", projects);
+        catVo.put("kinds", groupByKind(projects));
         catVo.put("count", configured);
         catVo.put("builtin", Boolean.TRUE.equals(builtinFlag) || "true".equals(String.valueOf(builtinFlag)));
         catVo.put("custom", !ApiProjectCatalog.isBuiltinCategory(key));
@@ -584,15 +712,44 @@ public class ApiProjectService {
         return catVo;
     }
 
+    /** 空类型不占位：这个产品线下没有前端仓库就不出现「前端」 */
+    static List<Map<String, Object>> groupByKind(List<Map<String, Object>> projects) {
+        Map<String, List<Map<String, Object>>> buckets = new LinkedHashMap<>();
+        for (String k : ApiProjectKind.ORDER) {
+            buckets.put(k, new ArrayList<>());
+        }
+        for (Map<String, Object> p : projects) {
+            if (Boolean.TRUE.equals(p.get("missing"))) {
+                continue;
+            }
+            String kind = ApiProjectKind.normalize(p.get("kind") == null ? null : String.valueOf(p.get("kind")));
+            buckets.computeIfAbsent(kind, x -> new ArrayList<>()).add(p);
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String k : ApiProjectKind.ORDER) {
+            List<Map<String, Object>> rows = buckets.getOrDefault(k, List.of());
+            if (rows.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("key", k);
+            g.put("label", ApiProjectKind.label(k));
+            g.put("count", rows.size());
+            g.put("projects", rows);
+            out.add(g);
+        }
+        return out;
+    }
+
     /**
-     * 接口清单左侧树：环境在页面顶部分开选；这里只给「分类 → 项目」。
-     * 项目下不再挂 master / 本分支 —— 那一层太碎，清单页只回答有哪些接口。
+     * 接口清单左侧树：环境在页面顶部分开选；这里只给「分类 → 后端 → 项目」。
+     * 前端 / 客户端 / 网关不出现。空类型不占位。项目下不再挂分支。
      */
     public Map<String, Object> buildEndpointInventoryTree(List<ApiEndpoint> allEndpoints) {
         Map<String, int[]> stats = aggregateEndpointStats(allEndpoints);
         Map<String, ApiProject> projectsByCode = new LinkedHashMap<>();
         for (ApiProject p : list(null)) {
-            if (!isBackendKind(p)) {
+            if (!ApiProjectKind.scansEndpoints(p)) {
                 continue;
             }
             projectsByCode.putIfAbsent(p.getCode(), p);
@@ -609,16 +766,11 @@ public class ApiProjectService {
             String label = labels.getOrDefault(catKey, String.valueOf(def.get("label")));
             List<Map<String, Object>> children = buildEndpointCategoryChildren(
                     catKey, stats, projectsByCode, assigned);
-            if (ApiProjectCatalog.APP.key().equals(catKey) || !children.isEmpty()) {
+            if (!children.isEmpty()) {
                 categories.add(endpointCategoryNode(catKey, label, children));
             }
         }
         return Map.of("categories", categories);
-    }
-
-    private static boolean isBackendKind(ApiProject p) {
-        String kind = p.getKind();
-        return kind == null || kind.isBlank() || ApiProject.KIND_BACKEND.equals(kind);
     }
 
     public static String inventoryProjectKey(String projectCode) {
@@ -654,6 +806,7 @@ public class ApiProjectService {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("project", code);
         node.put("label", ApiProjectCatalog.projectDisplayLabel(code));
+        node.put("type", "PROJECT");
         node.put("total", c[0]);
         node.put("pending", c[1]);
         node.put("configured", p != null);
@@ -666,46 +819,64 @@ public class ApiProjectService {
             Map<String, int[]> stats,
             Map<String, ApiProject> projectsByCode,
             Set<String> assigned) {
-        List<Map<String, Object>> children = new ArrayList<>();
+        List<Map<String, Object>> projects = new ArrayList<>();
 
         if (ApiProjectCatalog.APP.key().equals(catKey)) {
             for (String slot : ApiProjectCatalog.appProjectSlots()) {
-                // 无条件渲染是刻意的：把 GitLab 上有、平台还没建的项目也摆出来，
-                // 「未覆盖」才看得见。见 appProjectSlots() 的 javadoc 与
-                // ApiEndpointInventoryTreeTest。
-                children.add(endpointProjectNode(slot, stats, projectsByCode));
+                if (!projectsByCode.containsKey(slot) && !stats.containsKey(slot)) {
+                    continue;
+                }
+                if (!ApiProjectCatalog.APP.key().equals(resolveEndpointProjectCategory(slot, projectsByCode))) {
+                    continue;
+                }
+                if (ApiProjectKind.skipScan(slot)) {
+                    continue;
+                }
+                projects.add(endpointProjectNode(slot, stats, projectsByCode));
                 assigned.add(slot);
                 assigned.add(inventoryProjectKey(slot));
             }
             for (String code : stats.keySet()) {
-                if (assigned.contains(code)) {
+                if (assigned.contains(code) || ApiProjectKind.skipScan(code)) {
                     continue;
                 }
-                // 没手动分类的都算电竞APP；挂在 POGPOG 这类自定义分类下的留给对应分类
                 if (!ApiProjectCatalog.APP.key().equals(resolveEndpointProjectCategory(code, projectsByCode))) {
                     continue;
                 }
-                children.add(endpointProjectNode(code, stats, projectsByCode));
+                projects.add(endpointProjectNode(code, stats, projectsByCode));
                 assigned.add(code);
             }
-            return children;
+            for (ApiProject p : projectsByCode.values()) {
+                String code = p.getCode();
+                if (assigned.contains(code) || assigned.contains(inventoryProjectKey(code))) {
+                    continue;
+                }
+                if (ApiProjectCatalog.APP.key().equals(resolveEndpointProjectCategory(code, projectsByCode))) {
+                    projects.add(endpointProjectNode(code, stats, projectsByCode));
+                    assigned.add(code);
+                }
+            }
+            return wrapKind(projects);
         }
 
         for (String slot : ApiProjectCatalog.slotsOfCategory(catKey)) {
             if (!stats.containsKey(slot) && !projectsByCode.containsKey(slot)) {
                 continue;
             }
-            children.add(endpointProjectNode(slot, stats, projectsByCode));
+            if (ApiProjectKind.skipScan(slot)) {
+                continue;
+            }
+            projects.add(endpointProjectNode(slot, stats, projectsByCode));
             assigned.add(slot);
         }
         for (String code : stats.keySet()) {
-            if (assigned.contains(code)) {
+            if (assigned.contains(code) || ApiProjectKind.skipScan(code)) {
                 continue;
             }
             if (!catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
                 continue;
             }
-            children.add(endpointProjectNode(code, stats, projectsByCode));
+            projects.add(endpointProjectNode(code, stats, projectsByCode));
             assigned.add(code);
         }
         for (ApiProject p : projectsByCode.values()) {
@@ -714,11 +885,36 @@ public class ApiProjectService {
                 continue;
             }
             if (catKey.equals(resolveEndpointProjectCategory(code, projectsByCode))) {
-                children.add(endpointProjectNode(code, stats, projectsByCode));
+                projects.add(endpointProjectNode(code, stats, projectsByCode));
                 assigned.add(code);
             }
         }
-        return children;
+        return wrapKind(projects);
+    }
+
+    /** 接口清单只有会扫的后端，所以这里最多出现「后端」一层；没有项目就不占位 */
+    private static List<Map<String, Object>> wrapKind(List<Map<String, Object>> projects) {
+        if (projects.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return new ArrayList<>(List.of(kindNode(ApiProjectKind.BACKEND, projects)));
+    }
+
+    private static Map<String, Object> kindNode(String kind, List<Map<String, Object>> children) {
+        int total = 0;
+        int pending = 0;
+        for (Map<String, Object> child : children) {
+            total += (int) child.get("total");
+            pending += (int) child.get("pending");
+        }
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("key", kind);
+        node.put("label", ApiProjectKind.label(kind));
+        node.put("type", "KIND");
+        node.put("total", total);
+        node.put("pending", pending);
+        node.put("children", children);
+        return node;
     }
 
     private static String resolveEndpointProjectCategory(String code, Map<String, ApiProject> projectsByCode) {
@@ -759,7 +955,8 @@ public class ApiProjectService {
         m.put("code", p.getCode());
         m.put("name", p.getName());
         m.put("description", p.getDescription());
-        m.put("kind", p.getKind());
+        m.put("kind", ApiProjectKind.of(p));
+        m.put("scanEndpoints", ApiProjectKind.scansEndpoints(p));
         m.put("enabled", p.getEnabled());
         m.put("sortOrder", p.getSortOrder());
         m.put("successCodePath", p.getSuccessCodePath());
@@ -783,6 +980,13 @@ public class ApiProjectService {
         if (projectMapper.findByCode(body.getCode()) != null) {
             throw new IllegalArgumentException("项目编码已存在: " + body.getCode());
         }
+        ApiProject twin = twinInSameGroup(projectMapper.findAll(null), body);
+        if (twin != null) {
+            String cat = ApiProjectCatalog.resolveCategoryKey(twin.getCode(), twin.getCategory());
+            throw new IllegalArgumentException("「" + categoryLabel(cat) + "」组下已经有这个项目：" + twin.getCode()
+                    + (ApiProjectCatalog.APP.key().equals(cat) ? "（app- 前缀不算区别）" : "")
+                    + "，同组项目不能重名，直接用它");
+        }
         defaults(body);
         ensureCategoryRegistered(body.getCategory());
         LocalDateTime now = LocalDateTime.now();
@@ -790,6 +994,33 @@ public class ApiProjectService {
         body.setUpdatedAt(now);
         projectMapper.insert(body);
         return projectMapper.findByCode(body.getCode());
+    }
+
+    /**
+     * 同组里编码或名称撞上的已有项目。组内项目不重名，跨组（APP / PVP / WEB）可以同名；
+     * APP 组里 data-center 和 app-data-center 是同一个项目，比较前先去掉这层差别。
+     */
+    static ApiProject twinInSameGroup(List<ApiProject> all, ApiProject body) {
+        if (all == null || body == null) return null;
+        String cat = ApiProjectCatalog.resolveCategoryKey(body.getCode(), body.getCategory());
+        String code = groupKey(body.getCode(), cat);
+        String name = groupKey(body.getName(), cat);
+        for (ApiProject p : all) {
+            if (!cat.equals(ApiProjectCatalog.resolveCategoryKey(p.getCode(), p.getCategory()))) continue;
+            String pc = groupKey(p.getCode(), cat);
+            String pn = groupKey(p.getName(), cat);
+            if ((!code.isEmpty() && (code.equals(pc) || code.equals(pn)))
+                    || (!name.isEmpty() && (name.equals(pc) || name.equals(pn)))) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    private static String groupKey(String s, String cat) {
+        if (s == null || s.isBlank()) return "";
+        String v = s.trim().toLowerCase(Locale.ROOT);
+        return ApiProjectCatalog.APP.key().equals(cat) ? ApiAppCatalog.canonicalCode(v).toLowerCase(Locale.ROOT) : v;
     }
 
     @Transactional
@@ -874,6 +1105,9 @@ public class ApiProjectService {
         if (body.getName() == null || body.getName().isBlank()) {
             throw new IllegalArgumentException("项目名称必填");
         }
+        if (body.getKind() != null && !body.getKind().isBlank()) {
+            body.setKind(ApiProjectKind.normalize(body.getKind()));
+        }
         if (body.getCategory() != null && !body.getCategory().isBlank()) {
             String k = body.getCategory().trim();
             if (k.length() > 64) {
@@ -908,7 +1142,17 @@ public class ApiProjectService {
         if (body.getEnabled() == null) body.setEnabled(true);
         if (body.getSortOrder() == null) body.setSortOrder(100);
         if (body.getKind() == null || body.getKind().isBlank()) {
-            body.setKind(ApiProject.KIND_BACKEND);
+            String code = body.getCode() == null ? "" : body.getCode().trim().toLowerCase(Locale.ROOT);
+            if (CLIENT_PROJECT_CODES.contains(code)) {
+                body.setKind(ApiProject.KIND_CLIENT);
+            } else if (ApiProjectKind.FRONTEND_CODES.contains(code)
+                    || ApiProjectKind.FRONTEND_CODES.contains(ApiAppCatalog.canonicalCode(code).toLowerCase(Locale.ROOT))) {
+                body.setKind(ApiProject.KIND_FRONTEND);
+            } else {
+                body.setKind(ApiProject.KIND_BACKEND);
+            }
+        } else {
+            body.setKind(ApiProjectKind.normalize(body.getKind()));
         }
         if (body.getCode() != null) {
             body.setCode(body.getCode().trim());

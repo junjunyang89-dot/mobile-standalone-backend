@@ -192,7 +192,7 @@ class ApiChangeAnalyzerTest {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> analyzer.analyze("p", null, "master", "dev"));
 
-        assertTrue(e.getMessage().contains("仓库路径"), e.getMessage());
+        assertTrue(e.getMessage().contains("项目管理"), e.getMessage());
     }
 
     @Test

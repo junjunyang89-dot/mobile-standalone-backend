@@ -28,6 +28,76 @@ public interface ApiEndpointMapper {
     List<ApiEndpoint> findByMethodPath(@Param("httpMethod") String httpMethod,
                                        @Param("path") String path);
 
+    /** 不含用例统计；httpMethod 为空时取全部 */
+    List<ApiEndpoint> listByProject(@Param("project") String project, @Param("httpMethod") String httpMethod);
+
+    int updatePath(@Param("id") String id, @Param("path") String path);
+
+    int updateGone(@Param("id") String id,
+                   @Param("goneAt") java.time.LocalDateTime goneAt,
+                   @Param("goneRef") String goneRef);
+
+    int backfillCodePath();
+
+    int moveCases(@Param("fromId") String fromId, @Param("toId") String toId,
+                  @Param("fromPath") String fromPath, @Param("toPath") String toPath);
+
+    int moveRequirementLinks(@Param("fromId") String fromId, @Param("toId") String toId);
+
+    int moveChanges(@Param("fromId") String fromId, @Param("toId") String toId);
+
+    int deleteChangesOf(@Param("endpointId") String endpointId);
+
+    /** project 为空时删这个分支在所有项目下的记录 */
+    int deleteChangesByBranch(@Param("project") String project, @Param("branch") String branch);
+
+    int upsertChange(@Param("endpointId") String endpointId,
+                     @Param("project") String project,
+                     @Param("branch") String branch,
+                     @Param("changeFlag") String changeFlag,
+                     @Param("changeNote") String changeNote,
+                     @Param("changeType") String changeType);
+
+    /** 带分支版本：上线时把 handler / 出参快照等写回全量那条 */
+    int upsertChangeWithSnapshot(@Param("endpointId") String endpointId,
+                                 @Param("project") String project,
+                                 @Param("branch") String branch,
+                                 @Param("changeFlag") String changeFlag,
+                                 @Param("changeNote") String changeNote,
+                                 @Param("changeType") String changeType,
+                                 @Param("handler") String handler,
+                                 @Param("summary") String summary,
+                                 @Param("sourceFile") String sourceFile,
+                                 @Param("fieldsSnapshot") String fieldsSnapshot,
+                                 @Param("tablesJson") String tablesJson);
+
+    /** project 为空时取所有项目 */
+    List<java.util.Map<String, Object>> listBranchSnapshots(@Param("project") String project,
+                                                             @Param("branch") String branch);
+
+    List<java.util.Map<String, Object>> listChangesOf(@Param("ids") java.util.Collection<String> endpointIds);
+
+    int clearSourceBranchOf(@Param("project") String project, @Param("branch") String branch);
+
+    int markDeprecated(@Param("id") String id);
+
+    /** projects 不能为空 */
+    int recomputeChangeFlags(@Param("projects") java.util.Collection<String> projects);
+
+    List<String> projectsOfBranch(@Param("branch") String branch);
+
+    List<String> endpointIdsOfBranch(@Param("project") String project, @Param("branch") String branch);
+
+    List<java.util.Map<String, Object>> listChanges(@Param("projectCodes") List<String> projectCodes);
+
+    List<java.util.Map<String, Object>> summaryChangesByBranch();
+
+    int countChanges();
+
+    int migrateColumnFlags();
+
+    int clearSourceBranch(@Param("branch") String branch);
+
     int updateProject(@Param("id") String id, @Param("project") String project);
 
     int countByProject(@Param("project") String project);
@@ -35,9 +105,6 @@ public interface ApiEndpointMapper {
     int insert(ApiEndpoint endpoint);
 
     int update(ApiEndpoint endpoint);
-
-    /** 同步时把这一批之外的标成已废弃，而不是删——挂在下面的用例不能变孤儿 */
-    int markDeprecatedNotIn(@Param("project") String project, @Param("keepIds") List<String> keepIds);
 
     /** 同步开始前清掉上一轮的变更标记，否则「上次新增」会一直显示成新增 */
     int clearChangeFlags(@Param("project") String project);

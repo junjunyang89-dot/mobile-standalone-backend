@@ -73,4 +73,7 @@ public interface ApiTestCaseMapper {
      */
     List<java.util.Map<String, Object>> countBranchCasesByBranch(
             @Param("project") String project);
+
+    /** 分支上线：用例挪进全量集合，转成回归用例、去掉分支归属 */
+    int promoteToRegression(@Param("collectionId") String collectionId, @Param("ids") List<String> ids);
 }

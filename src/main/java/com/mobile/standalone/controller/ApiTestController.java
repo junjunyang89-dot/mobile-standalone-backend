@@ -30,7 +30,7 @@ import java.util.Map;
 public class ApiTestController {
 
     private final ApiTestCaseService caseService;
-    private final com.mobile.standalone.service.apitest.DbAssertRunner dbAssert;
+    private final com.mobile.standalone.service.apitest.DbConnectionService dbConnections;
     private final ApiTestRunnerService runnerService;
     private final ApiTestStatsService statsService;
     private final EnvVariableService variableService;
@@ -65,19 +65,74 @@ public class ApiTestController {
      * 而那时报出来的是「用例失败」，人第一反应是去查断言写错了，
      * 不会想到是库连不上。
      */
-    @PostMapping("/envs/{environment}/db-check")
-    public ResponseEntity<?> checkDb(@PathVariable String environment) {
-        var env = caseService.getEnv(environment);
-        if (env == null) {
-            return ResponseEntity.badRequest().body(Map.of("ok", false, "message", "环境不存在"));
-        }
-        if (!dbAssert.configured(env)) {
-            return ResponseEntity.ok(Map.of("ok", false, "message", "还没填库地址和库名"));
-        }
-        var r = dbAssert.query(env, "SELECT 1");
+    @PostMapping("/envs/{environment}/db-connections/{id}/check")
+    public ResponseEntity<?> checkDb(@PathVariable String environment, @PathVariable String id) {
+        var r = dbConnections.check(environment, id);
         return ResponseEntity.ok(r.ok()
-                ? Map.of("ok", true, "message", "连上了：" + env.getDbHost() + "/" + env.getDbName())
+                ? Map.of("ok", true, "message", "连上了")
                 : Map.of("ok", false, "message", r.error()));
+    }
+
+    /** 新建/编辑弹窗：还没保存也能测 */
+    @PostMapping("/envs/{environment}/db-connections/probe")
+    public ResponseEntity<?> probeDb(@PathVariable String environment,
+                                     @RequestBody com.mobile.standalone.entity.ApiDbConnection body) {
+        return ResponseEntity.ok(dbConnections.probeView(dbConnections.probe(environment, body)));
+    }
+
+    // ---------- 数据库断言连接（环境 × 项目） ----------
+
+    /** 不带环境：用例编辑器两边都要列 */
+    @GetMapping("/db-connections")
+    public ResponseEntity<?> listAllDbConnections() {
+        return ResponseEntity.ok(dbConnections.list(null));
+    }
+
+    @GetMapping("/envs/{environment}/db-connections")
+    public ResponseEntity<?> listDbConnections(@PathVariable String environment) {
+        return ResponseEntity.ok(dbConnections.list(environment));
+    }
+
+    /** 带 id 是改，不带是新建 */
+    @PostMapping("/envs/{environment}/db-connections")
+    public ResponseEntity<?> saveDbConnection(@PathVariable String environment,
+                                              @RequestBody com.mobile.standalone.entity.ApiDbConnection body) {
+        try {
+            var saved = dbConnections.save(environment, body);
+            if (saved != null && saved.getDbPassword() != null && !saved.getDbPassword().isBlank()) {
+                saved.setDbPassword(com.mobile.standalone.service.EnvVariableService.MASK);
+            }
+            return ResponseEntity.ok(saved);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/envs/{environment}/db-connections/{id}")
+    public ResponseEntity<?> deleteDbConnection(@PathVariable String environment, @PathVariable String id) {
+        return ResponseEntity.ok(Map.of("ok", dbConnections.delete(environment, id)));
+    }
+
+    /** 项目勾选这个环境下要用哪些库；生产走 /envs/PROD/... 以便管理员权限生效 */
+    @PutMapping("/envs/{environment}/projects/{project}/db-connections")
+    public ResponseEntity<?> bindProjectDbConnections(
+            @PathVariable String environment,
+            @PathVariable String project,
+            @RequestBody Map<String, Object> body) {
+        try {
+            Object raw = body == null ? null : body.get("connectionIds");
+            List<String> ids = new java.util.ArrayList<>();
+            if (raw instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o != null) {
+                        ids.add(String.valueOf(o));
+                    }
+                }
+            }
+            return ResponseEntity.ok(dbConnections.bindProject(project, environment, ids));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
     }
 
     // ---------- 定时执行 ----------
@@ -235,6 +290,17 @@ public class ApiTestController {
     public ResponseEntity<?> releaseRequirement(@PathVariable String requirementNo) {
         try {
             return ResponseEntity.ok(collectionService.releaseRequirement(requirementNo));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /** 分支已上线：分支版本写回全量、新增接口与用例并入全量（分支名带斜杠，放请求体里） */
+    @PostMapping("/branches/release")
+    public ResponseEntity<?> releaseBranch(@RequestBody Map<String, String> body) {
+        try {
+            return ResponseEntity.ok(collectionService.releaseBranch(
+                    body == null ? null : body.get("project"), body == null ? null : body.get("branch")));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
@@ -413,6 +479,26 @@ public class ApiTestController {
     @DeleteMapping("/cases/{id}")
     public ResponseEntity<?> deleteCase(@PathVariable String id) {
         return ResponseEntity.ok(Map.of("ok", caseService.deleteCase(id)));
+    }
+
+    /**
+     * 并发打同一条用例（只许测试环境）。
+     * body: {count, environment?, varyParam?, values?: []}
+     */
+    @PostMapping("/cases/{id}/burst")
+    public ResponseEntity<?> burst(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        try {
+            int count = body.get("count") instanceof Number n ? n.intValue() : 5;
+            List<String> values = new java.util.ArrayList<>();
+            if (body.get("values") instanceof List<?> l) {
+                l.forEach(v -> values.add(v == null ? null : String.valueOf(v)));
+            }
+            return ResponseEntity.ok(runnerService.burst(id, count,
+                    body.get("environment") == null ? null : String.valueOf(body.get("environment")),
+                    body.get("varyParam") == null ? null : String.valueOf(body.get("varyParam")), values));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
     }
 
     @PostMapping("/run")

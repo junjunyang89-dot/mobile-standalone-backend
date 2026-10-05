@@ -50,6 +50,21 @@ public enum EndpointLevel {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /**
+     * 抓包抓到过＝真机客户端实际在调，比扫仓库更直接：扫描搜不到（路径拼接、网关转发）也不影响。
+     */
+    public static Verdict of(String callerStatus, String callersJson, boolean captured) {
+        Verdict scan = of(callerStatus, callersJson);
+        if (!captured) {
+            return scan;
+        }
+        if (scan.level() == CORE) {
+            return new Verdict(CORE, scan.reason() + "；抓包也抓到客户端在调");
+        }
+        return new Verdict(CORE, "抓包抓到客户端在调"
+                + (scan.level() == null ? "" : "（调用方扫描：" + scan.reason() + "）"));
+    }
+
     public static Verdict of(String callerStatus, String callersJson) {
         if (callerStatus == null || callerStatus.isBlank()) {
             return new Verdict(null, "还没扫过调用方");

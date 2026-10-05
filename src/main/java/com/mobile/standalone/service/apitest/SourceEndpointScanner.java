@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
 public final class SourceEndpointScanner {
 
     /** 这些目录里的 Controller 不是线上接口：测试桩、编译产物、依赖 */
-    private static final Set<String> SKIP_DIRS = Set.of(
+    static final Set<String> SKIP_DIRS = Set.of(
             ".git", ".idea", "target", "build", "out", "node_modules", "test", "tests");
 
     /** 防止误选到整个磁盘时扫到天荒地老 */
@@ -37,7 +37,7 @@ public final class SourceEndpointScanner {
      * 方法或类上挂了名字带 Auth / Login 的注解＝要登录（@Auth、@NeedUserLogin、@PreAuthorize…
      * 各仓库自己起名，列不全）；@NoAuth、@IgnoreLogin 这类反着的不算
      */
-    private static final Pattern AUTH_ANNOTATION = Pattern.compile(
+    static final Pattern AUTH_ANNOTATION = Pattern.compile(
             "@(?!(?i:no|ignore|skip|without|anonymous|pass|permit|allow|public|author))\\w*(?:Auth|Login)\\w*\\b");
     /** request.getHeader("token") 这类：服务从哪个头读登录态 */
     private static final Pattern TOKEN_HEADER = Pattern.compile(
@@ -109,7 +109,8 @@ public final class SourceEndpointScanner {
                 String clean = stripComments(source);
                 boolean classAuth = classRequiresAuth(clean);
                 for (ApiEndpoint e : eps) {
-                    if (e.path() == null || e.path().isBlank() || e.httpMethod() == null) {
+                    if (e.path() == null || e.path().isBlank() || e.httpMethod() == null
+                            || InfraEndpoints.is(e.path())) {
                         continue;
                     }
                     boolean auth = classAuth || methodRequiresAuth(clean, e.handler());

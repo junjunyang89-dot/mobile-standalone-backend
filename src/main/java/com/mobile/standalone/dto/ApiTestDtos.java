@@ -84,6 +84,9 @@ public final class ApiTestDtos {
          * 不要兜成某一类，否则一条「用例不存在」的 BLOCKED 会被算进某个桶的分母。
          */
         private String caseKind;
+        /** NORMAL / NEGATIVE：报告里分得清「异常输入返回了报错」是对的，不是挂了 */
+        private String intent;
+        private String expectNote;
         private java.util.Map<String, String> reqHeaders;
         private String reqBody;
         private java.util.Map<String, String> respHeaders;

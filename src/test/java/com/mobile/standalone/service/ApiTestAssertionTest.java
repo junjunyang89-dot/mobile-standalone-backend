@@ -23,7 +23,7 @@ class ApiTestAssertionTest {
     @BeforeEach
     void setUp() {
         runner = new ApiTestRunnerService(null, null, null, null, null, null, null,
-                new com.mobile.standalone.service.apitest.DbAssertRunner(), null, null);
+                new com.mobile.standalone.service.apitest.DbAssertRunner(), null, null, null);
     }
 
     private boolean check(String assertions, int status, String body,
@@ -46,6 +46,18 @@ class ApiTestAssertionTest {
     void notEquals() throws Exception {
         assertTrue(check("[{\"type\":\"jsonPath\",\"path\":\"$.code\",\"notEquals\":1}]", "{\"code\":0}"));
         assertFalse(check("[{\"type\":\"jsonPath\",\"path\":\"$.code\",\"notEquals\":0}]", "{\"code\":0}"));
+    }
+
+    @Test
+    void 类型断言分得清数字和数字字符串() throws Exception {
+        String num = "[{\"type\":\"jsonPath\",\"path\":\"$.result.highlight\",\"op\":\"type\",\"value\":\"number\"}]";
+        assertTrue(check(num, "{\"result\":{\"highlight\":584}}"));
+        assertFalse(check(num, "{\"result\":{\"highlight\":\"584\"}}"));
+        // 字段没了、变成 null 都得红
+        assertFalse(check(num, "{\"result\":{}}"));
+        assertFalse(check(num, "{\"result\":{\"highlight\":null}}"));
+        assertTrue(check("[{\"type\":\"jsonPath\",\"path\":\"$.result\",\"op\":\"type\",\"value\":\"object\"}]",
+                "{\"result\":{\"a\":1}}"));
     }
 
     @Test
@@ -133,5 +145,27 @@ class ApiTestAssertionTest {
     void 未知断言类型判失败而不是跳过() throws Exception {
         assertFalse(check("[{\"type\":\"xxx\"}]", "{}"),
                 "静默跳过会让写错 type 的用例一直绿着，它其实什么都没测");
+    }
+
+    // ==================== 查库 ====================
+
+    private boolean checkDb(String assertions, ApiTestRunnerService.DbContext db) throws Exception {
+        var m = ApiTestRunnerService.class.getDeclaredMethod(
+                "evaluateAssertions", String.class, int.class, String.class, Map.class, long.class,
+                ApiTestRunnerService.DbContext.class, List.class);
+        m.setAccessible(true);
+        return (boolean) m.invoke(runner, assertions, 200, "{}", Map.of(), 0L, db, new ArrayList<String>());
+    }
+
+    @Test
+    void 同一条SQL查两个库的结果不串() throws Exception {
+        String sql = "SELECT COUNT(*) FROM t";
+        var db = new ApiTestRunnerService.DbContext(
+                Map.of(ApiTestRunnerService.dbKey("admin", sql), 3, ApiTestRunnerService.dbKey(null, sql), 0),
+                Map.of(), List.of());
+
+        assertTrue(checkDb("[{\"type\":\"db\",\"conn\":\"admin\",\"sql\":\"" + sql + "\",\"op\":\"eq\",\"value\":\"3\"}]", db));
+        assertTrue(checkDb("[{\"type\":\"db\",\"sql\":\"" + sql + "\",\"op\":\"eq\",\"value\":\"0\"}]", db));
+        assertFalse(checkDb("[{\"type\":\"db\",\"conn\":\"other\",\"sql\":\"" + sql + "\",\"op\":\"eq\",\"value\":\"3\"}]", db));
     }
 }

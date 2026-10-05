@@ -24,7 +24,7 @@ import java.nio.file.Path;
 import java.util.Map;
 
 /**
- * APP 打包。鸿蒙 + 完美电竞安卓（testing / debug）可用，iOS 随后。
+ * APP 打包。鸿蒙、完美电竞安卓、完美电竞 iOS（按分支打 Debug IPA）。
  */
 @RestController
 @RequestMapping("/app-packs")

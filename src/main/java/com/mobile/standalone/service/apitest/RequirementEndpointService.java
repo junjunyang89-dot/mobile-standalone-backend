@@ -167,6 +167,7 @@ public class RequirementEndpointService {
             try {
                 String epId = adopt(resolved, l.httpMethod(), l.path(), l.summary());
                 applyCaptureDetail(l, epId);
+                apiEndpointService.markCaptured(epId);
                 // captured_at 每次都刷新，source 保持不变。
                 // 两者分工：source 记「它是怎么进来的」，captured_at 记「它被实际调用过」。
                 // 合成一个字段的话，SYNC 接口被抓到就得改 source，那就丢掉了
