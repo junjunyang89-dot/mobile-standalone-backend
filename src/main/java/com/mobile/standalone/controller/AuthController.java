@@ -205,12 +205,8 @@ public class AuthController {
 
     private Map<String, Object> meVo(PlatformUser user) {
         PlatformRole role = user.roleEnum();
-        List<String> hidden = new ArrayList<>();
-        PermissionRules.routeRules().forEach((route, min) -> {
-            if (!role.satisfies(min)) {
-                hidden.add(route);
-            }
-        });
+        List<String> visibleModules = user.visibleModules();
+        List<String> hidden = PermissionRules.hiddenRoutes(role, visibleModules);
         Map<String, Object> vo = new HashMap<>();
         vo.put("bootstrapping", false);
         vo.put("id", user.getId());
@@ -228,6 +224,8 @@ public class AuthController {
         vo.put("canDelete", role.satisfies(PlatformRole.ADMIN));
         vo.put("canManageUsers", role.satisfies(PlatformRole.ADMIN));
         vo.put("hiddenRoutes", hidden);
+        vo.put("visibleRoutes", PermissionRules.visibleRoutes(hidden));
+        vo.put("moduleRestricted", visibleModules != null);
         return vo;
     }
 

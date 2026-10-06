@@ -50,6 +50,9 @@ public class PlatformUserService {
                 "ADD COLUMN password_changed_at DATETIME DEFAULT NULL COMMENT '最近改密时间'");
         addColumnIfMissing("platform_users", "must_change_password",
                 "ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0 COMMENT '强制下次登录改密'");
+        // 默认 NULL = 不限制：加列这一刻起存量账号能看的入口一个不少
+        addColumnIfMissing("platform_users", "allowed_modules",
+                "ADD COLUMN allowed_modules TEXT DEFAULT NULL COMMENT '可见功能模块（路由逗号分隔），NULL=全部'");
         // 唯一索引允许多个 NULL，所以存量账号邮箱全空也能直接加，不用先补数据
         addIndexIfMissing("platform_users", "uk_platform_users_email",
                 "ADD UNIQUE KEY uk_platform_users_email (email)");
@@ -192,6 +195,15 @@ public class PlatformUserService {
     @Transactional
     public PlatformUser create(String username, String displayName, String email,
                                String rawPassword, String role) {
+        return create(username, displayName, email, rawPassword, role, null);
+    }
+
+    /**
+     * @param modules 能看的模块路由；null = 不限制
+     */
+    @Transactional
+    public PlatformUser create(String username, String displayName, String email,
+                               String rawPassword, String role, List<String> modules) {
         String name = username == null ? "" : username.trim();
         if (name.isEmpty()) {
             throw new IllegalArgumentException("登录名不能为空");
@@ -214,6 +226,7 @@ public class PlatformUserService {
         user.setDisplayName(displayName == null || displayName.isBlank() ? name : displayName.trim());
         user.setPasswordHash(PasswordHasher.hash(rawPassword));
         user.setRole(PlatformRole.from(role).name());
+        user.setAllowedModules(modules == null ? null : PlatformModules.serialize(modules));
         user.setEnabled(true);
         LocalDateTime now = LocalDateTime.now();
         user.setCreatedAt(now);
@@ -257,6 +270,20 @@ public class PlatformUserService {
         patch.setRole(role == null || role.isBlank() ? null : PlatformRole.from(role).name());
         patch.setEnabled(enabled);
         userMapper.update(patch);
+        return get(id);
+    }
+
+    /**
+     * 改账号能看的模块。
+     *
+     * @param modules null = 不限制；空列表 = 只留工作台
+     */
+    @Transactional
+    public PlatformUser updateModules(String id, List<String> modules) {
+        if (get(id) == null) {
+            return null;
+        }
+        userMapper.updateAllowedModules(id, modules == null ? null : PlatformModules.serialize(modules));
         return get(id);
     }
 

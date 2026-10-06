@@ -57,6 +57,16 @@ public final class CurrentUser {
         return null;
     }
 
+    /** 当前登录人的账号名(不会重名、不会被改),按人存东西时用它当键;取不到返回 null */
+    public static String usernameOrNull() {
+        HttpServletRequest request = currentRequest();
+        Object u = request == null ? null : request.getAttribute(AuthFilter.ATTR_USER);
+        if (u instanceof PlatformUser pu && pu.getUsername() != null && !pu.getUsername().isBlank()) {
+            return pu.getUsername().trim();
+        }
+        return null;
+    }
+
     /**
      * 盖章用:当前登录人,取不到就用给定的兜底值。
      *

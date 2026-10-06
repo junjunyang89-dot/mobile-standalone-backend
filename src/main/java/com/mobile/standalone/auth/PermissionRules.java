@@ -1,8 +1,12 @@
 package com.mobile.standalone.auth;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 「这个请求要哪一档角色」——<b>唯一的一份</b>。
@@ -147,7 +151,9 @@ public final class PermissionRules {
             Map.entry("/incident-playbooks", PlatformRole.TESTER),
             // 缓存和消息里常有 token、手机号；查询接口本身也是 POST，只读账号调不动
             Map.entry("/redis-tool", PlatformRole.TESTER),
-            Map.entry("/kafka-tool", PlatformRole.TESTER));
+            Map.entry("/kafka-tool", PlatformRole.TESTER),
+            // 会用自己的 GitLab 令牌往 master 合代码
+            Map.entry("/release-merge", PlatformRole.TESTER));
 
     /**
      * 路径里出现 {@code .} / {@code ..} 段、反斜杠、或解码后仍残留的 {@code %}——正常业务路径不会有，一律拒绝。
@@ -219,6 +225,40 @@ public final class PermissionRules {
 
     public static Map<String, PlatformRole> routeRules() {
         return ROUTE_MIN_ROLE;
+    }
+
+    /**
+     * 这个账号看不见的路由：角色不够的 + 管理员没给勾的模块。
+     *
+     * @param visibleModules {@link PlatformUser#visibleModules()}；null = 模块不限
+     */
+    public static List<String> hiddenRoutes(PlatformRole role, List<String> visibleModules) {
+        Set<String> hidden = new LinkedHashSet<>();
+        ROUTE_MIN_ROLE.forEach((route, min) -> {
+            if (!role.satisfies(min)) {
+                hidden.add(route);
+            }
+        });
+        if (visibleModules != null) {
+            Set<String> allowed = new HashSet<>(visibleModules);
+            for (String r : PlatformModules.routes()) {
+                if (!allowed.contains(r)) {
+                    hidden.add(r);
+                }
+            }
+        }
+        return new ArrayList<>(hidden);
+    }
+
+    /**
+     * 目录里这个账号<b>看得见</b>的模块路由。
+     * <p>
+     * 前端按「最长匹配」判断时要用到：{@code /reports} 被勾掉、{@code /reports/esports/performance} 勾上了，
+     * 只给隐藏清单的话前缀一匹配，性能报告也跟着没了。
+     */
+    public static List<String> visibleRoutes(List<String> hiddenRoutes) {
+        Set<String> hidden = new HashSet<>(hiddenRoutes);
+        return PlatformModules.routes().stream().filter(r -> !hidden.contains(r)).toList();
     }
 
     /**

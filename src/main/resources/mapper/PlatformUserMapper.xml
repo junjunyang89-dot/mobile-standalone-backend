@@ -12,6 +12,7 @@
         <result property="enabled" column="enabled"/>
         <result property="passwordChangedAt" column="password_changed_at"/>
         <result property="mustChangePassword" column="must_change_password"/>
+        <result property="allowedModules" column="allowed_modules"/>
         <result property="lastLoginAt" column="last_login_at"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
@@ -19,7 +20,7 @@
 
     <sql id="cols">
         id, username, display_name, email, password_hash, role, enabled,
-        password_changed_at, must_change_password, last_login_at, created_at, updated_at
+        password_changed_at, must_change_password, allowed_modules, last_login_at, created_at, updated_at
     </sql>
 
     <select id="findAll" resultMap="userMap">
@@ -50,10 +51,10 @@
     <insert id="insert" parameterType="com.mobile.standalone.auth.PlatformUser">
         INSERT INTO platform_users
             (id, username, display_name, email, password_hash, role, enabled,
-             password_changed_at, must_change_password, created_at, updated_at)
+             password_changed_at, must_change_password, allowed_modules, created_at, updated_at)
         VALUES
             (#{id}, #{username}, #{displayName}, #{email}, #{passwordHash}, #{role}, #{enabled},
-             #{passwordChangedAt}, #{mustChangePassword}, #{createdAt}, #{updatedAt})
+             #{passwordChangedAt}, #{mustChangePassword}, #{allowedModules}, #{createdAt}, #{updatedAt})
     </insert>
 
     <!-- 有意不含 password_hash：改密码走 updatePassword。
@@ -84,6 +85,10 @@
          表现是「第二个没填邮箱的人保存失败」，看报错完全想不到是唯一索引 -->
     <update id="updateEmail">
         UPDATE platform_users SET email = #{email}, updated_at = NOW() WHERE id = #{id}
+    </update>
+
+    <update id="updateAllowedModules">
+        UPDATE platform_users SET allowed_modules = #{allowedModules}, updated_at = NOW() WHERE id = #{id}
     </update>
 
     <update id="setMustChangePassword">

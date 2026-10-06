@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /** 平台账号。和 {@code online_regression_accounts}（被测 APP 的登录账号）是两回事 */
 @Data
@@ -49,12 +50,40 @@ public class PlatformUser {
     /** 管理员手工重置密码后置 1，逼用户下次登录先改掉——管理员设的密码管理员自己知道 */
     private Boolean mustChangePassword;
 
+    /**
+     * 能看见的功能模块（{@link PlatformModules} 里的路由，逗号分隔）。
+     * <p>
+     * NULL = 不限制：存量账号全是 NULL，加这个字段之前能看什么，加了之后还是什么。
+     * 空串 = 只剩工作台。
+     */
+    @JsonIgnore
+    private String allowedModules;
+
     private LocalDateTime lastLoginAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
     public PlatformRole roleEnum() {
         return PlatformRole.from(role);
+    }
+
+    /** 账号上勾的模块；null = 不限制 */
+    public List<String> getModules() {
+        return PlatformModules.parse(allowedModules);
+    }
+
+    public boolean isAllModules() {
+        return allowedModules == null;
+    }
+
+    /**
+     * 实际生效的模块限制；null = 全部可见。
+     * <p>
+     * 管理员不受限：模块是给「只该碰某几块」的人用的，管理员被勾掉「设置」之类的入口，
+     * 结果只是自己把自己关在门外。
+     */
+    public List<String> visibleModules() {
+        return roleEnum() == PlatformRole.ADMIN ? null : getModules();
     }
 
     /** 角色的中文名，前端直接显示 */

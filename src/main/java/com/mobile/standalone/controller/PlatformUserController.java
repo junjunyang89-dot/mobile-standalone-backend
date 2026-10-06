@@ -1,6 +1,7 @@
 package com.mobile.standalone.controller;
 
 import com.mobile.standalone.auth.AuthFilter;
+import com.mobile.standalone.auth.PlatformModules;
 import com.mobile.standalone.auth.PlatformRole;
 import com.mobile.standalone.auth.PlatformUser;
 import com.mobile.standalone.auth.PlatformUserService;
@@ -48,12 +49,19 @@ public class PlatformUserController {
                 .toList());
     }
 
+    /** 可勾选的功能模块，按侧栏分组。勾选框从这里渲染，不在前端另写一份 */
+    @GetMapping("/modules")
+    public ResponseEntity<List<PlatformModules.Group>> modules() {
+        return ResponseEntity.ok(PlatformModules.groups());
+    }
+
     @PostMapping
     public ResponseEntity<?> create(@RequestBody CreateRequest req) {
         try {
             return ResponseEntity.ok(userService.create(
                     req.getUsername(), req.getDisplayName(), req.getEmail(),
-                    req.getPassword(), req.getRole()));
+                    req.getPassword(), req.getRole(),
+                    Boolean.FALSE.equals(req.getAllModules()) ? orEmpty(req.getModules()) : null));
         } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
@@ -67,6 +75,9 @@ public class PlatformUserController {
             }
             PlatformUser updated = userService.update(
                     id, req.getDisplayName(), req.getRole(), req.getEnabled());
+            if (updated != null && req.getAllModules() != null) {
+                updated = userService.updateModules(id, req.getAllModules() ? null : orEmpty(req.getModules()));
+            }
             return updated == null
                     ? ResponseEntity.notFound().build()
                     : ResponseEntity.ok(updated);
@@ -103,6 +114,10 @@ public class PlatformUserController {
         }
     }
 
+    private static List<String> orEmpty(List<String> modules) {
+        return modules == null ? List.of() : modules;
+    }
+
     private String describe(PlatformRole role) {
         return switch (role) {
             case VIEWER -> "只能看报告、用例、元素，改不了任何东西";
@@ -119,6 +134,9 @@ public class PlatformUserController {
         private String email;
         private String password;
         private String role;
+        /** false 时只放行 {@link #modules}；不传或 true = 全部模块 */
+        private Boolean allModules;
+        private List<String> modules;
     }
 
     @Data
@@ -128,6 +146,9 @@ public class PlatformUserController {
         private String email;
         private String role;
         private Boolean enabled;
+        /** 不传 = 模块不动；true = 全部；false = 只放行 {@link #modules} */
+        private Boolean allModules;
+        private List<String> modules;
     }
 
     @Data

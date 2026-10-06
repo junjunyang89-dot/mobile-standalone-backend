@@ -31,6 +31,9 @@ public interface PlatformUserMapper {
 
     int updateEmail(@Param("id") String id, @Param("email") String email);
 
+    /** 单独一条：要能写回 NULL（= 不限制），通用 update 里 null 的意思是「这个字段不动」 */
+    int updateAllowedModules(@Param("id") String id, @Param("allowedModules") String allowedModules);
+
     int setMustChangePassword(@Param("id") String id, @Param("must") boolean must);
 
     int touchLogin(@Param("id") String id);
