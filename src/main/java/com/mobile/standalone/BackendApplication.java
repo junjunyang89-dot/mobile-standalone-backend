@@ -3,7 +3,9 @@ package com.mobile.standalone;
 import com.mobile.standalone.config.AuthMailProperties;
 import com.mobile.standalone.config.ChangeReviewProperties;
 import com.mobile.standalone.config.MacResourceFileInitializer;
+import com.mobile.standalone.config.OpenApiProperties;
 import com.mobile.standalone.config.ReleaseDocProperties;
+import com.mobile.standalone.config.ReleaseJenkinsProperties;
 import com.mobile.standalone.config.WebTestProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -13,7 +15,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication
 @EnableScheduling
 @EnableConfigurationProperties({ReleaseDocProperties.class, ChangeReviewProperties.class, WebTestProperties.class,
-        AuthMailProperties.class})
+        AuthMailProperties.class, ReleaseJenkinsProperties.class, OpenApiProperties.class})
 public class BackendApplication {
     public static void main(String[] args) {
         SpringApplication app = new SpringApplication(BackendApplication.class);

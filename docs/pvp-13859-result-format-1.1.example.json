@@ -1,0 +1,3121 @@
+{
+  "schemaVersion": "1",
+  "requirementKey": "PVP-13859",
+  "businessGroup": "PVP",
+  "analysisStatus": "PARTIAL",
+  "analysisMethod": "人工浏览器读取 + 固定提交静态代码复核 + 隔离本地单元测试",
+  "generatedAt": "2026-10-27T12:22:23.420202+08:00",
+  "sources": [
+    {
+      "id": "SRC-JIRA",
+      "detail": "浏览器读取 https://jira.shdev.net/browse/PVP-13859 ，状态 TESTING，提测备注列出 5 项目、分支 PVP-13859、pvp_bi.client_log_msg DDL 和 /platform/clientlogmsg action；不修改 JIRA。"
+    },
+    {
+      "id": "SRC-REQ",
+      "detail": "浏览器重新读取 https://wiki.shdev.net/pages/viewpage.action?pageId=119717563 ，页面变更链接 17→18；包含正式需求、折叠 DEMO 和评论。正式规则：SteamID 发起、查询、报告/文件、7 天过期、已提交再点提示。"
+    },
+    {
+      "id": "SRC-DESIGN",
+      "detail": "浏览器读取 Figma 文件 oFza4nKML7Ffl8Bd30t5LO 的 feedback process 画面，100% 视图看到了 QQ联系方式（选填）、授权说明；未声称遍历全部节点。原链接来自 JIRA，node-id=273-6747，浏览器初次跳转后未保持原节点参数，画面定位只作为部分设计证据。"
+    },
+    {
+      "id": "SRC-API",
+      "detail": "浏览器读取 https://wiki.shdev.net/pages/viewpage.action?pageId=10566815 的客户端日志反馈章节：/cheater-api/replay-log，需登录和签名，id 为 4105 的 metaData.id；code 102 参数错误、104 不属于登录玩家。"
+    },
+    {
+      "id": "SRC-SQL",
+      "detail": "JIRA 明确的新表 pvp_bi.client_log_msg；qq unsigned bigint 默认 0（不提供）；send_status=1 表示发送 API 接受，不是送达；replay_status=Y 表示同意；replay_time 注释为首次同意时间而非上传完成。真实数据库未读取。"
+    },
+    {
+      "id": "SRC-CODE",
+      "detail": "5 个本地项目按 repositorySnapshots 固定提交读取；没有 checkout、fetch、修改或执行业务代码。电子客户端目录 HEAD 为 unborn main，因此必须使用 git show PVP-13859，未把空工作区当作项目缺失。"
+    },
+    {
+      "id": "SRC-LOCAL-TEST",
+      "detail": "从 electron-pvp@56c3642417893abc6e1ccd955204a0b605c4fc0d 提取 protocol、reporter、collect 及对应测试至隔离临时目录，用 node --test 执行 34 项，34 通过，0 失败。采集器测试只用合成文件，reporter 上报/上传用桩；不代表真实业务联调通过。"
+    },
+    {
+      "id": "SRC-DB-LIVE",
+      "detail": "2026-10-27 通过用户已登录 Chrome 的 phpMyAdmin 结构页核验 mysql.secdev.com / qa_new_pvp_bi.client_log_msg：8 个字段及 PRIMARY(id)、steam_id_idx、create_time_idx、replay_time_idx 与 JIRA DDL 相符；qq 为 unsigned bigint、默认 0，注释 Optional QQ; 0 means not provided；replay_time 为可空 timestamp(3)，注释 First consent time; not upload completion。仅核验该库该表，尚未确认部署服务实际连接库映射，未读取个人明细、未执行写入、未核验其他环境。"
+    },
+    {
+      "id": "SRC-DEPENDENCIES",
+      "detail": "pvpapj@3d451cf754156d43c3b85580dd6c9410c7f664d5: UserMessageServiceImpl.java:110-113,865-951; KafkaService.java:2077-2088; UserMessageMapper.java:43,111-119,279-322; RedisConfig.java:67-110。本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F01",
+      "title": "QQ 选填与 API 强制大于 0 冲突，空 QQ 提交会被拒绝",
+      "classification": "已确认跨端契约不一致",
+      "priority": "P1",
+      "sourceIds": [
+        "SRC-DESIGN",
+        "SRC-SQL",
+        "SRC-CODE",
+        "SRC-DB-LIVE"
+      ],
+      "detail": "结论类型：已确认跨端契约不一致；优先级：P1\n证据：electron-pvp src/shared/client.error.report/protocol.js validateSubmission 允许空 qq；renderer 弹窗标选填；reporter.js:84-95 上传后 publish；API CheaterApiController.php:1281-1286 将空值转 0 并抛 102；JIRA 表 qq 默认 0。\n影响：用户不填 QQ 仍开始采集上传，最终 API 拒绝，客户端未记成功，可能再次采集上传。\n验证方法：合法账号、合法 4105/反馈 ID，QQ 留空、同意；观察请求 qq=\"\"，响应 code=102，反馈记录不变及 OSS 文件是否已产生。\n建议：统一 optional QQ 契约，后端允许缺省 0 并保留非空格式校验；先做端到端空 QQ 回归。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-001",
+        "TC-003",
+        "TC-042",
+        "TC-052"
+      ],
+      "rationale": "electron-pvp src/shared/client.error.report/protocol.js validateSubmission 允许空 qq；renderer 弹窗标选填；reporter.js:84-95 上传后 publish；API CheaterApiController.php:1281-1286 将空值转 0 并抛 102；JIRA 表 qq 默认 0。",
+      "impact": "用户不填 QQ 仍开始采集上传，最终 API 拒绝，客户端未记成功，可能再次采集上传。",
+      "triggerConditions": [
+        "用户不填写QQ并同意反馈"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "合法账号、合法 4105/反馈 ID，QQ 留空、同意；观察请求 qq=\"\"，响应 code=102，反馈记录不变及 OSS 文件是否已产生。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "统一 optional QQ 契约，后端允许缺省 0 并保留非空格式校验；先做端到端空 QQ 回归。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchapi.wmpvp.com",
+          "commitSha": "221106eea333a313e79b3f290b0275944c8a9738",
+          "filePath": "app/controllers/CheaterApiController.php",
+          "startLine": 1283,
+          "endLine": 1290,
+          "snippet": "                throw new PvpException(PvpException::PARAM_INVALID, 'invalid id');\n            }\n            if ($qq < 1) {\n                throw new PvpException(PvpException::PARAM_INVALID, 'invalid qq');\n            }\n            (new ClientLogMsgService())->replay($id, $this->_uid, $qq);\n            $this->_jsonSuccess();\n        } catch (Exception $ex) {",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        },
+        {
+          "projectId": "electron-pvp",
+          "commitSha": "56c3642417893abc6e1ccd955204a0b605c4fc0d",
+          "filePath": "src/shared/client.error.report/protocol.js",
+          "startLine": 83,
+          "endLine": 106,
+          "snippet": "  return { code: 0, messageId: String(id), reportId };\n}\nfunction validateSubmission(args, now = Date.now()) {\n  const message = args && args.message;\n  const validation = validateMessage(message);\n  if (validation.code !== 0) return validation;\n  if (!args || args.consent !== true)\n    return { code: 1, message: \"请先同意上传诊断信息\" };\n  if (isExpired(message, now)) return { code: 1, message: \"该消息已过期\" };\n  const qq = String(args.qq == null ? \"\" : args.qq).trim();\n  if (qq && !/^[1-9]\\d{4,14}$/.test(qq))\n    return { code: 1, message: \"请输入正确的 QQ 号码\" };\n  return { ...validation, qq };\n}\nmodule.exports = {\n  MESSAGE_TYPE,\n  SPECIAL_TAG,\n  SUBMIT_URL,\n  CHANNELS,\n  SUBMITTED_TIP,\n  VALIDITY_MS,\n  getMeta,\n  getReportId,\n  timestamp,",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F02",
+      "title": "后台新增页尚未提供需求所述的结构化报告查看入口",
+      "classification": "所查分支存在实现覆盖缺口",
+      "priority": "P1",
+      "sourceIds": [
+        "SRC-REQ",
+        "SRC-CODE"
+      ],
+      "detail": "结论类型：所查分支存在实现覆盖缺口；优先级：P1\n证据：admin 新 clientlogmsg.phtml 仅显示文件列表链接与重发；旧 client-log.phtml 仅列对象链接并对 parsed_pvpClient 特定日志提供可视化；客户端上传 report.json，所查改动无该 JSON 的报告渲染入口。\n影响：客服可下载文件但未必能直接阅读汇总报告；不能仅因存在 report.json 判定报告展示已交付。\n验证方法：完成一条反馈，后台按记录查找“查看报告”，验证能显示硬件、网络、异常、缺失项并关联该反馈。\n建议：确认是否另有已部署报告查看服务；若没有，补结构化报告视图及记录级关联。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-032",
+        "TC-037",
+        "TC-052"
+      ],
+      "rationale": "admin 新 clientlogmsg.phtml 仅显示文件列表链接与重发；旧 client-log.phtml 仅列对象链接并对 parsed_pvpClient 特定日志提供可视化；客户端上传 report.json，所查改动无该 JSON 的报告渲染入口。",
+      "impact": "客服可下载文件但未必能直接阅读汇总报告；不能仅因存在 report.json 判定报告展示已交付。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "完成一条反馈，后台按记录查找“查看报告”，验证能显示硬件、网络、异常、缺失项并关联该反馈。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "确认是否另有已部署报告查看服务；若没有，补结构化报告视图及记录级关联。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchadmin.wmpvp.com",
+          "commitSha": "1905ed87d712fa9ec18b9a38c5460df1f64dc2a7",
+          "filePath": "application/views/scripts/platform/clientlogmsg.phtml",
+          "startLine": 11,
+          "endLine": 22,
+          "snippet": "                <div class=\"ace-widget-header\"><h2>发起日志收集</h2></div>\n                <div class=\"ace-widget-content\">\n                    <form method=\"post\" class=\"ace-form form-inline client-log-action\" action=\"/platform/clientlogmsg\">\n                        <input type=\"hidden\" name=\"task\" value=\"create\">\n                        <label for=\"client-log-steam\">Steam ID</label>\n                        <input id=\"client-log-steam\" name=\"steam_id\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]+\" maxlength=\"20\" required value=\"\">\n                        <button type=\"submit\" class=\"btn btn-danger\">发送日志收集消息</button>\n                    </form>\n                </div>\n            </div>\n            <div class=\"ace-widget\">\n                <div class=\"ace-widget-header\"><h2>日志收集列表</h2></div>",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F03",
+      "title": "同一反馈的发送/重发缺少跨请求互斥，超时结果未知可能重复消息",
+      "classification": "并发及外部一致性风险",
+      "priority": "P1",
+      "sourceIds": [
+        "SRC-CODE",
+        "SRC-SQL"
+      ],
+      "detail": "结论类型：并发及外部一致性风险；优先级：P1\n证据：Core ClientLogMsgModel::send 先读 send_status=0 再调用 APJ，随后条件更新发送状态；没有锁/发送中状态或可见上游幂等键。同一 id 可同时进入外部发送。页面已提示重发可能重复。\n影响：并发操作或上游已接受但本地状态未保存，可能产生多个 4105；客户端仅本机按反馈 ID 去重不能代替服务端幂等。\n验证方法：在隔离测试账号上并发重发同 id，并注入上游已接受/响应超时/标记失败，核对消息数和记录状态。\n建议：确认产品是否接受重复通知；若不接受，设计跨请求幂等和未知结果对账，不能仅加前端禁用按钮。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-010",
+        "TC-011",
+        "TC-012",
+        "TC-031",
+        "TC-054"
+      ],
+      "rationale": "Core ClientLogMsgModel::send 先读 send_status=0 再调用 APJ，随后条件更新发送状态；没有锁/发送中状态或可见上游幂等键。同一 id 可同时进入外部发送。页面已提示重发可能重复。",
+      "impact": "并发操作或上游已接受但本地状态未保存，可能产生多个 4105；客户端仅本机按反馈 ID 去重不能代替服务端幂等。",
+      "triggerConditions": [
+        "并发重发或发送结果未知后重试"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "在隔离测试账号上并发重发同 id，并注入上游已接受/响应超时/标记失败，核对消息数和记录状态。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "确认产品是否接受重复通知；若不接受，设计跨请求幂等和未知结果对账，不能仅加前端禁用按钮。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchcore.wmpvp.com",
+          "commitSha": "d37f7b33c9a4142e502dc0588d734c6a077080a9",
+          "filePath": "app/models/ClientLogMsgModel.php",
+          "startLine": 45,
+          "endLine": 86,
+          "snippet": "    }\n\n    public function send($id)\n    {\n        $reportId = (int)$id;\n        $row = $this->_dao->getById($reportId);\n        if (!$row) {\n            throw new PvpException(PvpException::PARAM_INVALID, '没有查到数据不可发送');\n        }\n        if ((int)$row['send_status'] !== 0) {\n            throw new PvpException(PvpException::PARAM_INVALID, '已发送过，不可重复发送');\n        }\n        $result = ['id' => (string)$reportId, 'sent' => false, 'saved' => false];\n        try {\n            list($error, $accepted) = $this->getPvpApjService()->callApi('/userMessage/sendClientLogMsg',\n                ['id' => (string)$reportId, 'steamId' => (string)$row['steam_id']], 'post', 10);\n            if ($error !== 0 || $accepted !== true) {\n                return $result;\n            }\n            $result['sent'] = true;\n            $result['saved'] = $this->markSendSuccess($reportId) === true;\n        } catch (Exception $ex) {\n            // Keep the accepted phase when only saving the send status fails.\n            $result['saved'] = false;\n        }\n        return $result;\n    }\n\n    public function replay($id, $steamId, $qq = '0')\n    {\n        $reportId = (int)$id;\n        $steamId = (int)$steamId;\n        $qq = (int)$qq;\n        $row = $this->ownedRecord($reportId, $steamId);\n        if ($row['replay_status'] === 'Y') {\n            return true;\n        }\n        $this->_dao->acceptReplay($reportId, $steamId, $qq);\n        $row = $this->ownedRecord($reportId, $steamId);\n        if ($row['replay_status'] !== 'Y') {\n            throw new PvpException(PvpException::DB_ERROR, 'Failed to save consent');\n        }",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F04",
+      "title": "文件列表按 SteamID 汇总，未按当前反馈记录隔离",
+      "classification": "记录追溯风险",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-CODE",
+        "SRC-REQ"
+      ],
+      "detail": "结论类型：记录追溯风险；优先级：P2\n证据：admin 文件列表 URL 只传 uid；旧 action 按 client/log/{uid}/ 取最多1000对象。客户端文件名包含 reportId/messageId，但后台未用这些字段筛选。\n影响：同一用户多次反馈或旧日志可能混在一起；客服难以确认本次报告附件，也可能因1000条上限漏看新文件。\n验证方法：同一测试账号制造两条反馈，分别上传不同标识，点击两行文件列表并核对是否混合。\n建议：增加反馈记录到 report.json/对象前缀的显式关联；明确列表分页/排序，旧日志入口继续保留。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-033",
+        "TC-034",
+        "TC-052",
+        "TC-057"
+      ],
+      "rationale": "admin 文件列表 URL 只传 uid；旧 action 按 client/log/{uid}/ 取最多1000对象。客户端文件名包含 reportId/messageId，但后台未用这些字段筛选。",
+      "impact": "同一用户多次反馈或旧日志可能混在一起；客服难以确认本次报告附件，也可能因1000条上限漏看新文件。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "同一测试账号制造两条反馈，分别上传不同标识，点击两行文件列表并核对是否混合。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "增加反馈记录到 report.json/对象前缀的显式关联；明确列表分页/排序，旧日志入口继续保留。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchadmin.wmpvp.com",
+          "commitSha": "1905ed87d712fa9ec18b9a38c5460df1f64dc2a7",
+          "filePath": "application/controllers/PlatformController.php",
+          "startLine": 542,
+          "endLine": 555,
+          "snippet": "                $nextMarker = '';\n                $delimiter = '';\n                $prefix = \"client/log/{$_GET['uid']}/\";\n                $list = OssService::getInstance()->listObj($prefix, $pageSize, $nextMarker, $delimiter);\n                rsort($list);\n                $d = [];\n                foreach ($list as $v) {\n                    list($error, $url) = OssService::getInstance()->getSignUrl($v);\n                    if ($error) {\n                        throw new Exception($error);\n                    }\n                    $d[] = ['name' => $v, 'url' => $url];\n                }\n            }catch (Exception $e) {",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F05",
+      "title": "SteamID 与反馈 ID 直接整数强转，缺少严格十进制输入校验",
+      "classification": "静态参数校验缺口",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-CODE"
+      ],
+      "detail": "结论类型：静态参数校验缺口；优先级：P2\n证据：Core create、get、send、replay 使用 (int)；API id、qq 也直接 (int)。Admin ClientLogService::decimal 虽有严格校验实现但未调用。\n影响：非纯数字如 123abc 可能变为 123；超长数、负数、数组等行为不一致。前端 pattern 不能替代服务端校验。\n验证方法：对白名单测试数据验证字母后缀、科学计数、空白、超长、负数、数组；非法请求不得创建记录或发送消息。\n建议：复用严格十进制字符串校验，明确长度/范围，保留 SteamID 字符串；不要用生产账号验证。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-003",
+        "TC-006",
+        "TC-008",
+        "TC-024"
+      ],
+      "rationale": "Core create、get、send、replay 使用 (int)；API id、qq 也直接 (int)。Admin ClientLogService::decimal 虽有严格校验实现但未调用。",
+      "impact": "非纯数字如 123abc 可能变为 123；超长数、负数、数组等行为不一致。前端 pattern 不能替代服务端校验。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "对白名单测试数据验证字母后缀、科学计数、空白、超长、负数、数组；非法请求不得创建记录或发送消息。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "复用严格十进制字符串校验，明确长度/范围，保留 SteamID 字符串；不要用生产账号验证。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchcore.wmpvp.com",
+          "commitSha": "d37f7b33c9a4142e502dc0588d734c6a077080a9",
+          "filePath": "app/models/ClientLogMsgModel.php",
+          "startLine": 11,
+          "endLine": 27,
+          "snippet": "    }\n\n    public function create($steamId)\n    {\n        $steamId = (int)$steamId;\n        if ($steamId <= 0) {\n            throw new PvpException(PvpException::PARAM_INVALID, 'invalid steamId');\n        }\n        $id = $this->_dao->createRecord($steamId);\n        if ($id < 1) {\n            throw new PvpException(PvpException::DB_ERROR, 'Failed to create report');\n        }\n        return $this->send($id);\n    }\n\n    public function get($id)\n    {",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F06",
+      "title": "服务端缺少已提交状态查询回传，跨设备/清缓存可能再次采集上传",
+      "classification": "跨端状态同步风险",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-REQ",
+        "SRC-CODE"
+      ],
+      "detail": "结论类型：跨端状态同步风险；优先级：P2\n证据：客户端 status 只检查本地 submitted 和消息 metaData.submitted；当前 APJ 发送 metadata 只有 id，Core 无客户端已提交查询接口。Core replay 幂等在上传之后才发生。\n影响：换电脑或本地状态丢失时，已同意反馈仍可能重弹和重复上传；最终 replay 返回 true 不阻止之前的重复采集。\n验证方法：账号A在设备1提交，再在设备2或干净用户目录点击同报告通知；观察是否直接提示已提交，是否有新的 OSS 对象。\n建议：明确需求是否要求跨设备；若要求，在采集前向服务端查询权属和状态，或消息列表提供权威状态。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-020",
+        "TC-042",
+        "TC-056"
+      ],
+      "rationale": "客户端 status 只检查本地 submitted 和消息 metaData.submitted；当前 APJ 发送 metadata 只有 id，Core 无客户端已提交查询接口。Core replay 幂等在上传之后才发生。",
+      "impact": "换电脑或本地状态丢失时，已同意反馈仍可能重弹和重复上传；最终 replay 返回 true 不阻止之前的重复采集。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "账号A在设备1提交，再在设备2或干净用户目录点击同报告通知；观察是否直接提示已提交，是否有新的 OSS 对象。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "明确需求是否要求跨设备；若要求，在采集前向服务端查询权属和状态，或消息列表提供权威状态。",
+      "codeEvidence": [
+        {
+          "projectId": "electron-pvp",
+          "commitSha": "56c3642417893abc6e1ccd955204a0b605c4fc0d",
+          "filePath": "src/main/diagnostics/reporter.js",
+          "startLine": 16,
+          "endLine": 35,
+          "snippet": "    keys.forEach(key => acknowledged.add(key));\n    for (const key of keys) {\n      if (deps.readSubmitted(key)) continue;\n      try {\n        deps.markSubmitted(key);\n      } catch (error) {\n        // The server ACK remains authoritative even when local persistence fails.\n        if (deps.onPersistenceError) {\n          try {\n            deps.onPersistenceError(error);\n          } catch (_) {\n            /* keep ACK */\n          }\n        }\n      }\n    }\n  };\n  const submitted = (uid, message) => {\n    const keys = keysFor(uid, message);\n    const locallySubmitted = keys.some(",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F07",
+      "title": "7 天过期目前主要由客户端执行，过期反馈 API 是否拒绝需确认",
+      "classification": "契约待确认及服务端校验风险",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-REQ",
+        "SRC-CODE"
+      ],
+      "detail": "结论类型：契约待确认及服务端校验风险；优先级：P2\n证据：protocol.isExpired 校验消息时间；APJ TTL=7天；Core replay 仅校验 id/steam_id 权属，不检查 create_time 或有效期。\n影响：持有旧反馈 ID 的合法账号可能绕过过期消息 UI 直接反馈；但需求只明确消息过期，不足以直接判 API 过期规则违规。\n验证方法：准备创建时间7天前记录，使用所属测试账号经签名 API 提交，核对产品约定和实际结果。\n建议：先确认服务端有效期规则及宽限窗口；需要强制失效时由服务端校验并提供可区分错误码。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-018",
+        "TC-056"
+      ],
+      "rationale": "protocol.isExpired 校验消息时间；APJ TTL=7天；Core replay 仅校验 id/steam_id 权属，不检查 create_time 或有效期。",
+      "impact": "持有旧反馈 ID 的合法账号可能绕过过期消息 UI 直接反馈；但需求只明确消息过期，不足以直接判 API 过期规则违规。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "准备创建时间7天前记录，使用所属测试账号经签名 API 提交，核对产品约定和实际结果。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "先确认服务端有效期规则及宽限窗口；需要强制失效时由服务端校验并提供可区分错误码。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchcore.wmpvp.com",
+          "commitSha": "d37f7b33c9a4142e502dc0588d734c6a077080a9",
+          "filePath": "app/models/ClientLogMsgModel.php",
+          "startLine": 71,
+          "endLine": 97,
+          "snippet": "    }\n\n    public function replay($id, $steamId, $qq = '0')\n    {\n        $reportId = (int)$id;\n        $steamId = (int)$steamId;\n        $qq = (int)$qq;\n        $row = $this->ownedRecord($reportId, $steamId);\n        if ($row['replay_status'] === 'Y') {\n            return true;\n        }\n        $this->_dao->acceptReplay($reportId, $steamId, $qq);\n        $row = $this->ownedRecord($reportId, $steamId);\n        if ($row['replay_status'] !== 'Y') {\n            throw new PvpException(PvpException::DB_ERROR, 'Failed to save consent');\n        }\n        return true;\n    }\n\n    public function list($steamId, $createStart = null, $createEnd = null, $replayStart = null, $replayEnd = null, $page = 1, $size = 10)\n    {\n        $steamId = (int)$steamId;\n        $page = (int)($page === null || $page === '' ? 1 : $page);\n        $items = $this->_dao->search($steamId, $createStart, $createEnd, $replayStart, $replayEnd, $page, $size);\n        $total = $this->_dao->count($steamId, $createStart, $createEnd, $replayStart, $replayEnd);\n        return [\n            'items' => $items,",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F08",
+      "title": "首次同意时间与客户端实际回调阶段存在语义差异",
+      "classification": "数据语义待确认",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-SQL",
+        "SRC-CODE"
+      ],
+      "detail": "结论类型：数据语义待确认；优先级：P2\n证据：JIRA 注释 replay_time 是首次同意时间；reporter.js 在 collect/upload 完成之后才 publish；DAO 在 replay 接口收到时写 CURRENT_TIMESTAMP(3)。\n影响：采集上传较慢时字段接近上传后的回调时间，而非用户首次点击同意的时间；影响客服时序判断。\n验证方法：记录点击同意、上传结束、API开始和数据库 replay_time，观察差值；断网后重试继续核对。\n建议：确认字段意图：服务端接收确认时间、点击同意时间或上传完成时间；不同事件用不同字段，避免前端自由时间覆盖权威记录。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-027",
+        "TC-043",
+        "TC-052"
+      ],
+      "rationale": "JIRA 注释 replay_time 是首次同意时间；reporter.js 在 collect/upload 完成之后才 publish；DAO 在 replay 接口收到时写 CURRENT_TIMESTAMP(3)。",
+      "impact": "采集上传较慢时字段接近上传后的回调时间，而非用户首次点击同意的时间；影响客服时序判断。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "记录点击同意、上传结束、API开始和数据库 replay_time，观察差值；断网后重试继续核对。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "确认字段意图：服务端接收确认时间、点击同意时间或上传完成时间；不同事件用不同字段，避免前端自由时间覆盖权威记录。",
+      "codeEvidence": [
+        {
+          "projectId": "electron-pvp",
+          "commitSha": "56c3642417893abc6e1ccd955204a0b605c4fc0d",
+          "filePath": "src/main/diagnostics/reporter.js",
+          "startLine": 90,
+          "endLine": 103,
+          "snippet": "        });\n        checkUser();\n        const result = await deps.publish({\n          id: validation.reportId,\n          qq: validation.qq\n        });\n        if (!result || result.code !== 0) {\n          const code = result && result.code;\n          return {\n            code: code === 102 || code === 104 ? code : 1,\n            message:\n              code === 102\n                ? \"请求参数无效，请刷新消息后重试\"\n                : code === 104",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F09",
+      "title": "DEMO 的采集项、网络探测参数和正式需求边界尚不明确",
+      "classification": "需求待确认",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-REQ",
+        "SRC-CODE"
+      ],
+      "detail": "结论类型：需求待确认；优先级：P2\n证据：Wiki DEMO含50次Ping、Traceroute、WER、Minidump归因、HTML；实际 collect 为10次Ping、DNS/HTTPS、部分硬件事件及 dmp 文件上传，不等同实现全部DEMO。\n影响：直接把DEMO全算必测会误报；完全忽略又可能漏验产品实际期望。\n验证方法：产品逐项确认正式采集清单、数量、文件时间/大小、报告格式及Windows支持范围，形成验收表。\n建议：将已确认规则与参考方案分开，已确认清单后再判定缺陷。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-040",
+        "TC-044"
+      ],
+      "rationale": "Wiki DEMO含50次Ping、Traceroute、WER、Minidump归因、HTML；实际 collect 为10次Ping、DNS/HTTPS、部分硬件事件及 dmp 文件上传，不等同实现全部DEMO。",
+      "impact": "直接把DEMO全算必测会误报；完全忽略又可能漏验产品实际期望。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "产品逐项确认正式采集清单、数量、文件时间/大小、报告格式及Windows支持范围，形成验收表。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "将已确认规则与参考方案分开，已确认清单后再判定缺陷。",
+      "codeEvidence": [
+        {
+          "projectId": "electron-pvp",
+          "commitSha": "56c3642417893abc6e1ccd955204a0b605c4fc0d",
+          "filePath": "src/main/diagnostics/collect.js",
+          "startLine": 181,
+          "endLine": 197,
+          "snippet": "    }\n  ];\n  const [attachments, hardware, network, networkConfig, ping, events] =\n    await Promise.all([\n      selectDiagnosticFiles(sources),\n      powershell(\n        \"$ErrorActionPreference='Stop'; @{os=Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber; gpu=@(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,DriverDate); memory=@(Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity,Speed); disks=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID,Size,FreeSpace); drivers=@(Get-CimInstance Win32_PnPSignedDriver | Where-Object {$_.DeviceClass -in @('DISPLAY','NET','SCSIADAPTER')} | Select-Object DeviceName,DriverVersion,DriverDate)} | ConvertTo-Json -Depth 5 -Compress\"\n      ),\n      networkProbe(networkHost),\n      powershell(\n        \"$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' | Select-Object Description,IPAddress,DefaultIPGateway,DNSServerSearchOrder) | ConvertTo-Json -Depth 4 -Compress\"\n      ),\n      powershell(\n        \"$ping=New-Object System.Net.NetworkInformation.Ping; $times=@(); for($i=0;$i -lt 10;$i++){try{$r=$ping.Send('pwaweblogin.wmpvp.com',500);if($r.Status -eq 'Success'){$times+= $r.RoundtripTime}}catch{}}; $ping.Dispose(); @{target='pwaweblogin.wmpvp.com';sent=10;received=$times.Count;lossPercent=(10-$times.Count)*10;averageMs=($times|Measure-Object -Average).Average;maxMs=($times|Measure-Object -Maximum).Maximum} | ConvertTo-Json -Compress\"\n      ),\n      powershell(\n        \"$events=@(); foreach($name in @('System','Application')){try{$events+=@(Get-WinEvent -FilterHashtable @{LogName=$name; Id=41,1000,1001,1026,7,11,51;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 20 -ErrorAction Stop | Select-Object Id,ProviderName,TimeCreated,LevelDisplayName,Message)}catch{}}; ConvertTo-Json -InputObject $events -Depth 3 -Compress\"",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F10",
+      "title": "分页、时间范围与大表查询缺少可见输入边界",
+      "classification": "稳定性及数据查询风险",
+      "priority": "P2",
+      "sourceIds": [
+        "SRC-CODE",
+        "SRC-SQL"
+      ],
+      "detail": "结论类型：稳定性及数据查询风险；优先级：P2\n证据：Core list 强转page但未限制>=1；size 未归一化/上限；日期直接进范围条件。Admin固定size10，但Core注册接口参数均可选。\n影响：空size、page0/负数、非法日期/倒序范围可能造成异常或无界查询；真实表现依赖底层DAO，暂不确认漏洞。\n验证方法：隔离数据验证page=0/-1、size缺失/0/负数/超大、非法及反向时间范围，观察SQL、响应和耗时。\n建议：服务端统一分页和时间校验，使用真实数据规模的 EXPLAIN 决定是否补复合索引，不凭DDL盲目加索引。\n边界：静态复核发现，不声称已在真实环境复现。",
+      "relatedCaseIds": [
+        "TC-027",
+        "TC-028",
+        "TC-029",
+        "TC-047"
+      ],
+      "rationale": "Core list 强转page但未限制>=1；size 未归一化/上限；日期直接进范围条件。Admin固定size10，但Core注册接口参数均可选。",
+      "impact": "空size、page0/负数、非法日期/倒序范围可能造成异常或无界查询；真实表现依赖底层DAO，暂不确认漏洞。",
+      "triggerConditions": [
+        "执行该问题所列的验证场景；具体条件见verification.steps。"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "隔离数据验证page=0/-1、size缺失/0/负数/超大、非法及反向时间范围，观察SQL、响应和耗时。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "服务端统一分页和时间校验，使用真实数据规模的 EXPLAIN 决定是否补复合索引，不凭DDL盲目加索引。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpmatchcore.wmpvp.com",
+          "commitSha": "d37f7b33c9a4142e502dc0588d734c6a077080a9",
+          "filePath": "app/models/ClientLogMsgModel.php",
+          "startLine": 88,
+          "endLine": 107,
+          "snippet": "    }\n\n    public function list($steamId, $createStart = null, $createEnd = null, $replayStart = null, $replayEnd = null, $page = 1, $size = 10)\n    {\n        $steamId = (int)$steamId;\n        $page = (int)($page === null || $page === '' ? 1 : $page);\n        $items = $this->_dao->search($steamId, $createStart, $createEnd, $replayStart, $replayEnd, $page, $size);\n        $total = $this->_dao->count($steamId, $createStart, $createEnd, $replayStart, $replayEnd);\n        return [\n            'items' => $items,\n            'total' => $total,\n        ];\n    }\n\n    private function ownedRecord($reportId, $steamId)\n    {\n        $row = $this->_dao->getById($reportId);\n        if (!$row || (int)$row['steam_id'] !== (int)$steamId) {\n            throw new PvpException(PvpException::NO_PERMISSION, 'id steamId不匹配');\n        }",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "F11",
+      "title": "Kafka发送失败可能仍被标为发送成功",
+      "classification": "既有公共链路影响本次功能的可靠性风险",
+      "priority": "P1",
+      "sourceIds": [
+        "SRC-DEPENDENCIES",
+        "SRC-CODE"
+      ],
+      "detail": "本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。这是静态失败传播缺口，尚未故障注入复现；API受理成功不等于消息实际送达。",
+      "relatedCaseIds": [
+        "TC-053",
+        "TC-054"
+      ],
+      "rationale": "新增4105消息复用了既有Kafka异步发送路径；下方固定提交摘录可见发送结果没有向上层可靠传播。",
+      "impact": "消息发送失败时可能仍保存send_status=1，实际未送达且后台不再允许重发。",
+      "triggerConditions": [
+        "Kafka同步异常或异步发送失败"
+      ],
+      "verification": {
+        "preconditions": [
+          "隔离测试环境和专用账号；涉及故障注入须另行获得执行授权。"
+        ],
+        "steps": [
+          "模拟Kafka发送失败，核对请求响应、消息落库及client_log_msg.send_status。"
+        ],
+        "expectedResult": "按已确认需求和接口契约检查；风险及待确认项须先确认预期，不能把静态推测当实测结论。",
+        "executionStatus": "NOT_RUN"
+      },
+      "recommendation": "区分受理、队列确认和实际送达，向上层传播失败并提供可追踪补偿；验证同步异常和异步发送失败。",
+      "codeEvidence": [
+        {
+          "projectId": "pvpapj.wmpvp.com",
+          "commitSha": "3d451cf754156d43c3b85580dd6c9410c7f664d5",
+          "filePath": "src/main/java/com/wmpvp/pvpapj/service/KafkaService.java",
+          "startLine": 2075,
+          "endLine": 2091,
+          "snippet": "     * @param msg\n     */\n    public void pushUserMessageSendMultiMsgEvent(UserMessageSendMultiMsg msg) {\n\n        String msgJson = JSON.toJSONString(msg);\n\n        log.info(\"pushUserMessageSendMultiMsgEvent msgJson={} \", msgJson);\n\n        try {\n            dataShKafkaTemplate.send(pvpMessageUserMessageSendMultiMsgTopic, msgJson);\n        } catch (Exception e) {\n            log.error(\"pushUserMessageSendMultiMsgEvent 异常 \", e);\n        }\n\n    }\n\n    /**",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        },
+        {
+          "projectId": "pvpapj.wmpvp.com",
+          "commitSha": "3d451cf754156d43c3b85580dd6c9410c7f664d5",
+          "filePath": "src/main/java/com/wmpvp/pvpapj/service/impl/UserMessageServiceImpl.java",
+          "startLine": 946,
+          "endLine": 953,
+          "snippet": "        }\n\n        kafkaService.pushUserMessageSendMultiMsgEvent(msg);\n\n        return true;\n    }\n\n    private boolean pullAdminMessages(Long uid, String source) {",
+          "explanation": "指定提测提交中与该结论相关的实现；静态读取证据，不代表运行复现。",
+          "sourceIds": [
+            "SRC-CODE"
+          ]
+        }
+      ]
+    }
+  ],
+  "apis": [
+    {
+      "id": "A01",
+      "service": "pvpmatchadmin",
+      "method": "GET",
+      "path": "/platform/clientlogmsg",
+      "detail": "后台列表。参数 steam_id/create_start/create_end/replay_start/replay_end/page；依赖后台登录、action权限。固定size10。检查响应HTML、过滤、XSS转义、分页和错误提示。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-025",
+        "TC-026",
+        "TC-027",
+        "TC-028",
+        "TC-030",
+        "TC-032",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A02",
+      "service": "pvpmatchadmin",
+      "method": "POST",
+      "path": "/platform/clientlogmsg?task=create",
+      "detail": "实际 task 是表单字段，不应只放query；steam_id十进制字符串。创建并发送，响应data.id/sent/saved；sent仅表示API受理。需专用测试账号，当前未执行。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-007",
+        "TC-008",
+        "TC-030",
+        "TC-031",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A03",
+      "service": "pvpmatchadmin",
+      "method": "POST",
+      "path": "/platform/clientlogmsg?task=resend",
+      "detail": "实际task和id为表单字段。仅发送未确认的记录可重发；测试并发及未知结果，不向真实玩家发送。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-010",
+        "TC-012",
+        "TC-013",
+        "TC-030",
+        "TC-031"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A04",
+      "service": "pvpmatchcore",
+      "method": "RPC",
+      "path": "ClientLogMsg.create",
+      "detail": "新建反馈并调用send；steam_id必传；返回id/sent/saved。RPC HTTP传输与内部认证由现有Core适配器配置，不能当普通URL直接访问。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-007",
+        "TC-008",
+        "TC-009",
+        "TC-046",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A05",
+      "service": "pvpmatchcore",
+      "method": "RPC",
+      "path": "ClientLogMsg.send",
+      "detail": "id必传；读反馈、调用APJ、保存send_status；返回id/sent/saved。需受控内部入口。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-007",
+        "TC-009",
+        "TC-010",
+        "TC-011",
+        "TC-012",
+        "TC-013",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A06",
+      "service": "pvpmatchcore",
+      "method": "RPC",
+      "path": "ClientLogMsg.get",
+      "detail": "id必传；返回id/steam_id/qq/send_status/replay_status/replay_time/create_time/update_time；内部权限及错误不存在验证。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-006"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A07",
+      "service": "pvpmatchcore",
+      "method": "RPC",
+      "path": "ClientLogMsg.list",
+      "detail": "steam_id/create_start/create_end/replay_start/replay_end/page/size可选；返回items,total；重点参数顺序、分页、日期交集和执行计划。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-025",
+        "TC-026",
+        "TC-027",
+        "TC-028",
+        "TC-029",
+        "TC-046",
+        "TC-047"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A08",
+      "service": "pvpmatchcore",
+      "method": "RPC",
+      "path": "ClientLogMsg.replay",
+      "detail": "id/steam_id必传，qq可选；权属一致才能置Y；重复返回true不应覆盖首次时间与QQ；不是上传完成确认。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-001",
+        "TC-002",
+        "TC-004",
+        "TC-006",
+        "TC-014",
+        "TC-018",
+        "TC-020",
+        "TC-043",
+        "TC-046",
+        "TC-048",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A09",
+      "service": "pvpmatchcore",
+      "method": "RPC",
+      "path": "ClientLogMsg.markSendSuccess",
+      "detail": "id必传；条件send_status=0更新为1；已注册为内部RPC方法，不能由普通玩家任意调用。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-011",
+        "TC-049"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A10",
+      "service": "pvpapj",
+      "method": "POST",
+      "path": "/userMessage/sendClientLogMsg",
+      "detail": "JSON id/steamId为字符串且@NotBlank；发送类型4105、metadata.id、TTL7天。需复用APJ服务认证，不以浏览器用户登录代替。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-002",
+        "TC-007",
+        "TC-009",
+        "TC-010",
+        "TC-017",
+        "TC-023",
+        "TC-024",
+        "TC-052",
+        "TC-053",
+        "TC-054",
+        "TC-055",
+        "TC-056",
+        "TC-057"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A11",
+      "service": "pvpmatchapi",
+      "method": "POST",
+      "path": "/cheater-api/replay-log",
+      "detail": "登录JWT+签名；JSON id=反馈ID而非消息ID、qq=字符串。成功code0，参数102，权属104；当前空qq被拒绝。签名参数和鉴权由平台环境配置。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-001",
+        "TC-002",
+        "TC-003",
+        "TC-004",
+        "TC-005",
+        "TC-006",
+        "TC-014",
+        "TC-015",
+        "TC-018",
+        "TC-020",
+        "TC-021",
+        "TC-042",
+        "TC-043",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A12",
+      "service": "pvpmatchadmin",
+      "method": "GET",
+      "path": "/platform/client-log",
+      "detail": "旧文件列表，uid必需用于查询；按用户目录最多1000对象。新反馈入口依赖此旧逻辑，属于必回归。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-030",
+        "TC-032",
+        "TC-033",
+        "TC-034",
+        "TC-035",
+        "TC-037",
+        "TC-051",
+        "TC-052"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    },
+    {
+      "id": "A13",
+      "service": "pvpmatchadmin",
+      "method": "POST",
+      "path": "/platform/client-log",
+      "detail": "旧发起入口：task=push_upload_log_msg,uid。区分在线消息与离线消息，防止新入口上线后旧链路退化。",
+      "mustTest": true,
+      "relatedCaseIds": [
+        "TC-036"
+      ],
+      "mustTestReason": "本单新增或闭环依赖入口，关联测试场景见relatedCaseIds。",
+      "authRequirements": [],
+      "requestParameters": [],
+      "responseAssertions": [],
+      "dataRequirements": [
+        "专用测试账号和反馈ID；环境、登录或内部认证需在接口执行模块配置。"
+      ],
+      "readinessGaps": [
+        "尚未实调；完整参数与断言需依据对应接口detail及服务适配器确认，未确认字段不编造。"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "TC-001",
+      "title": "QQ留空同意上传，应按选填契约成功",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08"
+      ],
+      "findingIds": [
+        "F01"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：获取合法4105，QQ留空，同意并观察整个采集上传和反馈过程。\n预期：应code0、replay_status=Y、qq=0；当前静态代码预计返回102，重点复现。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "获取合法4105，QQ留空，同意并观察整个采集上传和反馈过程。"
+      ],
+      "expectedResults": [
+        "应code0、replay_status=Y、qq=0；当前静态代码预计返回102，重点复现。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-002",
+      "title": "正常QQ提交，反馈ID与外层消息ID正确区分",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08",
+        "A10"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：使用message.id不同于metaData.id的通知，输入有效QQ提交。\n预期：只更新metaData.id对应记录；成功后再点只提示已提交。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "使用message.id不同于metaData.id的通知，输入有效QQ提交。"
+      ],
+      "expectedResults": [
+        "只更新metaData.id对应记录；成功后再点只提示已提交。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-003",
+      "title": "QQ非法格式与边界",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11"
+      ],
+      "findingIds": [
+        "F01",
+        "F05"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别输入字母、负数、4位、15位、16位及空白；客户端和直调API分别检查。\n预期：空值按选填允许，非空范围由产品确认后两端一致；不得靠整数强转接受字母后缀。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "分别输入字母、负数、4位、15位、16位及空白；客户端和直调API分别检查。"
+      ],
+      "expectedResults": [
+        "空值按选填允许，非空范围由产品确认后两端一致；不得靠整数强转接受字母后缀。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-004",
+      "title": "登录账号与反馈所有者不一致",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：账号B提交账号A的反馈ID，携带B合法签名和JWT。\n预期：返回104或明确无权限；A记录、QQ和时间不改变，不允许B采集上传A任务。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "账号B提交账号A的反馈ID，携带B合法签名和JWT。"
+      ],
+      "expectedResults": [
+        "返回104或明确无权限；A记录、QQ和时间不改变，不允许B采集上传A任务。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-005",
+      "title": "未登录、失效JWT与签名错误",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别缺少JWT、过期JWT、缺少签名、篡改签名后的JSON。\n预期：在业务更新前拒绝，记录不改变；错误不能伪装code0。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "分别缺少JWT、过期JWT、缺少签名、篡改签名后的JSON。"
+      ],
+      "expectedResults": [
+        "在业务更新前拒绝，记录不改变；错误不能伪装code0。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-006",
+      "title": "不存在、0、负数和异常反馈ID",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A06",
+        "A08"
+      ],
+      "findingIds": [
+        "F05"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：提交0、-1、不存在ID、123abc、超长、数组。\n预期：非法格式参数错误；不存在与无权读取不得泄漏他人详情；无写库和发送。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "提交0、-1、不存在ID、123abc、超长、数组。"
+      ],
+      "expectedResults": [
+        "非法格式参数错误；不存在与无权读取不得泄漏他人详情；无写库和发送。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-007",
+      "title": "后台创建并发送正常链路",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A02",
+        "A04",
+        "A05",
+        "A10"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：使用专用玩家SteamID创建。\n预期：一条新记录，id字符串、sent=true/saved=true；send_status1，replay空、replay_timeNULL；消息4105及metadata.id一致。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "使用专用玩家SteamID创建。"
+      ],
+      "expectedResults": [
+        "一条新记录，id字符串、sent=true/saved=true；send_status1，replay空、replay_timeNULL；消息4105及metadata.id一致。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-008",
+      "title": "后台非法SteamID不得落库发送",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A02",
+        "A04"
+      ],
+      "findingIds": [
+        "F05"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：传空、0、负数、字母后缀、超长、数组及科学计数格式。\n预期：服务端严格拒绝；无新增行、无APJ消息。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "传空、0、负数、字母后缀、超长、数组及科学计数格式。"
+      ],
+      "expectedResults": [
+        "服务端严格拒绝；无新增行、无APJ消息。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-009",
+      "title": "APJ明确拒绝发送",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A04",
+        "A05",
+        "A10"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：在受控桩或故障环境使APJ明确返回false/非0。\n预期：反馈行保留send_status0；sent=false/saved=false；页面明确未成功，可按规则重发。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "在受控桩或故障环境使APJ明确返回false/非0。"
+      ],
+      "expectedResults": [
+        "反馈行保留send_status0；sent=false/saved=false；页面明确未成功，可按规则重发。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-010",
+      "title": "APJ已受理但响应超时",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A05",
+        "A03",
+        "A10"
+      ],
+      "findingIds": [
+        "F03"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：受控环境模拟APJ已发送但Core请求超时，再重发。\n预期：不得把未知送达当成功；核对是否重复通知并由产品确认允许性。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "受控环境模拟APJ已发送但Core请求超时，再重发。"
+      ],
+      "expectedResults": [
+        "不得把未知送达当成功；核对是否重复通知并由产品确认允许性。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-011",
+      "title": "发送成功但保存状态失败",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A05",
+        "A09"
+      ],
+      "findingIds": [
+        "F03"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：上游返回成功，故障注入使状态更新失败。\n预期：sent=true/saved=false，页面提示未知状态/重复风险；不得伪称完整成功。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "上游返回成功，故障注入使状态更新失败。"
+      ],
+      "expectedResults": [
+        "sent=true/saved=false，页面提示未知状态/重复风险；不得伪称完整成功。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-012",
+      "title": "两个管理员同时重发同反馈",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A03",
+        "A05"
+      ],
+      "findingIds": [
+        "F03"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：同id、send_status0并发2个请求。\n预期：按已确认幂等契约控制消息数；至少记录实际是否重复，不能只看最终status1。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "同id、send_status0并发2个请求。"
+      ],
+      "expectedResults": [
+        "按已确认幂等契约控制消息数；至少记录实际是否重复，不能只看最终status1。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-013",
+      "title": "已发送记录禁止重发",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A03",
+        "A05"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：对send_status1行直接提交resend。\n预期：无新消息，明确不可重发；状态保持。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "对send_status1行直接提交resend。"
+      ],
+      "expectedResults": [
+        "无新消息，明确不可重发；状态保持。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-014",
+      "title": "重复同意保持首次值",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：同一反馈先QQ1成功，再QQ2重复提交。\n预期：维持首次replay_time/QQ，返回幂等成功；没有额外业务行。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "同一反馈先QQ1成功，再QQ2重复提交。"
+      ],
+      "expectedResults": [
+        "维持首次replay_time/QQ，返回幂等成功；没有额外业务行。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-015",
+      "title": "客户端重复点击提交",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：连续点击同意，或并行从消息中心和IM触发。\n预期：单进程仅启动一次采集/上传/反馈，UI禁用且恢复正确。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "连续点击同意，或并行从消息中心和IM触发。"
+      ],
+      "expectedResults": [
+        "单进程仅启动一次采集/上传/反馈，UI禁用且恢复正确。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-016",
+      "title": "客户端拒绝不采集",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：打开4105弹窗并点拒绝。\n预期：无系统采集、无OSS对象、无反馈API；之后有效期内仍可重新同意。\n数据库断言：反馈状态不变。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "打开4105弹窗并点拒绝。"
+      ],
+      "expectedResults": [
+        "无系统采集、无OSS对象、无反馈API；之后有效期内仍可重新同意。"
+      ],
+      "databaseAssertions": [
+        "反馈状态不变。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-017",
+      "title": "七天过期临界点",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别测试创建后7天前1毫秒、恰好7天、超过7天及更早explicit过期时间。\n预期：未提交消息在边界失效，不能打开采集；已提交消息仍按约定提示。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "分别测试创建后7天前1毫秒、恰好7天、超过7天及更早explicit过期时间。"
+      ],
+      "expectedResults": [
+        "未提交消息在边界失效，不能打开采集；已提交消息仍按约定提示。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-018",
+      "title": "过期记录直调反馈API",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08"
+      ],
+      "findingIds": [
+        "F07"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：持有7天前反馈ID的所属账号直接签名反馈。\n预期：先按产品确认的服务端期限断言；当前代码无时间检查，记录观察结果。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "持有7天前反馈ID的所属账号直接签名反馈。"
+      ],
+      "expectedResults": [
+        "先按产品确认的服务端期限断言；当前代码无时间检查，记录观察结果。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-019",
+      "title": "已提交后重启客户端",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：完成提交，重启同一用户目录，分别点IM及消息中心通知。\n预期：恢复本地已提交状态，直接提示，不重新上传。\n数据库断言：不应再次写入首次反馈时间。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "完成提交，重启同一用户目录，分别点IM及消息中心通知。"
+      ],
+      "expectedResults": [
+        "恢复本地已提交状态，直接提示，不重新上传。"
+      ],
+      "databaseAssertions": [
+        "不应再次写入首次反馈时间。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-020",
+      "title": "跨设备或清缓存后的已提交反馈",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08"
+      ],
+      "findingIds": [
+        "F06"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：设备1成功，设备2/干净用户目录点同一反馈通知。\n预期：按产品确认范围验证权威已提交状态，记录是否重复采集上传。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "设备1成功，设备2/干净用户目录点同一反馈通知。"
+      ],
+      "expectedResults": [
+        "按产品确认范围验证权威已提交状态，记录是否重复采集上传。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-021",
+      "title": "切换账号不串反馈",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：采集/文件准备/上传/反馈各阶段切换账号。\n预期：旧账号任务停止或明确失败；不得将旧数据用新JWT提交或写入新用户目录。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "采集/文件准备/上传/反馈各阶段切换账号。"
+      ],
+      "expectedResults": [
+        "旧账号任务停止或明确失败；不得将旧数据用新JWT提交或写入新用户目录。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-022",
+      "title": "缺失或冲突metadata不得采集",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：缺metaData.id、flat与wrapped不同、超大不安全数字、损坏JSON。\n预期：明确提示无效消息，不用外层message.id补反馈ID，不采集。\n数据库断言：无变更。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "缺metaData.id、flat与wrapped不同、超大不安全数字、损坏JSON。"
+      ],
+      "expectedResults": [
+        "明确提示无效消息，不用外层message.id补反馈ID，不采集。"
+      ],
+      "databaseAssertions": [
+        "无变更。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-023",
+      "title": "消息类型与期限下发",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：APJ下发后检查消息列表及IM收到的字段。\n预期：messageType4105、目标SteamID、metaData.id、7天期限正确；不受4104等相邻类型影响。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "APJ下发后检查消息列表及IM收到的字段。"
+      ],
+      "expectedResults": [
+        "messageType4105、目标SteamID、metaData.id、7天期限正确；不受4104等相邻类型影响。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-024",
+      "title": "APJ id和SteamID参数边界",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [
+        "F05"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：缺省、空白、0、负数、非数字和超Long范围字符串。\n预期：一致可解释的参数错误，不出现未处理500，也不发送给错误玩家。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "缺省、空白、0、负数、非数字和超Long范围字符串。"
+      ],
+      "expectedResults": [
+        "一致可解释的参数错误，不出现未处理500，也不发送给错误玩家。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-025",
+      "title": "后台列表按SteamID查询",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A01",
+        "A07"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备A/B各两条，查A，再清空SteamID。\n预期：查A仅A；空条件是否允许列全量按已确认权限规则；total与items一致。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "准备A/B各两条，查A，再清空SteamID。"
+      ],
+      "expectedResults": [
+        "查A仅A；空条件是否允许列全量按已确认权限规则；total与items一致。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-026",
+      "title": "两组时间范围取交集",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A01",
+        "A07"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：设置创建时间和反馈时间区间，包含起止边界。\n预期：SQL条件为AND；起止包含，NULL反馈时间不误入反馈区间。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "设置创建时间和反馈时间区间，包含起止边界。"
+      ],
+      "expectedResults": [
+        "SQL条件为AND；起止包含，NULL反馈时间不误入反馈区间。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-027",
+      "title": "毫秒时间和时区一致",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A01",
+        "A07"
+      ],
+      "findingIds": [
+        "F08",
+        "F10"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：使用timestamp(3)边界、跨日、服务器/浏览器时区差异。\n预期：页面、请求和DB比较无毫秒截断或时区误差；日期控件格式被服务端正确解析。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "使用timestamp(3)边界、跨日、服务器/浏览器时区差异。"
+      ],
+      "expectedResults": [
+        "页面、请求和DB比较无毫秒截断或时区误差；日期控件格式被服务端正确解析。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-028",
+      "title": "非法日期、倒序区间、空字符串",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A01",
+        "A07"
+      ],
+      "findingIds": [
+        "F10"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：输入无效日期、start>end、仅单边界、空值。\n预期：明确校验或一致的单边查询，不产生SQL错误/无限查询。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "输入无效日期、start>end、仅单边界、空值。"
+      ],
+      "expectedResults": [
+        "明确校验或一致的单边查询，不产生SQL错误/无限查询。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-029",
+      "title": "分页缺失、0、负数与超大size",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A07"
+      ],
+      "findingIds": [
+        "F10"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：直调page缺失/0/-1，size缺失/0/-1/大值。\n预期：分页默认值与上限明确，返回结构稳定，不能产生负offset或无界查询。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "直调page缺失/0/-1，size缺失/0/-1/大值。"
+      ],
+      "expectedResults": [
+        "分页默认值与上限明确，返回结构稳定，不能产生负offset或无界查询。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-030",
+      "title": "后台action权限及绕过菜单直连",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A01",
+        "A02",
+        "A03",
+        "A12"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：无权限后台用户直接GET/POST路径，再使用有权限角色。\n预期：所有入口均执行后端权限检查；旧文件页面权限也正确。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "无权限后台用户直接GET/POST路径，再使用有权限角色。"
+      ],
+      "expectedResults": [
+        "所有入口均执行后端权限检查；旧文件页面权限也正确。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-031",
+      "title": "后台表单伪造及重复请求",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A02",
+        "A03"
+      ],
+      "findingIds": [
+        "F03"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：在隔离环境按既有后台安全机制验证跨站表单、重复网络请求。\n预期：沿用平台防伪造机制；不能仅靠confirm和按钮禁用保护写操作。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "在隔离环境按既有后台安全机制验证跨站表单、重复网络请求。"
+      ],
+      "expectedResults": [
+        "沿用平台防伪造机制；不能仅靠confirm和按钮禁用保护写操作。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-032",
+      "title": "结构化报告能否直接阅读",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A01",
+        "A12"
+      ],
+      "findingIds": [
+        "F02"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：上传有效report.json，后台尝试从该反馈查看报告。\n预期：能呈现系统、网络、文件、缺失项及反馈关联；所查分支疑似缺少入口。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "上传有效report.json，后台尝试从该反馈查看报告。"
+      ],
+      "expectedResults": [
+        "能呈现系统、网络、文件、缺失项及反馈关联；所查分支疑似缺少入口。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-033",
+      "title": "同用户两次反馈文件不串",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A12"
+      ],
+      "findingIds": [
+        "F04"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：A用户两条反馈各上传不同标记附件，分别点文件列表。\n预期：能识别当前反馈和报告，不把历史日志误认为本次附件。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "A用户两条反馈各上传不同标记附件，分别点文件列表。"
+      ],
+      "expectedResults": [
+        "能识别当前反馈和报告，不把历史日志误认为本次附件。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-034",
+      "title": "同用户超过1000个日志对象",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A12"
+      ],
+      "findingIds": [
+        "F04"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备隔离对象清单大于1000，检查新反馈对象的可见性。\n预期：明确排序/分页或提示，不能因旧上限隐藏当前报告。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "准备隔离对象清单大于1000，检查新反馈对象的可见性。"
+      ],
+      "expectedResults": [
+        "明确排序/分页或提示，不能因旧上限隐藏当前报告。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-035",
+      "title": "报告或附件不可读及签名URL过期",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A12"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：报告缺失、OSS权限拒绝、URL过期、部分附件缺失。\n预期：后台明确缺失/刷新链接，不把对象缺失当没有用户问题。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "报告缺失、OSS权限拒绝、URL过期、部分附件缺失。"
+      ],
+      "expectedResults": [
+        "后台明确缺失/刷新链接，不把对象缺失当没有用户问题。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-036",
+      "title": "旧日志发起在线与离线回归",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A13"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：专用账号分别在线/离线，从旧入口发起。\n预期：原在线链路和7天离线链路保持；新功能不改变旧日志语义。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "专用账号分别在线/离线，从旧入口发起。"
+      ],
+      "expectedResults": [
+        "原在线链路和7天离线链路保持；新功能不改变旧日志语义。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-037",
+      "title": "历史日志可视化入口回归",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A12"
+      ],
+      "findingIds": [
+        "F02"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：访问parsed_pvpClient日志与新的report.json。\n预期：旧解析入口正常；不把JSON错误套入旧日志解析。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "访问parsed_pvpClient日志与新的report.json。"
+      ],
+      "expectedResults": [
+        "旧解析入口正常；不把JSON错误套入旧日志解析。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-038",
+      "title": "只在同意后读取系统信息",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：打开弹窗、查看说明、拒绝、同意各阶段监测采集调用。\n预期：同意前无系统或文件采集；说明与实际采集范围对应。\n数据库断言：无同意时无反馈记录变更。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "打开弹窗、查看说明、拒绝、同意各阶段监测采集调用。"
+      ],
+      "expectedResults": [
+        "同意前无系统或文件采集；说明与实际采集范围对应。"
+      ],
+      "databaseAssertions": [
+        "无同意时无反馈记录变更。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-039",
+      "title": "缺失目录、无管理员权限和PowerShell不可用",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：模拟PAC/崩溃目录不存在、权限拒绝、PowerShell超时。\n预期：其他数据继续采集，明确unavailable/skipped，不填虚假正常值。\n数据库断言：无直接数据库写入，上传成功后才反馈。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "模拟PAC/崩溃目录不存在、权限拒绝、PowerShell超时。"
+      ],
+      "expectedResults": [
+        "其他数据继续采集，明确unavailable/skipped，不填虚假正常值。"
+      ],
+      "databaseAssertions": [
+        "无直接数据库写入，上传成功后才反馈。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-040",
+      "title": "文件数量、大小与时间预算",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [
+        "F09"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备超过20个文件、单dmp>20MB、log>10MB、总量>80MB和7天前文件。\n预期：按当前实现的预算选择并记录skipped；预算是否为正式规则需确认。\n数据库断言：核对report.json文件清单与真实对象。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "准备超过20个文件、单dmp>20MB、log>10MB、总量>80MB和7天前文件。"
+      ],
+      "expectedResults": [
+        "按当前实现的预算选择并记录skipped；预算是否为正式规则需确认。"
+      ],
+      "databaseAssertions": [
+        "核对report.json文件清单与真实对象。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-041",
+      "title": "上传时文件变化和符号链接",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：采集后替换/删除/扩容文件，加入符号链接和目录伪装。\n预期：重新lstat并跳过不安全对象，清单准确，无越界文件上传。\n数据库断言：核对OSS对象及报告skipped，不修改业务库。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "采集后替换/删除/扩容文件，加入符号链接和目录伪装。"
+      ],
+      "expectedResults": [
+        "重新lstat并跳过不安全对象，清单准确，无越界文件上传。"
+      ],
+      "databaseAssertions": [
+        "核对OSS对象及报告skipped，不修改业务库。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-042",
+      "title": "上传中断、报告JSON上传失败与重试",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11"
+      ],
+      "findingIds": [
+        "F01",
+        "F06"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别在附件上传、report.json上传、最后反馈时断网。\n预期：失败不标已提交；重试策略明确，不丢报告关联；统计重复对象。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "分别在附件上传、report.json上传、最后反馈时断网。"
+      ],
+      "expectedResults": [
+        "失败不标已提交；重试策略明确，不丢报告关联；统计重复对象。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-043",
+      "title": "同意时间语义核对",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A11",
+        "A08"
+      ],
+      "findingIds": [
+        "F08"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：记录点击同意、采集结束、上传结束、反馈接收和DB时间。\n预期：按确认语义断言replay_time，不混用首次同意与上传完成。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "记录点击同意、采集结束、上传结束、反馈接收和DB时间。"
+      ],
+      "expectedResults": [
+        "按确认语义断言replay_time，不混用首次同意与上传完成。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-044",
+      "title": "网络探测降级与采集范围确认",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [
+        "F09"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：DNS失败、HTTPS失败、Ping全丢及部分丢；核对10次Ping与DEMO50次。\n预期：报告包含实际结果而非误报正常；DEMO要求是否适用先确认。\n数据库断言：不依赖业务数据。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "DNS失败、HTTPS失败、Ping全丢及部分丢；核对10次Ping与DEMO50次。"
+      ],
+      "expectedResults": [
+        "报告包含实际结果而非误报正常；DEMO要求是否适用先确认。"
+      ],
+      "databaseAssertions": [
+        "不依赖业务数据。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-045",
+      "title": "VT-D状态缺失不得误报开启",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：有检测结果、无检测结果、反作弊未运行三种状态。\n预期：输出真实状态或unavailable，与报告说明一致。\n数据库断言：无业务库写入。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "有检测结果、无检测结果、反作弊未运行三种状态。"
+      ],
+      "expectedResults": [
+        "输出真实状态或unavailable，与报告说明一致。"
+      ],
+      "databaseAssertions": [
+        "无业务库写入。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-046",
+      "title": "DDL与实际部署表结构核对",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A04",
+        "A08",
+        "A07"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：只读SHOW CREATE TABLE/SHOW INDEX，对照JIRA字段、默认值和时间精度。\n预期：表位于pvp_bi，qq默认0、replay默认空、timestamp(3)、所有索引一致；未执行迁移。\n数据库断言：本轮待测试库登录后执行。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "只读SHOW CREATE TABLE/SHOW INDEX，对照JIRA字段、默认值和时间精度。"
+      ],
+      "expectedResults": [
+        "表位于pvp_bi，qq默认0、replay默认空、timestamp(3)、所有索引一致；未执行迁移。"
+      ],
+      "databaseAssertions": [
+        "本轮待测试库登录后执行。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-047",
+      "title": "真实索引计划与数据量验证",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A07"
+      ],
+      "findingIds": [
+        "F10"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：在测试数据规模下EXPLAIN SteamID+时间、纯时间、分页查询。\n预期：按实际选择性和耗时决定索引；不因缺复合索引直接判缺陷。\n数据库断言：EXPLAIN只读，记录索引选择和扫描估计。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "在测试数据规模下EXPLAIN SteamID+时间、纯时间、分页查询。"
+      ],
+      "expectedResults": [
+        "按实际选择性和耗时决定索引；不因缺复合索引直接判缺陷。"
+      ],
+      "databaseAssertions": [
+        "EXPLAIN只读，记录索引选择和扫描估计。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-048",
+      "title": "replay状态及首次QQ兼容",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A08"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备replay空、N、Y，qq0与大数字，分别重复回调。\n预期：空/N首次转Y，Y保持首次值；QQ不经JS浮点转换；异常存量状态有明确处理。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "准备replay空、N、Y，qq0与大数字，分别重复回调。"
+      ],
+      "expectedResults": [
+        "空/N首次转Y，Y保持首次值；QQ不经JS浮点转换；异常存量状态有明确处理。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-049",
+      "title": "markSendSuccess内部调用权限",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A09"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：检查普通玩家/外部客户端能否直接访问该内部RPC，及重复调用。\n预期：仅内部授权可调用；重复状态稳定，不允许伪造发送成功。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "检查普通玩家/外部客户端能否直接访问该内部RPC，及重复调用。"
+      ],
+      "expectedResults": [
+        "仅内部授权可调用；重复状态稳定，不允许伪造发送成功。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-050",
+      "title": "消息中心与IM历史编码回归",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：旧4104/掉落消息、双重编码历史记录、损坏other1、切账号期间拉取。\n预期：新4105逻辑不误过滤旧消息；坏JSON不阻断整批；账号隔离正确。\n数据库断言：仅测试本地消息缓存，不修改线上库。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "旧4104/掉落消息、双重编码历史记录、损坏other1、切账号期间拉取。"
+      ],
+      "expectedResults": [
+        "新4105逻辑不误过滤旧消息；坏JSON不阻断整批；账号隔离正确。"
+      ],
+      "databaseAssertions": [
+        "仅测试本地消息缓存，不修改线上库。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-051",
+      "title": "隐私说明和数据保留范围确认",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A12"
+      ],
+      "findingIds": [],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：核对设计说明、实际上传字段、后台下载权限和保留策略。\n预期：明确收集用途、人员范围、期限及删除流程；未确认规则列待确认而非假定。\n数据库断言：只核对权限和配置；不删除真实对象或数据。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "核对设计说明、实际上传字段、后台下载权限和保留策略。"
+      ],
+      "expectedResults": [
+        "明确收集用途、人员范围、期限及删除流程；未确认规则列待确认而非假定。"
+      ],
+      "databaseAssertions": [
+        "只核对权限和配置；不删除真实对象或数据。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-052",
+      "title": "端到端一次反馈闭环",
+      "priority": "P0",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A02",
+        "A04",
+        "A05",
+        "A10",
+        "A11",
+        "A08",
+        "A01",
+        "A12"
+      ],
+      "findingIds": [
+        "F01",
+        "F02",
+        "F04",
+        "F08"
+      ],
+      "detail": "前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：专用账号后台发起→4105→客户端同意→采集上传→反馈→后台查看报告和文件。\n预期：各阶段id、uid、报告和对象一致，sent/saved/replay语义正确，空QQ也可成功；全过程记录证据。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。",
+      "preconditions": [
+        "使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。"
+      ],
+      "steps": [
+        "专用账号后台发起→4105→客户端同意→采集上传→反馈→后台查看报告和文件。"
+      ],
+      "expectedResults": [
+        "各阶段id、uid、报告和对象一致，sent/saved/replay语义正确，空QQ也可成功；全过程记录证据。"
+      ],
+      "databaseAssertions": [
+        "按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。"
+      ],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。"
+      ]
+    },
+    {
+      "id": "TC-053",
+      "title": "Kafka同步及异步发送失败",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [
+        "F11"
+      ],
+      "detail": "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。",
+      "preconditions": [
+        "隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "steps": [
+        "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "expectedResults": [
+        "按本用例detail中的规则与已确认验收条件验证。"
+      ],
+      "databaseAssertions": [],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "未执行，不清理真实业务记录。"
+      ]
+    },
+    {
+      "id": "TC-054",
+      "title": "Kafka积压重放与业务幂等",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [
+        "F03",
+        "F11"
+      ],
+      "detail": "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。",
+      "preconditions": [
+        "隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "steps": [
+        "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "expectedResults": [
+        "按本用例detail中的规则与已确认验收条件验证。"
+      ],
+      "databaseAssertions": [],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "未执行，不清理真实业务记录。"
+      ]
+    },
+    {
+      "id": "TC-055",
+      "title": "消息预热后Redis缓存失效与未读数一致性",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [],
+      "detail": "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。",
+      "preconditions": [
+        "隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "steps": [
+        "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "expectedResults": [
+        "按本用例detail中的规则与已确认验收条件验证。"
+      ],
+      "databaseAssertions": [],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "未执行，不清理真实业务记录。"
+      ]
+    },
+    {
+      "id": "TC-056",
+      "title": "7天过期与缓存及跨机器本地状态一致性",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [
+        "F06",
+        "F07"
+      ],
+      "detail": "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。",
+      "preconditions": [
+        "隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "steps": [
+        "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "expectedResults": [
+        "按本用例detail中的规则与已确认验收条件验证。"
+      ],
+      "databaseAssertions": [],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "未执行，不清理真实业务记录。"
+      ]
+    },
+    {
+      "id": "TC-057",
+      "title": "OSS部分上传失败重试与反馈报告关联",
+      "priority": "P1",
+      "executionStatus": "NOT_RUN",
+      "automationReadiness": "NEEDS_ENVIRONMENT_AND_DATA",
+      "apiIds": [
+        "A10"
+      ],
+      "findingIds": [
+        "F04"
+      ],
+      "detail": "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。",
+      "preconditions": [
+        "隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "steps": [
+        "前置：隔离测试环境与专用账号，故障演练须在获准的中间件环境执行。步骤：针对标题场景模拟失败或边界，观察消息、缓存、报告及client_log_msg状态。预期：消息无静默丢失或重复副作用，缓存及时失效，反馈与报告匹配，失败可恢复。具体证据及检查范围：本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。 当前未执行，不清缓存、不写数据库或OSS。"
+      ],
+      "expectedResults": [
+        "按本用例detail中的规则与已确认验收条件验证。"
+      ],
+      "databaseAssertions": [],
+      "dataPreparation": [
+        "准备隔离账号、有效鉴权及用例要求的反馈状态；当前未造数。"
+      ],
+      "cleanup": [
+        "未执行，不清理真实业务记录。"
+      ]
+    }
+  ],
+  "repositorySnapshots": [
+    {
+      "projectId": "electron-pvp",
+      "baseRef": "master",
+      "targetRef": "PVP-13859",
+      "baseSha": "7b63b2f79fb5dc5bd8e84f2c10db7a8267c80904",
+      "targetSha": "56c3642417893abc6e1ccd955204a0b605c4fc0d",
+      "mergeBaseSha": "7b63b2f79fb5dc5bd8e84f2c10db7a8267c80904",
+      "changeFileCount": 46
+    },
+    {
+      "projectId": "pvpmatchapi.wmpvp.com",
+      "baseRef": "master",
+      "targetRef": "PVP-13859",
+      "baseSha": "6e6353a7a285c0a4f67b00a7fb0787281199bc76",
+      "targetSha": "221106eea333a313e79b3f290b0275944c8a9738",
+      "mergeBaseSha": "d3e434e257b19c128751a8fd9fd9f4d455665019",
+      "changeFileCount": 2
+    },
+    {
+      "projectId": "pvpmatchcore.wmpvp.com",
+      "baseRef": "master",
+      "targetRef": "PVP-13859",
+      "baseSha": "c84884518bb8aef36632688af7043fb36d7f3bf8",
+      "targetSha": "d37f7b33c9a4142e502dc0588d734c6a077080a9",
+      "mergeBaseSha": "bd87090259bb6b9e45ede02626fa665df0e8a947",
+      "changeFileCount": 3
+    },
+    {
+      "projectId": "pvpapj.wmpvp.com",
+      "baseRef": "master",
+      "targetRef": "PVP-13859",
+      "baseSha": "fd6a867d6c4224acc54f6067bafda7d42a3d9701",
+      "targetSha": "3d451cf754156d43c3b85580dd6c9410c7f664d5",
+      "mergeBaseSha": "beb8283020e09d544193ea1f3a577da0c0f299c3",
+      "changeFileCount": 5
+    },
+    {
+      "projectId": "pvpmatchadmin.wmpvp.com",
+      "baseRef": "master",
+      "targetRef": "PVP-13859",
+      "baseSha": "94cfd8ec79f8e40d068b37c173062ade1f0232c5",
+      "targetSha": "1905ed87d712fa9ec18b9a38c5460df1f64dc2a7",
+      "mergeBaseSha": "4870cc01930a55ff17f0db4ac9c51fa85d3bdb41",
+      "changeFileCount": 4
+    }
+  ],
+  "coverageGaps": [
+    "已核验 qa_new_pvp_bi.client_log_msg 的字段与索引；服务实际连接库映射、其他环境、存量状态分布及真实接口行为尚未核验。",
+    "未执行真实后台发消息、APJ 下发、签名登录 API、OSS 上传或业务数据库写操作；下列业务测试用例均为待执行。",
+    "本地 master 和 PVP-13859 引用未本次联网更新；实际部署提交及正式上线基线仍需测试环境确认。代码改动定位使用 merge-base(master,target)..target，避免将 master 独有提交误判为本单删除。",
+    "Figma 已打开并人工查看反馈流程画面，但未完整遍历全部节点、状态、原型连线和组件；设计覆盖为部分。",
+    "客户端为 Windows/Electron 功能，本次仅在当前机器运行隔离 Node 测试，未启动完整 Windows 客户端或验证真实系统采集。",
+    "Core/Admin 部分底层数据库/请求适配依赖未完整运行；权限、时间格式、分页等运行表现需测试环境验证。",
+    "Wiki DEMO 属参考方案，50 次 Ping、Traceroute、自动归因等是否属于本次验收范围需产品确认，未直接算作代码缺陷。"
+  ],
+  "reportMarkdown": "# PVP-13859 玩家反馈流程优化测试分析\n\n分析方式：人工浏览器读取 + 固定提交静态代码复核 + 隔离本地单元测试。范围为5个项目的本地固定提交。数据库已核验指定测试表字段与索引；真实API及中间件未实测，报告为部分分析。\n\n本次整理 11 项问题/风险/待确认项、13 个逻辑接口入口、57 条待执行业务用例。另实际运行34项隔离Node单元测试，34通过，不等于业务用例通过。\n\n## 原有逻辑与本次变化\n\n- 原后台 client-log：在线用户推送日志，离线用户走 OfflineMessage.pullClientLog；按SteamID列旧OSS日志。\n- 新后台 clientlogmsg：Core建反馈记录，APJ发送4105；页面显示发送/同意状态，文件列表继续复用旧入口。\n- 新客户端：消息中心与IM统一弹窗；同意后采集与上传，最后调用replay-log；本地保存已提交状态。\n- 新API/Core：JWT归属→反馈id权属→首次置Y/QQ/时间；重复Y幂等。\n- 公共影响：消息过期过滤、历史IM编码模块迁移、账号切换批次过滤、原日志上传目录；需回归其他系统消息和旧日志功能。\n\n## 代码版本\n\n|项目|master SHA|提测 SHA|共同祖先|改动文件数|\n|---|---|---|---|---|\n|electron-pvp|7b63b2f79fb5dc5bd8e84f2c10db7a8267c80904|56c3642417893abc6e1ccd955204a0b605c4fc0d|7b63b2f79fb5dc5bd8e84f2c10db7a8267c80904|46|\n|pvpmatchapi.wmpvp.com|6e6353a7a285c0a4f67b00a7fb0787281199bc76|221106eea333a313e79b3f290b0275944c8a9738|d3e434e257b19c128751a8fd9fd9f4d455665019|2|\n|pvpmatchcore.wmpvp.com|c84884518bb8aef36632688af7043fb36d7f3bf8|d37f7b33c9a4142e502dc0588d734c6a077080a9|bd87090259bb6b9e45ede02626fa665df0e8a947|3|\n|pvpapj.wmpvp.com|fd6a867d6c4224acc54f6067bafda7d42a3d9701|3d451cf754156d43c3b85580dd6c9410c7f664d5|beb8283020e09d544193ea1f3a577da0c0f299c3|5|\n|pvpmatchadmin.wmpvp.com|94cfd8ec79f8e40d068b37c173062ade1f0232c5|1905ed87d712fa9ec18b9a38c5460df1f64dc2a7|4870cc01930a55ff17f0db4ac9c51fa85d3bdb41|4|\n\n## 问题与风险\n\n### F01 QQ 选填与 API 强制大于 0 冲突，空 QQ 提交会被拒绝\n\n结论类型：已确认跨端契约不一致；优先级：P1\n证据：electron-pvp src/shared/client.error.report/protocol.js validateSubmission 允许空 qq；renderer 弹窗标选填；reporter.js:84-95 上传后 publish；API CheaterApiController.php:1281-1286 将空值转 0 并抛 102；JIRA 表 qq 默认 0。\n影响：用户不填 QQ 仍开始采集上传，最终 API 拒绝，客户端未记成功，可能再次采集上传。\n验证方法：合法账号、合法 4105/反馈 ID，QQ 留空、同意；观察请求 qq=\"\"，响应 code=102，反馈记录不变及 OSS 文件是否已产生。\n建议：统一 optional QQ 契约，后端允许缺省 0 并保留非空格式校验；先做端到端空 QQ 回归。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F02 后台新增页尚未提供需求所述的结构化报告查看入口\n\n结论类型：所查分支存在实现覆盖缺口；优先级：P1\n证据：admin 新 clientlogmsg.phtml 仅显示文件列表链接与重发；旧 client-log.phtml 仅列对象链接并对 parsed_pvpClient 特定日志提供可视化；客户端上传 report.json，所查改动无该 JSON 的报告渲染入口。\n影响：客服可下载文件但未必能直接阅读汇总报告；不能仅因存在 report.json 判定报告展示已交付。\n验证方法：完成一条反馈，后台按记录查找“查看报告”，验证能显示硬件、网络、异常、缺失项并关联该反馈。\n建议：确认是否另有已部署报告查看服务；若没有，补结构化报告视图及记录级关联。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F03 同一反馈的发送/重发缺少跨请求互斥，超时结果未知可能重复消息\n\n结论类型：并发及外部一致性风险；优先级：P1\n证据：Core ClientLogMsgModel::send 先读 send_status=0 再调用 APJ，随后条件更新发送状态；没有锁/发送中状态或可见上游幂等键。同一 id 可同时进入外部发送。页面已提示重发可能重复。\n影响：并发操作或上游已接受但本地状态未保存，可能产生多个 4105；客户端仅本机按反馈 ID 去重不能代替服务端幂等。\n验证方法：在隔离测试账号上并发重发同 id，并注入上游已接受/响应超时/标记失败，核对消息数和记录状态。\n建议：确认产品是否接受重复通知；若不接受，设计跨请求幂等和未知结果对账，不能仅加前端禁用按钮。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F04 文件列表按 SteamID 汇总，未按当前反馈记录隔离\n\n结论类型：记录追溯风险；优先级：P2\n证据：admin 文件列表 URL 只传 uid；旧 action 按 client/log/{uid}/ 取最多1000对象。客户端文件名包含 reportId/messageId，但后台未用这些字段筛选。\n影响：同一用户多次反馈或旧日志可能混在一起；客服难以确认本次报告附件，也可能因1000条上限漏看新文件。\n验证方法：同一测试账号制造两条反馈，分别上传不同标识，点击两行文件列表并核对是否混合。\n建议：增加反馈记录到 report.json/对象前缀的显式关联；明确列表分页/排序，旧日志入口继续保留。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F05 SteamID 与反馈 ID 直接整数强转，缺少严格十进制输入校验\n\n结论类型：静态参数校验缺口；优先级：P2\n证据：Core create、get、send、replay 使用 (int)；API id、qq 也直接 (int)。Admin ClientLogService::decimal 虽有严格校验实现但未调用。\n影响：非纯数字如 123abc 可能变为 123；超长数、负数、数组等行为不一致。前端 pattern 不能替代服务端校验。\n验证方法：对白名单测试数据验证字母后缀、科学计数、空白、超长、负数、数组；非法请求不得创建记录或发送消息。\n建议：复用严格十进制字符串校验，明确长度/范围，保留 SteamID 字符串；不要用生产账号验证。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F06 服务端缺少已提交状态查询回传，跨设备/清缓存可能再次采集上传\n\n结论类型：跨端状态同步风险；优先级：P2\n证据：客户端 status 只检查本地 submitted 和消息 metaData.submitted；当前 APJ 发送 metadata 只有 id，Core 无客户端已提交查询接口。Core replay 幂等在上传之后才发生。\n影响：换电脑或本地状态丢失时，已同意反馈仍可能重弹和重复上传；最终 replay 返回 true 不阻止之前的重复采集。\n验证方法：账号A在设备1提交，再在设备2或干净用户目录点击同报告通知；观察是否直接提示已提交，是否有新的 OSS 对象。\n建议：明确需求是否要求跨设备；若要求，在采集前向服务端查询权属和状态，或消息列表提供权威状态。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F07 7 天过期目前主要由客户端执行，过期反馈 API 是否拒绝需确认\n\n结论类型：契约待确认及服务端校验风险；优先级：P2\n证据：protocol.isExpired 校验消息时间；APJ TTL=7天；Core replay 仅校验 id/steam_id 权属，不检查 create_time 或有效期。\n影响：持有旧反馈 ID 的合法账号可能绕过过期消息 UI 直接反馈；但需求只明确消息过期，不足以直接判 API 过期规则违规。\n验证方法：准备创建时间7天前记录，使用所属测试账号经签名 API 提交，核对产品约定和实际结果。\n建议：先确认服务端有效期规则及宽限窗口；需要强制失效时由服务端校验并提供可区分错误码。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F08 首次同意时间与客户端实际回调阶段存在语义差异\n\n结论类型：数据语义待确认；优先级：P2\n证据：JIRA 注释 replay_time 是首次同意时间；reporter.js 在 collect/upload 完成之后才 publish；DAO 在 replay 接口收到时写 CURRENT_TIMESTAMP(3)。\n影响：采集上传较慢时字段接近上传后的回调时间，而非用户首次点击同意的时间；影响客服时序判断。\n验证方法：记录点击同意、上传结束、API开始和数据库 replay_time，观察差值；断网后重试继续核对。\n建议：确认字段意图：服务端接收确认时间、点击同意时间或上传完成时间；不同事件用不同字段，避免前端自由时间覆盖权威记录。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F09 DEMO 的采集项、网络探测参数和正式需求边界尚不明确\n\n结论类型：需求待确认；优先级：P2\n证据：Wiki DEMO含50次Ping、Traceroute、WER、Minidump归因、HTML；实际 collect 为10次Ping、DNS/HTTPS、部分硬件事件及 dmp 文件上传，不等同实现全部DEMO。\n影响：直接把DEMO全算必测会误报；完全忽略又可能漏验产品实际期望。\n验证方法：产品逐项确认正式采集清单、数量、文件时间/大小、报告格式及Windows支持范围，形成验收表。\n建议：将已确认规则与参考方案分开，已确认清单后再判定缺陷。\n边界：静态复核发现，不声称已在真实环境复现。\n\n### F10 分页、时间范围与大表查询缺少可见输入边界\n\n结论类型：稳定性及数据查询风险；优先级：P2\n证据：Core list 强转page但未限制>=1；size 未归一化/上限；日期直接进范围条件。Admin固定size10，但Core注册接口参数均可选。\n影响：空size、page0/负数、非法日期/倒序范围可能造成异常或无界查询；真实表现依赖底层DAO，暂不确认漏洞。\n验证方法：隔离数据验证page=0/-1、size缺失/0/负数/超大、非法及反向时间范围，观察SQL、响应和耗时。\n建议：服务端统一分页和时间校验，使用真实数据规模的 EXPLAIN 决定是否补复合索引，不凭DDL盲目加索引。\n边界：静态复核发现，不声称已在真实环境复现。\n\n## 必测接口与执行前置\n\n外部API需平台环境中的真实签名/JWT，后台需登录/action授权，Core/APJ需现有内部客户端认证。未提供任意可直接运行的生产请求或真实凭据。RPC名称不是可直接访问的HTTP路径。\n\n- A01 **GET /platform/clientlogmsg**（pvpmatchadmin）：后台列表。参数 steam_id/create_start/create_end/replay_start/replay_end/page；依赖后台登录、action权限。固定size10。检查响应HTML、过滤、XSS转义、分页和错误提示。\n- A02 **POST /platform/clientlogmsg?task=create**（pvpmatchadmin）：实际 task 是表单字段，不应只放query；steam_id十进制字符串。创建并发送，响应data.id/sent/saved；sent仅表示API受理。需专用测试账号，当前未执行。\n- A03 **POST /platform/clientlogmsg?task=resend**（pvpmatchadmin）：实际task和id为表单字段。仅发送未确认的记录可重发；测试并发及未知结果，不向真实玩家发送。\n- A04 **RPC ClientLogMsg.create**（pvpmatchcore）：新建反馈并调用send；steam_id必传；返回id/sent/saved。RPC HTTP传输与内部认证由现有Core适配器配置，不能当普通URL直接访问。\n- A05 **RPC ClientLogMsg.send**（pvpmatchcore）：id必传；读反馈、调用APJ、保存send_status；返回id/sent/saved。需受控内部入口。\n- A06 **RPC ClientLogMsg.get**（pvpmatchcore）：id必传；返回id/steam_id/qq/send_status/replay_status/replay_time/create_time/update_time；内部权限及错误不存在验证。\n- A07 **RPC ClientLogMsg.list**（pvpmatchcore）：steam_id/create_start/create_end/replay_start/replay_end/page/size可选；返回items,total；重点参数顺序、分页、日期交集和执行计划。\n- A08 **RPC ClientLogMsg.replay**（pvpmatchcore）：id/steam_id必传，qq可选；权属一致才能置Y；重复返回true不应覆盖首次时间与QQ；不是上传完成确认。\n- A09 **RPC ClientLogMsg.markSendSuccess**（pvpmatchcore）：id必传；条件send_status=0更新为1；已注册为内部RPC方法，不能由普通玩家任意调用。\n- A10 **POST /userMessage/sendClientLogMsg**（pvpapj）：JSON id/steamId为字符串且@NotBlank；发送类型4105、metadata.id、TTL7天。需复用APJ服务认证，不以浏览器用户登录代替。\n- A11 **POST /cheater-api/replay-log**（pvpmatchapi）：登录JWT+签名；JSON id=反馈ID而非消息ID、qq=字符串。成功code0，参数102，权属104；当前空qq被拒绝。签名参数和鉴权由平台环境配置。\n- A12 **GET /platform/client-log**（pvpmatchadmin）：旧文件列表，uid必需用于查询；按用户目录最多1000对象。新反馈入口依赖此旧逻辑，属于必回归。\n- A13 **POST /platform/client-log**（pvpmatchadmin）：旧发起入口：task=push_upload_log_msg,uid。区分在线消息与离线消息，防止新入口上线后旧链路退化。\n\n## 覆盖缺口\n\n- 测试库页面被 Chrome 客户端拦截；尚未登录数据库，JIRA DDL 与实际建表、索引、存量数据是否一致未核对。\n- 未执行真实后台发消息、APJ 下发、签名登录 API、OSS 上传或业务数据库写操作；下列业务测试用例均为待执行。\n- 本地 master 和 PVP-13859 引用未本次联网更新；实际部署提交及正式上线基线仍需测试环境确认。代码改动定位使用 merge-base(master,target)..target，避免将 master 独有提交误判为本单删除。\n- Figma 已打开并人工查看反馈流程画面，但未完整遍历全部节点、状态、原型连线和组件；设计覆盖为部分。\n- 客户端为 Windows/Electron 功能，本次仅在当前机器运行隔离 Node 测试，未启动完整 Windows 客户端或验证真实系统采集。\n- Core/Admin 部分底层数据库/请求适配依赖未完整运行；权限、时间格式、分页等运行表现需测试环境验证。\n- Wiki DEMO 属参考方案，50 次 Ping、Traceroute、自动归因等是否属于本次验收范围需产品确认，未直接算作代码缺陷。\n\n## 测试用例\n\n### TC-001 [P0] QQ留空同意上传，应按选填契约成功\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：获取合法4105，QQ留空，同意并观察整个采集上传和反馈过程。\n预期：应code0、replay_status=Y、qq=0；当前静态代码预计返回102，重点复现。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-002 [P0] 正常QQ提交，反馈ID与外层消息ID正确区分\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：使用message.id不同于metaData.id的通知，输入有效QQ提交。\n预期：只更新metaData.id对应记录；成功后再点只提示已提交。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-003 [P1] QQ非法格式与边界\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别输入字母、负数、4位、15位、16位及空白；客户端和直调API分别检查。\n预期：空值按选填允许，非空范围由产品确认后两端一致；不得靠整数强转接受字母后缀。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-004 [P0] 登录账号与反馈所有者不一致\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：账号B提交账号A的反馈ID，携带B合法签名和JWT。\n预期：返回104或明确无权限；A记录、QQ和时间不改变，不允许B采集上传A任务。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-005 [P0] 未登录、失效JWT与签名错误\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别缺少JWT、过期JWT、缺少签名、篡改签名后的JSON。\n预期：在业务更新前拒绝，记录不改变；错误不能伪装code0。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-006 [P1] 不存在、0、负数和异常反馈ID\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：提交0、-1、不存在ID、123abc、超长、数组。\n预期：非法格式参数错误；不存在与无权读取不得泄漏他人详情；无写库和发送。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-007 [P0] 后台创建并发送正常链路\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：使用专用玩家SteamID创建。\n预期：一条新记录，id字符串、sent=true/saved=true；send_status1，replay空、replay_timeNULL；消息4105及metadata.id一致。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-008 [P1] 后台非法SteamID不得落库发送\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：传空、0、负数、字母后缀、超长、数组及科学计数格式。\n预期：服务端严格拒绝；无新增行、无APJ消息。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-009 [P0] APJ明确拒绝发送\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：在受控桩或故障环境使APJ明确返回false/非0。\n预期：反馈行保留send_status0；sent=false/saved=false；页面明确未成功，可按规则重发。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-010 [P0] APJ已受理但响应超时\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：受控环境模拟APJ已发送但Core请求超时，再重发。\n预期：不得把未知送达当成功；核对是否重复通知并由产品确认允许性。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-011 [P0] 发送成功但保存状态失败\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：上游返回成功，故障注入使状态更新失败。\n预期：sent=true/saved=false，页面提示未知状态/重复风险；不得伪称完整成功。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-012 [P0] 两个管理员同时重发同反馈\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：同id、send_status0并发2个请求。\n预期：按已确认幂等契约控制消息数；至少记录实际是否重复，不能只看最终status1。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-013 [P1] 已发送记录禁止重发\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：对send_status1行直接提交resend。\n预期：无新消息，明确不可重发；状态保持。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-014 [P0] 重复同意保持首次值\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：同一反馈先QQ1成功，再QQ2重复提交。\n预期：维持首次replay_time/QQ，返回幂等成功；没有额外业务行。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-015 [P1] 客户端重复点击提交\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：连续点击同意，或并行从消息中心和IM触发。\n预期：单进程仅启动一次采集/上传/反馈，UI禁用且恢复正确。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-016 [P0] 客户端拒绝不采集\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：打开4105弹窗并点拒绝。\n预期：无系统采集、无OSS对象、无反馈API；之后有效期内仍可重新同意。\n数据库断言：反馈状态不变。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-017 [P0] 七天过期临界点\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别测试创建后7天前1毫秒、恰好7天、超过7天及更早explicit过期时间。\n预期：未提交消息在边界失效，不能打开采集；已提交消息仍按约定提示。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-018 [P1] 过期记录直调反馈API\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：持有7天前反馈ID的所属账号直接签名反馈。\n预期：先按产品确认的服务端期限断言；当前代码无时间检查，记录观察结果。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-019 [P0] 已提交后重启客户端\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：完成提交，重启同一用户目录，分别点IM及消息中心通知。\n预期：恢复本地已提交状态，直接提示，不重新上传。\n数据库断言：不应再次写入首次反馈时间。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-020 [P1] 跨设备或清缓存后的已提交反馈\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：设备1成功，设备2/干净用户目录点同一反馈通知。\n预期：按产品确认范围验证权威已提交状态，记录是否重复采集上传。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-021 [P0] 切换账号不串反馈\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：采集/文件准备/上传/反馈各阶段切换账号。\n预期：旧账号任务停止或明确失败；不得将旧数据用新JWT提交或写入新用户目录。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-022 [P1] 缺失或冲突metadata不得采集\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：缺metaData.id、flat与wrapped不同、超大不安全数字、损坏JSON。\n预期：明确提示无效消息，不用外层message.id补反馈ID，不采集。\n数据库断言：无变更。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-023 [P0] 消息类型与期限下发\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：APJ下发后检查消息列表及IM收到的字段。\n预期：messageType4105、目标SteamID、metaData.id、7天期限正确；不受4104等相邻类型影响。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-024 [P1] APJ id和SteamID参数边界\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：缺省、空白、0、负数、非数字和超Long范围字符串。\n预期：一致可解释的参数错误，不出现未处理500，也不发送给错误玩家。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-025 [P0] 后台列表按SteamID查询\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备A/B各两条，查A，再清空SteamID。\n预期：查A仅A；空条件是否允许列全量按已确认权限规则；total与items一致。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-026 [P1] 两组时间范围取交集\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：设置创建时间和反馈时间区间，包含起止边界。\n预期：SQL条件为AND；起止包含，NULL反馈时间不误入反馈区间。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-027 [P1] 毫秒时间和时区一致\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：使用timestamp(3)边界、跨日、服务器/浏览器时区差异。\n预期：页面、请求和DB比较无毫秒截断或时区误差；日期控件格式被服务端正确解析。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-028 [P1] 非法日期、倒序区间、空字符串\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：输入无效日期、start>end、仅单边界、空值。\n预期：明确校验或一致的单边查询，不产生SQL错误/无限查询。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-029 [P1] 分页缺失、0、负数与超大size\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：直调page缺失/0/-1，size缺失/0/-1/大值。\n预期：分页默认值与上限明确，返回结构稳定，不能产生负offset或无界查询。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-030 [P0] 后台action权限及绕过菜单直连\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：无权限后台用户直接GET/POST路径，再使用有权限角色。\n预期：所有入口均执行后端权限检查；旧文件页面权限也正确。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-031 [P1] 后台表单伪造及重复请求\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：在隔离环境按既有后台安全机制验证跨站表单、重复网络请求。\n预期：沿用平台防伪造机制；不能仅靠confirm和按钮禁用保护写操作。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-032 [P0] 结构化报告能否直接阅读\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：上传有效report.json，后台尝试从该反馈查看报告。\n预期：能呈现系统、网络、文件、缺失项及反馈关联；所查分支疑似缺少入口。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-033 [P0] 同用户两次反馈文件不串\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：A用户两条反馈各上传不同标记附件，分别点文件列表。\n预期：能识别当前反馈和报告，不把历史日志误认为本次附件。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-034 [P1] 同用户超过1000个日志对象\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备隔离对象清单大于1000，检查新反馈对象的可见性。\n预期：明确排序/分页或提示，不能因旧上限隐藏当前报告。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-035 [P1] 报告或附件不可读及签名URL过期\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：报告缺失、OSS权限拒绝、URL过期、部分附件缺失。\n预期：后台明确缺失/刷新链接，不把对象缺失当没有用户问题。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-036 [P1] 旧日志发起在线与离线回归\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：专用账号分别在线/离线，从旧入口发起。\n预期：原在线链路和7天离线链路保持；新功能不改变旧日志语义。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-037 [P1] 历史日志可视化入口回归\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：访问parsed_pvpClient日志与新的report.json。\n预期：旧解析入口正常；不把JSON错误套入旧日志解析。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-038 [P0] 只在同意后读取系统信息\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：打开弹窗、查看说明、拒绝、同意各阶段监测采集调用。\n预期：同意前无系统或文件采集；说明与实际采集范围对应。\n数据库断言：无同意时无反馈记录变更。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-039 [P1] 缺失目录、无管理员权限和PowerShell不可用\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：模拟PAC/崩溃目录不存在、权限拒绝、PowerShell超时。\n预期：其他数据继续采集，明确unavailable/skipped，不填虚假正常值。\n数据库断言：无直接数据库写入，上传成功后才反馈。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-040 [P1] 文件数量、大小与时间预算\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备超过20个文件、单dmp>20MB、log>10MB、总量>80MB和7天前文件。\n预期：按当前实现的预算选择并记录skipped；预算是否为正式规则需确认。\n数据库断言：核对report.json文件清单与真实对象。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-041 [P1] 上传时文件变化和符号链接\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：采集后替换/删除/扩容文件，加入符号链接和目录伪装。\n预期：重新lstat并跳过不安全对象，清单准确，无越界文件上传。\n数据库断言：核对OSS对象及报告skipped，不修改业务库。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-042 [P0] 上传中断、报告JSON上传失败与重试\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：分别在附件上传、report.json上传、最后反馈时断网。\n预期：失败不标已提交；重试策略明确，不丢报告关联；统计重复对象。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-043 [P1] 同意时间语义核对\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：记录点击同意、采集结束、上传结束、反馈接收和DB时间。\n预期：按确认语义断言replay_time，不混用首次同意与上传完成。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-044 [P1] 网络探测降级与采集范围确认\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：DNS失败、HTTPS失败、Ping全丢及部分丢；核对10次Ping与DEMO50次。\n预期：报告包含实际结果而非误报正常；DEMO要求是否适用先确认。\n数据库断言：不依赖业务数据。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-045 [P1] VT-D状态缺失不得误报开启\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：有检测结果、无检测结果、反作弊未运行三种状态。\n预期：输出真实状态或unavailable，与报告说明一致。\n数据库断言：无业务库写入。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-046 [P0] DDL与实际部署表结构核对\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：只读SHOW CREATE TABLE/SHOW INDEX，对照JIRA字段、默认值和时间精度。\n预期：表位于pvp_bi，qq默认0、replay默认空、timestamp(3)、所有索引一致；未执行迁移。\n数据库断言：本轮待测试库登录后执行。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-047 [P1] 真实索引计划与数据量验证\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：在测试数据规模下EXPLAIN SteamID+时间、纯时间、分页查询。\n预期：按实际选择性和耗时决定索引；不因缺复合索引直接判缺陷。\n数据库断言：EXPLAIN只读，记录索引选择和扫描估计。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-048 [P1] replay状态及首次QQ兼容\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：准备replay空、N、Y，qq0与大数字，分别重复回调。\n预期：空/N首次转Y，Y保持首次值；QQ不经JS浮点转换；异常存量状态有明确处理。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-049 [P1] markSendSuccess内部调用权限\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：检查普通玩家/外部客户端能否直接访问该内部RPC，及重复调用。\n预期：仅内部授权可调用；重复状态稳定，不允许伪造发送成功。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-050 [P1] 消息中心与IM历史编码回归\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：旧4104/掉落消息、双重编码历史记录、损坏other1、切账号期间拉取。\n预期：新4105逻辑不误过滤旧消息；坏JSON不阻断整批；账号隔离正确。\n数据库断言：仅测试本地消息缓存，不修改线上库。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-051 [P1] 隐私说明和数据保留范围确认\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：核对设计说明、实际上传字段、后台下载权限和保留策略。\n预期：明确收集用途、人员范围、期限及删除流程；未确认规则列待确认而非假定。\n数据库断言：只核对权限和配置；不删除真实对象或数据。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n### TC-052 [P0] 端到端一次反馈闭环\n\n前置：使用隔离测试环境、专用测试账号；请求需配置正确的鉴权和签名。\n步骤：专用账号后台发起→4105→客户端同意→采集上传→反馈→后台查看报告和文件。\n预期：各阶段id、uid、报告和对象一致，sent/saved/replay语义正确，空QQ也可成功；全过程记录证据。\n数据库断言：按准备的反馈 id 只读查询 client_log_msg；本轮未执行数据库查询。\n清理：仅清理经授权的测试账号记录/对象；未提供可直接执行的删除操作。\n状态：待执行，不是测试通过。\n\n\n## 数据库实际核验补充\n\n2026-10-27 通过用户已登录 Chrome 的 phpMyAdmin 结构页核验 mysql.secdev.com / qa_new_pvp_bi.client_log_msg：8 个字段及 PRIMARY(id)、steam_id_idx、create_time_idx、replay_time_idx 与 JIRA DDL 相符；qq 为 unsigned bigint、默认 0，注释 Optional QQ; 0 means not provided；replay_time 为可空 timestamp(3)，注释 First consent time; not upload completion。仅核验该库该表，尚未确认部署服务实际连接库映射，未读取个人明细、未执行写入、未核验其他环境。\n\n实际表结构进一步支持“QQ 选填与 API 拒绝空值”的契约冲突；不能因此认定接口运行已验证。表中没有报告路径或上传完成状态字段，结合代码，需要继续核验报告与文件的关联以及“同意时间”展示含义。\n\n\n## 中间件与缓存补充\n\n本次功能复用 Redis 消息列表/未读缓存、Kafka 消息队列及 OSS 文件存储；客户端另有本地提交状态。未发现 ClientLogMsg Core 新增专用 Redis 键或分布式锁。UserMessageMapper 使用 UserMessage 缓存，list_<uid>、unread_list_<uid>，插入/已读/状态修改声明缓存失效；RedisConfig默认管理器前缀APJ:、默认60分钟TTL，实际部署配置及消费端失效仍需验证。消息7天有效期不是Redis TTL。新增sendClientLogMsg调用sendMultiMsg，经KafkaService异步发送，无等待确认；同步异常只记录日志，上层仍可能返回true并标send_status=1。消费者实现未核验。需要覆盖Kafka失败/积压/重放、Redis预热后列表刷新与未读数一致性、7天边界、OSS部分失败和本地状态跨机器一致性。本次未连接Redis/Kafka/OSS实测或清缓存。\n\n新增F11及TC-053至TC-057：共11项问题与风险、13项逻辑接口、57条待执行业务用例。\n",
+  "databaseVerification": {
+    "status": "SCHEMA_VERIFIED",
+    "database": "qa_new_pvp_bi",
+    "table": "client_log_msg",
+    "detail": "2026-10-27 通过用户已登录 Chrome 的 phpMyAdmin 结构页核验 mysql.secdev.com / qa_new_pvp_bi.client_log_msg：8 个字段及 PRIMARY(id)、steam_id_idx、create_time_idx、replay_time_idx 与 JIRA DDL 相符；qq 为 unsigned bigint、默认 0，注释 Optional QQ; 0 means not provided；replay_time 为可空 timestamp(3)，注释 First consent time; not upload completion。仅核验该库该表，尚未确认部署服务实际连接库映射，未读取个人明细、未执行写入、未核验其他环境。",
+    "dataRead": false,
+    "writesExecuted": false
+  },
+  "resultFormatVersion": "1.1",
+  "businessFlow": {
+    "title": "玩家反馈诊断闭环",
+    "summary": "后台发起→站内信→用户授权→采集上传→反馈入库→后台排查。",
+    "steps": [
+      {
+        "id": "FLOW-01",
+        "title": "后台发起反馈",
+        "projectIds": [
+          "pvpmatchadmin.wmpvp.com"
+        ],
+        "description": "输入SteamID创建反馈请求。",
+        "apiIds": [
+          "A02"
+        ],
+        "reads": [],
+        "writes": [
+          "client_log_msg"
+        ],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-02",
+        "title": "Core创建记录并发送",
+        "projectIds": [
+          "pvpmatchcore.wmpvp.com"
+        ],
+        "description": "创建本单反馈ID，调用APJ；发送状态表示受理，不表示送达。",
+        "apiIds": [
+          "A04",
+          "A05",
+          "A09"
+        ],
+        "reads": [
+          "client_log_msg"
+        ],
+        "writes": [
+          "client_log_msg.send_status"
+        ],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-03",
+        "title": "APJ发布消息",
+        "projectIds": [
+          "pvpapj.wmpvp.com"
+        ],
+        "description": "构造4105站内信和metaData.id，经Kafka异步发布。",
+        "apiIds": [
+          "A10"
+        ],
+        "reads": [],
+        "writes": [
+          "Kafka消息事件"
+        ],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-04",
+        "title": "客户端接收并授权",
+        "projectIds": [
+          "electron-pvp"
+        ],
+        "description": "消息中心或IM打开授权弹窗，QQ为选填；拒绝不采集。",
+        "apiIds": [],
+        "reads": [
+          "4105 metadata",
+          "本地提交状态"
+        ],
+        "writes": [],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-05",
+        "title": "采集诊断信息",
+        "projectIds": [
+          "electron-pvp"
+        ],
+        "description": "用户同意后采集受限文件及系统、网络信息。",
+        "apiIds": [],
+        "reads": [
+          "本机日志和系统信息"
+        ],
+        "writes": [],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-06",
+        "title": "上传文件与报告",
+        "projectIds": [
+          "electron-pvp"
+        ],
+        "description": "上传采集文件和report.json到OSS。",
+        "apiIds": [],
+        "reads": [],
+        "writes": [
+          "OSS对象"
+        ],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-07",
+        "title": "调用反馈API",
+        "projectIds": [
+          "pvpmatchapi.wmpvp.com",
+          "electron-pvp"
+        ],
+        "description": "上传后携带登录签名提交反馈ID和QQ。",
+        "apiIds": [
+          "A11"
+        ],
+        "reads": [
+          "JWT登录账号"
+        ],
+        "writes": [],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-08",
+        "title": "Core保存同意状态",
+        "projectIds": [
+          "pvpmatchcore.wmpvp.com"
+        ],
+        "description": "校验反馈权属，首次设置Y、QQ与反馈时间。",
+        "apiIds": [
+          "A08"
+        ],
+        "reads": [
+          "client_log_msg"
+        ],
+        "writes": [
+          "client_log_msg.replay_status",
+          "client_log_msg.qq",
+          "client_log_msg.replay_time"
+        ],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      },
+      {
+        "id": "FLOW-09",
+        "title": "后台查询报告与附件",
+        "projectIds": [
+          "pvpmatchadmin.wmpvp.com"
+        ],
+        "description": "查询反馈记录并复用旧文件列表；结构化报告入口存在F02覆盖缺口。",
+        "apiIds": [
+          "A01",
+          "A12"
+        ],
+        "reads": [
+          "client_log_msg",
+          "OSS对象"
+        ],
+        "writes": [],
+        "evidenceIds": [
+          "SRC-CODE"
+        ]
+      }
+    ],
+    "branches": [
+      {
+        "id": "BR-01",
+        "condition": "用户拒绝授权",
+        "steps": [
+          "不采集",
+          "不上传",
+          "不调用反馈API"
+        ],
+        "expectedBehavior": "有效期内可再次打开；无隐式采集。",
+        "findingIds": [],
+        "caseIds": [
+          "TC-016",
+          "TC-038"
+        ]
+      },
+      {
+        "id": "BR-02",
+        "condition": "QQ留空同意",
+        "steps": [
+          "采集上传",
+          "提交空QQ"
+        ],
+        "expectedBehavior": "契约应允许；当前API拒绝是F01静态不一致。",
+        "findingIds": [
+          "F01"
+        ],
+        "caseIds": [
+          "TC-001"
+        ]
+      },
+      {
+        "id": "BR-03",
+        "condition": "消息过期或已提交",
+        "steps": [
+          "检查有效期与提交状态"
+        ],
+        "expectedBehavior": "按正式规则提示；服务端过期边界和跨设备状态仍待确认。",
+        "findingIds": [
+          "F06",
+          "F07"
+        ],
+        "caseIds": [
+          "TC-017",
+          "TC-018",
+          "TC-020"
+        ]
+      },
+      {
+        "id": "BR-04",
+        "condition": "消息发送或上传失败",
+        "steps": [
+          "区分受理和送达",
+          "记录失败",
+          "受控重试"
+        ],
+        "expectedBehavior": "不伪装完整成功；核验补偿、重复消息及孤立附件。",
+        "findingIds": [
+          "F03",
+          "F11"
+        ],
+        "caseIds": [
+          "TC-010",
+          "TC-012",
+          "TC-042",
+          "TC-053",
+          "TC-054",
+          "TC-057"
+        ]
+      }
+    ],
+    "note": "主链路由固定提交代码与需求综合整理；描述中保留实现缺口及未确认规则，不代表端到端已执行。"
+  },
+  "dependencies": [
+    {
+      "id": "DEP-1",
+      "name": "MySQL",
+      "type": "database",
+      "usage": "反馈状态落库；qa_new_pvp_bi.client_log_msg字段索引已只读核验，运行库映射待确认。",
+      "verificationStatus": "STATIC_ONLY",
+      "risks": [
+        "发送/同意状态语义和并发一致性"
+      ]
+    },
+    {
+      "id": "DEP-2",
+      "name": "Redis",
+      "type": "cache",
+      "usage": "既有消息列表、未读和统计缓存。",
+      "verificationStatus": "STATIC_ONLY",
+      "risks": [
+        "生产者与消费端失效逻辑、7天消息过期一致性待实测"
+      ]
+    },
+    {
+      "id": "DEP-3",
+      "name": "Kafka",
+      "type": "queue",
+      "usage": "4105站内信异步分发。",
+      "verificationStatus": "STATIC_ONLY",
+      "risks": [
+        "发送异常传播、消费积压和幂等"
+      ]
+    },
+    {
+      "id": "DEP-4",
+      "name": "OSS",
+      "type": "objectStorage",
+      "usage": "诊断文件及report.json存储。",
+      "verificationStatus": "STATIC_ONLY",
+      "risks": [
+        "部分上传、重试及按反馈ID追溯"
+      ]
+    },
+    {
+      "id": "DEP-5",
+      "name": "客户端本地状态",
+      "type": "localState",
+      "usage": "本机保存已提交标记。",
+      "verificationStatus": "STATIC_ONLY",
+      "risks": [
+        "切账号、换机器及清缓存后的重复采集"
+      ]
+    }
+  ],
+  "requirementQuestions": [
+    {
+      "id": "Q-F06",
+      "question": "服务端缺少已提交状态查询回传，跨设备/清缓存可能再次采集上传",
+      "impact": "换电脑或本地状态丢失时，已同意反馈仍可能重弹和重复上传；最终 replay 返回 true 不阻止之前的重复采集。",
+      "relatedFindingIds": [
+        "F06"
+      ]
+    },
+    {
+      "id": "Q-F07",
+      "question": "7 天过期目前主要由客户端执行，过期反馈 API 是否拒绝需确认",
+      "impact": "持有旧反馈 ID 的合法账号可能绕过过期消息 UI 直接反馈；但需求只明确消息过期，不足以直接判 API 过期规则违规。",
+      "relatedFindingIds": [
+        "F07"
+      ]
+    },
+    {
+      "id": "Q-F08",
+      "question": "首次同意时间与客户端实际回调阶段存在语义差异",
+      "impact": "采集上传较慢时字段接近上传后的回调时间，而非用户首次点击同意的时间；影响客服时序判断。",
+      "relatedFindingIds": [
+        "F08"
+      ]
+    },
+    {
+      "id": "Q-F09",
+      "question": "DEMO 的采集项、网络探测参数和正式需求边界尚不明确",
+      "impact": "直接把DEMO全算必测会误报；完全忽略又可能漏验产品实际期望。",
+      "relatedFindingIds": [
+        "F09"
+      ]
+    }
+  ],
+  "executionRecords": [
+    {
+      "id": "EXEC-01",
+      "description": "隔离Node单元测试",
+      "status": "PASSED",
+      "evidence": "固定客户端提交protocol/reporter/collect合成文件与桩测试34项通过；不等于业务联调通过。"
+    }
+  ]
+}

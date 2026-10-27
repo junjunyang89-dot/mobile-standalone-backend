@@ -87,7 +87,7 @@ public class FailureDiagnosisRunner {
         }
         DiagnosisModelClient client = modelClientProvider.getIfAvailable();
         if (client == null) {
-            log.warn("失败归因已启用，但没有可用的模型实现——请检查 diagnosis.ai.provider（qwen / gemini）");
+            log.warn("失败归因已启用，但没有可用的模型实现——请检查 diagnosis.ai.provider（qwen / gemini / openai）");
             return;
         }
         log.info("失败归因已启用：client={}, model={}, 密钥已配置={}, 上传截图={}张, 环境问题自动重跑={}",
@@ -124,7 +124,7 @@ public class FailureDiagnosisRunner {
         }
         DiagnosisModelClient client = modelClientProvider.getIfAvailable();
         if (client == null) {
-            log.warn("归因已开启但没有可用的模型实现，请检查 diagnosis.ai.provider 取值（qwen / gemini）");
+            log.warn("归因已开启但没有可用的模型实现，请检查 diagnosis.ai.provider 取值（qwen / gemini / openai）");
             return;
         }
         if (!client.isConfigured()) {

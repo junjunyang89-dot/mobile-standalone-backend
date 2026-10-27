@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -20,7 +21,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * 千问通用对话客户端（DashScope 兼容 OpenAI 接口），文本 + 可选图片。
+ * 通用对话客户端，文本 + 可选图片。默认走千问（DashScope 兼容 OpenAI 接口），
+ * {@code ai.chat.provider=openai} 时改走 ChatGPT——两家是同一套接口，只换地址、密钥、模型和代理。
  * <p>
  * 抽出来是因为归因和用例生成都要调同一个模型，而这里唯一有技术含量的部分——
  * <b>必须走流式</b>——不该被抄第二遍：推理模型在长提示词上会先生成大量推理 token，
@@ -50,16 +52,60 @@ public class QwenChatClient {
     @Value("${diagnosis.ai.timeout-seconds:300}")
     private int timeoutSeconds;
 
+    /** qwen | openai */
+    @Value("${ai.chat.provider:qwen}")
+    private String provider;
+
+    @Autowired(required = false)
+    private OpenAiSettings openAi;
+
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(20))
             .build();
 
+    public boolean usesOpenAi() {
+        return provider != null && "openai".equalsIgnoreCase(provider.trim()) && openAi != null;
+    }
+
+    /** 报错和页面提示里用的供应商名 */
+    public String providerLabel() {
+        return usesOpenAi() ? "ChatGPT" : "千问";
+    }
+
+    /** 没配密钥时给人看的提示，按当前供应商指到该填的那一项 */
+    public String notConfiguredMessage() {
+        return usesOpenAi()
+                ? "ChatGPT 没配：application.yml 里 ai.openai.api-key 填上密钥"
+                : "千问没配：application.yml 里 diagnosis.ai.api-key 填上密钥";
+    }
+
     public boolean isConfigured() {
+        if (usesOpenAi()) {
+            return openAi.isConfigured();
+        }
         return apiKey != null && !apiKey.isBlank();
     }
 
     public String modelId() {
+        if (usesOpenAi()) {
+            return openAi.model();
+        }
         return model == null || model.isBlank() ? DEFAULT_MODEL : model.trim();
+    }
+
+    /**
+     * 调用方指定的模型（如 {@code ai-case.model}）多半是千问的名字；切到 ChatGPT 后原样发过去必然 404，
+     * 所以千问系的名字在这里丢掉，退回 ChatGPT 的默认模型。
+     */
+    String effectiveModel(String modelOverride) {
+        if (modelOverride == null || modelOverride.isBlank()) {
+            return modelId();
+        }
+        String m = modelOverride.trim();
+        if (usesOpenAi() && m.toLowerCase().startsWith("qwen")) {
+            return modelId();
+        }
+        return m;
     }
 
     /** 一张图：原始字节 + MIME，转成 data URI 发出去 */
@@ -82,22 +128,31 @@ public class QwenChatClient {
     /** @param modelOverride 这一轮换个模型；空则用配置的 */
     public String chat(String prompt, List<Image> images, String modelOverride) throws Exception {
         if (!isConfigured()) {
-            throw new IllegalStateException(
-                    "千问未配置：请在 application.yml 的 diagnosis.ai.api-key 填入密钥");
+            throw new IllegalStateException(notConfiguredMessage());
         }
+        boolean openai = usesOpenAi();
+        String base = openai ? openAi.apiBase() : trimSlash(apiBase);
+        String key = openai ? openAi.apiKey() : apiKey;
+        HttpClient client = openai ? openAi.http() : http;
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(trimSlash(apiBase) + "/chat/completions"))
+                .uri(URI.create(base + "/chat/completions"))
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + apiKey)
+                .header("Authorization", "Bearer " + key)
                 .timeout(Duration.ofSeconds(Math.max(30, timeoutSeconds)))
                 .POST(HttpRequest.BodyPublishers.ofString(
                         JSON.writeValueAsString(buildRequest(prompt, images, modelOverride)), StandardCharsets.UTF_8))
                 .build();
 
-        HttpResponse<Stream<String>> response = http.send(request, HttpResponse.BodyHandlers.ofLines());
+        HttpResponse<Stream<String>> response;
+        try {
+            response = client.send(request, HttpResponse.BodyHandlers.ofLines());
+        } catch (java.net.ConnectException | java.net.http.HttpConnectTimeoutException e) {
+            throw new IllegalStateException(providerLabel() + " 连不上：" + base
+                    + (openai ? "（国内一般要配 ai.openai.proxy）" : ""), e);
+        }
         if (response.statusCode() / 100 != 2) {
             String err = response.body().limit(20).collect(Collectors.joining("\n"));
-            throw new IllegalStateException("千问返回 " + response.statusCode() + ": " + truncate(err, 500));
+            throw new IllegalStateException(providerLabel() + " 返回 " + response.statusCode() + ": " + truncate(err, 500));
         }
         return accumulate(response.body());
     }
@@ -108,7 +163,7 @@ public class QwenChatClient {
 
     ObjectNode buildRequest(String prompt, List<Image> images, String modelOverride) {
         ObjectNode body = JSON.createObjectNode();
-        body.put("model", modelOverride == null || modelOverride.isBlank() ? modelId() : modelOverride.trim());
+        body.put("model", effectiveModel(modelOverride));
         body.put("stream", true);
 
         ObjectNode message = body.putArray("messages").addObject();
@@ -160,7 +215,7 @@ public class QwenChatClient {
             }
         }
         if (content.isEmpty()) {
-            throw new IllegalStateException("千问未返回内容"
+            throw new IllegalStateException(providerLabel() + " 未返回内容"
                     + (finishReason == null ? "" : "，finish_reason=" + finishReason));
         }
         return content.toString();

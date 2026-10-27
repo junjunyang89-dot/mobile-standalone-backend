@@ -79,9 +79,33 @@ public class QwenDiagnosisClient implements DiagnosisModelClient {
             .connectTimeout(Duration.ofSeconds(20))
             .build();
 
+    /* 下面几个是「连哪家」的全部差异；ChatGPT 版只覆盖这几处，请求体和解析共用 */
+
+    protected String endpointBase() {
+        return trimSlash(apiBase);
+    }
+
+    protected String bearerKey() {
+        return apiKey;
+    }
+
+    protected HttpClient httpClient() {
+        return http;
+    }
+
+    protected String providerLabel() {
+        return "千问";
+    }
+
+    /** 部分推理模型只接受默认温度，传 0 会直接 400 */
+    protected boolean sendTemperature() {
+        return true;
+    }
+
     @Override
     public boolean isConfigured() {
-        return enabled && apiKey != null && !apiKey.isBlank();
+        String key = bearerKey();
+        return enabled && key != null && !key.isBlank();
     }
 
     @Override
@@ -96,18 +120,18 @@ public class QwenDiagnosisClient implements DiagnosisModelClient {
         }
         ObjectNode body = buildRequest(prompt, screenshots);
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(trimSlash(apiBase) + "/chat/completions"))
+                .uri(URI.create(endpointBase() + "/chat/completions"))
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + apiKey)
+                .header("Authorization", "Bearer " + bearerKey())
                 .timeout(Duration.ofSeconds(Math.max(30, timeoutSeconds)))
                 .POST(HttpRequest.BodyPublishers.ofString(
                         JSON.writeValueAsString(body), StandardCharsets.UTF_8))
                 .build();
 
-        HttpResponse<Stream<String>> response = http.send(request, HttpResponse.BodyHandlers.ofLines());
+        HttpResponse<Stream<String>> response = httpClient().send(request, HttpResponse.BodyHandlers.ofLines());
         if (response.statusCode() / 100 != 2) {
             String err = response.body().limit(20).collect(Collectors.joining("\n"));
-            throw new IllegalStateException("千问返回 " + response.statusCode() + ": " + truncate(err, 500));
+            throw new IllegalStateException(providerLabel() + " 返回 " + response.statusCode() + ": " + truncate(err, 500));
         }
         return parseStream(response.body());
     }
@@ -150,7 +174,7 @@ public class QwenDiagnosisClient implements DiagnosisModelClient {
             }
         }
         if (content.isEmpty()) {
-            throw new IllegalStateException("千问未返回内容"
+            throw new IllegalStateException(providerLabel() + "未返回内容"
                     + (finishReason == null ? "" : "，finish_reason=" + finishReason));
         }
         return DiagnosisVerdictParser.parse(content.toString(), modelId());
@@ -160,7 +184,9 @@ public class QwenDiagnosisClient implements DiagnosisModelClient {
         ObjectNode body = JSON.createObjectNode();
         body.put("model", modelId());
         // 归因要的是稳定复现的判断，不是多样性
-        body.put("temperature", 0);
+        if (sendTemperature()) {
+            body.put("temperature", 0);
+        }
 
         // 必须流式，理由见 parseStream
         body.put("stream", true);

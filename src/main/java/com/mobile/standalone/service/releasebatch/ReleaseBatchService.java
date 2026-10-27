@@ -151,7 +151,7 @@ public class ReleaseBatchService {
 
     private static final Pattern ISSUE_KEY = Pattern.compile("\\b([A-Z][A-Z0-9]+-\\d+)\\b");
 
-    static List<String> issueKeys(String text) {
+    public static List<String> issueKeys(String text) {
         Set<String> out = new java.util.LinkedHashSet<>();
         Matcher m = ISSUE_KEY.matcher(text == null ? "" : text);
         while (m.find()) {
@@ -935,7 +935,7 @@ public class ReleaseBatchService {
 
     // ---------------------------------------------------------------- 认项目
 
-    static List<Target> resolveTargets(String notes, List<ApiProject> projects) {
+    public static List<Target> resolveTargets(String notes, List<ApiProject> projects) {
         List<Target> out = new ArrayList<>();
         for (BranchNoteParser.BranchRef r : BranchNoteParser.parse(notes)) {
             Target t = new Target();

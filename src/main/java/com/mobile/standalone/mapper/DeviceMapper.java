@@ -18,6 +18,9 @@ public interface DeviceMapper {
     int insert(Device device);
     
     int update(Device device);
+
+    /** 扫描心跳：只刷探测到的字段，避免整行 UPDATE 拖长锁 */
+    int updatePresence(Device device);
     
     int deleteById(@Param("id") String id);
 

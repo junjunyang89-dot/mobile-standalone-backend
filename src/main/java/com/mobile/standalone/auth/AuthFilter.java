@@ -47,6 +47,7 @@ public class AuthFilter extends OncePerRequestFilter {
 
     private final AuthTokenService tokenService;
     private final PlatformUserService userService;
+    private final OpenApiAuth openApiAuth;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -67,6 +68,19 @@ public class AuthFilter extends OncePerRequestFilter {
             log.warn("[auth] 拒绝可疑路径 method={} path={} from={}",
                     request.getMethod(), path, request.getRemoteAddr());
             deny(response, 400, "非法请求路径");
+            return;
+        }
+
+        // 开放接口只认 API Key，且不受「还没建账号就全放行」影响——它能下发真机任务
+        if (OpenApiAuth.isOpenPath(path)) {
+            OpenApiAuth.Result r = openApiAuth.verify(request);
+            if (!r.ok()) {
+                log.warn("[auth] 开放接口拒绝 status={} path={} from={}", r.status(), path, request.getRemoteAddr());
+                deny(response, r.status(), r.message());
+                return;
+            }
+            request.setAttribute(OpenApiAuth.ATTR_CLIENT, r.client());
+            chain.doFilter(request, response);
             return;
         }
 

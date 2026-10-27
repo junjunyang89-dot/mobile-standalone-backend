@@ -24,6 +24,7 @@ class ReleaseDocBranchConfigParseTest {
                 "app-push",
                 "app-swift",
                 "global-video",
+                "global-data",
                 "swift-sphere",
                 "data-center",
                 "datacenter",
@@ -36,6 +37,10 @@ class ReleaseDocBranchConfigParseTest {
                 "app-community",
                 "comment-service",
                 "commentservice",
+                "steam-admin",
+                "app-admin",
+                "appadmin",
+                "admin",
                 "iOS 分支",
                 "Android分支",
                 "Android 分支",
@@ -45,6 +50,24 @@ class ReleaseDocBranchConfigParseTest {
                 "Android"
         ));
         svc = new ReleaseDocService(props);
+    }
+
+    @Test
+    void appAdminAndAdminAlias_notSteamAdmin() {
+        var parsed = svc.parseComment("""
+                app-admin：agent/2026-09-24/rating_switch
+                admin: feat/2026-09-24/other
+                appadmin: feat/2026-09-25/switch
+                steam-admin：dev/2026-09-24/steam
+                """);
+        assertTrue(parsed.branches.contains("app-admin: agent/2026-09-24/rating_switch"), parsed.branches);
+        assertTrue(parsed.branches.contains("app-admin: feat/2026-09-24/other"), parsed.branches);
+        assertTrue(parsed.branches.contains("app-admin: feat/2026-09-25/switch"), parsed.branches);
+        assertTrue(parsed.branches.contains("steam-admin: dev/2026-09-24/steam"), parsed.branches);
+        assertTrue(parsed.branches.lines().noneMatch(l -> l.startsWith("admin:") || l.startsWith("appadmin:")),
+                parsed.branches);
+        assertTrue(parsed.branches.lines().noneMatch(l -> l.startsWith("steam-admin:") && l.contains("rating_switch")),
+                parsed.branches);
     }
 
     @Test
@@ -79,6 +102,31 @@ class ReleaseDocBranchConfigParseTest {
         var parsed = svc.parseComment("eventcenter fch/20260714/APP-8742");
         assertTrue(parsed.branches.contains("event-center: fch/20260714/APP-8742"), parsed.branches);
         assertFalse(parsed.branches.toLowerCase().contains("eventcenter:"), parsed.branches);
+    }
+
+    /** 周报：开发写 swift-sphere (分支) → 剥括号成 项目: 分支 */
+    @Test
+    void swiftSphereBranchWrappedInParentheses() {
+        var parsed = svc.parseComment("swift-sphere (rjy/2026-9-24/APP-8301/highlights)");
+        assertTrue(parsed.branches.contains("swift-sphere: rjy/2026-9-24/APP-8301/highlights"),
+                parsed.branches);
+        assertFalse(parsed.branches.contains("("), parsed.branches);
+        assertFalse(parsed.branches.contains(")"), parsed.branches);
+    }
+
+    @Test
+    void swiftSphereBranchWrappedInFullwidthParentheses() {
+        var parsed = svc.parseComment("swift-sphere（rjy/2026-9-24/APP-8301/highlights）");
+        assertTrue(parsed.branches.contains("swift-sphere: rjy/2026-9-24/APP-8301/highlights"),
+                parsed.branches);
+    }
+
+    /** 开发写「项目 空格 分支」无冒号：global-data fch/... */
+    @Test
+    void globalDataProjectSpaceBranch() {
+        var parsed = svc.parseComment("global-data fch/2026-09-22/dl-robot-optimize");
+        assertTrue(parsed.branches.contains("global-data: fch/2026-09-22/dl-robot-optimize"),
+                parsed.branches);
     }
 
     @Test
@@ -222,7 +270,23 @@ class ReleaseDocBranchConfigParseTest {
     @Test
     void remarkOrderReleaseKept() {
         var parsed = svc.parseComment("app-engine、esport-api、app-community：dyl/20260707/deadlock_rating，顺序发版");
-        assertTrue(parsed.remarks.contains("顺序发版"));
+        assertTrue(parsed.remarks.contains("按顺序发版：app-engine → esports-api → app-community"), parsed.remarks);
+        assertTrue(parsed.branches.contains("app-engine: dyl/20260707/deadlock_rating"), parsed.branches);
+        assertFalse(parsed.branches.contains("顺序发版"), parsed.branches);
+    }
+
+    /** 开发原话：两个项目共用分支，列表先后 = 发版先后 */
+    @Test
+    void commentServiceThenAppAdmin_sharedBranchInOrder() {
+        var parsed = svc.parseComment(
+                "comment-service、app-admin：agent/2026-09-17/comment-score 按顺序发版");
+        assertTrue(parsed.branches.contains("comment-service: agent/2026-09-17/comment-score"), parsed.branches);
+        assertTrue(parsed.branches.contains("app-admin: agent/2026-09-17/comment-score"), parsed.branches);
+        assertFalse(parsed.branches.contains("按顺序发版"), parsed.branches);
+        assertEquals("按顺序发版：comment-service → app-admin", parsed.remarks.trim());
+        // 分支列里 comment-service 排在 app-admin 前面
+        assertTrue(parsed.branches.indexOf("comment-service:")
+                < parsed.branches.indexOf("app-admin:"), parsed.branches);
     }
 
     @Test
@@ -310,7 +374,11 @@ class ReleaseDocBranchConfigParseTest {
                 "esports-api",
                 "esportsapi",
                 "esport-api",
-                "app-community"
+                "app-community",
+                "steam-admin",
+                "app-admin",
+                "appadmin",
+                "admin"
         );
     }
 }

@@ -46,7 +46,7 @@ public class LogicExplainService {
 
     public Batch explain(Long id, String key, String project, String className, String member) {
         if (!qwen.isConfigured()) {
-            throw new IllegalStateException("AI 还没配置（千问密钥），翻译不了；先看下面的改动行");
+            throw new IllegalStateException(qwen.notConfiguredMessage() + "；翻译不了，先看下面的改动行");
         }
         Batch b = batches.get(id);
         Ticket t = b.getTickets().stream().filter(x -> x.getKey().equalsIgnoreCase(key)).findFirst()

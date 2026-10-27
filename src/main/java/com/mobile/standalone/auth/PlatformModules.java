@@ -32,6 +32,7 @@ public final class PlatformModules {
     private static final List<Group> GROUPS = List.of(
             new Group("主菜单", List.of(
                     new Module("/codewords-agent", "AI助手"),
+                    new Module("/analysis-tasks", "分析任务"),
                     new Module("/env-setup", "环境搭建"))),
             new Group("测试用例", List.of(
                     new Module("/bug-management", "Bug 管理"),
@@ -53,6 +54,7 @@ public final class PlatformModules {
                     new Module("/api-schedules", "定时执行"))),
             new Group("APP 自动化", List.of(
                     new Module("/tasks", "APP测试任务"),
+                    new Module("/smart-app", "智能 APP 自动化"),
                     new Module("/ui-flows", "流程编排"),
                     new Module("/ui-elements", "元素管理"),
                     new Module("/ui-inspector-import", "Inspector XML 导入"),
@@ -75,6 +77,8 @@ public final class PlatformModules {
                     new Module("/knowledge-handbook", "知识手册"))),
             new Group("APP发版", List.of(
                     new Module("/release-doc", "发版文档"),
+                    new Module("/release-merge", "合并到 master"),
+                    new Module("/testing-merge", "合并到 testing"),
                     new Module("/release-go-live", "上线看板"),
                     new Module("/version-archives", "版本需求归档"))),
             new Group("权限与设置", List.of(

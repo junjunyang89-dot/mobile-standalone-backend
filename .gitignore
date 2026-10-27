@@ -85,3 +85,7 @@ patches/
 
 # Cursor SDK bridge
 scripts/cursor-ask/node_modules/
+scripts/analysis-open-api.key
+
+# Smart APP scripts and device evidence are local runtime data
+/data/smart-app/

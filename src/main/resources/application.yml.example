@@ -70,6 +70,44 @@ cursor:
 #     - app-community
 #     - data-center
 
+# 发版看板 · Jenkins 大包状态（账号密码放本机 application.yml）
+# release-jenkins:
+#   enabled: true
+#   base-url: http://jenkins.shdev.net
+#   username: your.name
+#   password: ***
+#   jobs:
+#     app-swift: appswift_package_prod
+#     app-swift-v3: appswift_V3_package_prod
+#     app-admin: appadmin_package_prod
+#     data-center: datacenter_package_prod
+#     comment-service: commentServer_package_ali_Prod
+
+# 对外开放接口 /api/open/v1/**：其它管理平台查用例、下发 APP UI 自动化执行。
+# 不配 clients 时整组接口返回 503（关闭），不会变成免鉴权。
+# open-api:
+#   clients:
+#     - name: node-admin          # 调用方名，会出现在任务名里
+#       key: 换成一串足够长的随机串   # 请求头 X-API-Key；也用来给回调签名
+#       enabled: true
+#   report-base-url: http://平台前端地址/   # 拼 reportUrl 用，不配就不返回
+#   max-cases-per-run: 100
+#   callback-max-attempts: 5
+
+# 接入 ChatGPT（OpenAI 接口）。和千问是同一套 /chat/completions，换地址/密钥/模型即可。
+# ai.chat.provider 管通用 AI：用例生成、逻辑改动翻译、AI 流程编排、元素识图、知识手册摘要等；
+# 失败归因单独看 diagnosis.ai.provider（qwen | gemini | openai），两边可以各选各的。
+# API 要在 platform.openai.com 单独开通计费，ChatGPT Plus 会员不含 API 额度。
+# ai:
+#   chat:
+#     provider: qwen              # qwen | openai
+#   openai:
+#     api-key: ${OPENAI_API_KEY:}  # 密钥放环境变量或本机 application.yml，勿提交
+#     api-base: https://api.openai.com/v1   # 走公司中转时改成中转地址
+#     model: gpt-4.1              # 识图类功能要带视觉能力的模型
+#     diagnosis-model:            # 失败归因用的模型，空则跟 model 走
+#     proxy: http://127.0.0.1:7890   # 国内一般要配；只支持 HTTP 代理，不支持 SOCKS / 带账号密码
+
 appium:
   enabled: true
   auto-start: true

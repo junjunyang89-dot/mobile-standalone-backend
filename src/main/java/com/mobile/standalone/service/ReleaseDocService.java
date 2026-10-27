@@ -47,9 +47,14 @@ import java.util.regex.Pattern;
 @Slf4j
 public class ReleaseDocService {
 
+    /** 人工在弹窗勾选「跟本版本」后写入备注，便于 Wiki / 邮件对照 */
+    static final String REMARK_CONFIRM_FOLLOW_VERSION = "【人工确认】跟本版本上线";
+
     private static final Pattern ISSUE_KEY = Pattern.compile("\\b([A-Z][A-Z0-9]+-\\d+)\\b");
     private static final Pattern SQL_LINE = Pattern.compile(
             "(?i).*\\b(SELECT|INSERT|UPDATE|ALTER|CREATE|DROP|DELETE|TRUNCATE|REPLACE)\\b.*");
+    /** 开发没写「xx库下执行 / 库sql」时，提醒 QA 去和开发确认进哪个库 */
+    static final String REMARK_SQL_MISSING_DB = "【需确认】SQL缺少库名，需要和开发对下";
     /**
      * 任务列末尾「人名 + 提测/上线」后缀。只匹配字符串末尾，每条只跑一次，避免误删正文。
      * 规则来自《Confluence发版Wiki任务列清理指南》，并覆盖「暂定提测」「提测，不跟版本」。
@@ -663,6 +668,7 @@ public class ReleaseDocService {
 
         String jiraBase = resolveJiraBase(refs);
         List<IssueRow> rows = new ArrayList<>();
+        List<IssueRow> deferred = new ArrayList<>();
         int skippedStatus = 0;
         for (IssueRef ref : refs) {
             logStep(out, "拉取 " + ref.key);
@@ -671,24 +677,44 @@ public class ReleaseDocService {
                 skippedStatus++;
                 continue;
             }
+            if (Boolean.TRUE.equals(row.getDeferredCandidate())) {
+                deferred.add(row);
+                logStep(out, "疑似不跟版本，待人工确认: " + ref.key
+                        + (row.getDeferredReason() != null ? "（" + row.getDeferredReason() + "）" : ""));
+                continue;
+            }
             rows.add(row);
         }
         if (skippedStatus > 0) {
-            logStep(out, "跳过 " + skippedStatus + " 单（状态不符，或备注写明不跟本版本上线）");
+            logStep(out, "跳过 " + skippedStatus + " 单（状态不符）");
         }
-        if (rows.isEmpty()) {
+        if (!deferred.isEmpty()) {
+            logStep(out, "另有 " + deferred.size() + " 单写了不跟版本/时间待定，已列出供人工选择");
+        }
+        if (rows.isEmpty() && deferred.isEmpty()) {
             throw new IllegalStateException("版本「" + out.getVersion() + "」下没有「"
                     + String.join(" / ", includeStatusList()) + "」状态的单子可统计");
         }
         applyTaskTextCleanup(rows);
+        applyTaskTextCleanup(deferred);
         rows = sortRowsByQa(rows);
+        deferred = sortRowsByQa(deferred);
         out.setRows(rows);
+        out.setDeferredCandidates(deferred);
         logStep(out, "已按 QA 排序: " + summarizeQaOrder(rows));
 
         if (out.isPreviewOnly()) {
-            out.setMessage("预览成功（仅「" + String.join(" / ", includeStatusList())
-                    + "」；已按 QA 集中排序，便于逐人检查；可在表格中直接改后再点生成）");
+            String msg = "预览成功（仅「" + String.join(" / ", includeStatusList())
+                    + "」；已按 QA 集中排序，便于逐人检查；可在表格中直接改后再点生成）";
+            if (!deferred.isEmpty()) {
+                msg += "；另有 " + deferred.size() + " 单疑似不跟版本，请在弹窗中确认是否纳入";
+            }
+            out.setMessage(msg);
             return out;
+        }
+
+        if (rows.isEmpty()) {
+            throw new IllegalStateException("没有确认跟版本的单子。请先预览，在弹窗中勾选要跟本版本的单，再生成发版文档");
         }
 
         logStep(out, "在父页 " + props.getParentPageId() + " 下创建子页面");
@@ -1097,16 +1123,7 @@ public class ReleaseDocService {
                 return null;
             }
 
-            IssueRow row = new IssueRow();
-            row.setIssueKey(ref.key);
-            row.setIssueUrl(trimSlash(jiraBase) + "/browse/" + ref.key);
-            row.setSummary(cleanTaskText(fields.path("summary").asText(ref.key)));
-
-            String qa = findFieldByDisplayName(fields, names, "QA Assignee", "QA", "Qa Assignee");
-            if (qa == null || qa.isBlank()) {
-                qa = fields.path("assignee").path("displayName").asText("");
-            }
-            row.setQaAssignee(blankToNone(qa));
+            String summary = fields.path("summary").asText(ref.key);
 
             StringBuilder commentText = new StringBuilder();
             JsonNode comments = fields.path("comment").path("comments");
@@ -1123,10 +1140,23 @@ public class ReleaseDocService {
             if (!desc.isBlank()) commentText.append(desc).append("\n");
 
             String allText = commentText.toString();
-            if (isDeferredFromThisRelease(allText)) {
-                log.info("[release-doc] 跳过 {}（备注含不跟本版本上线等话术）", ref.key);
-                return null;
+            // 标题/备注写「不跟版本 / 对外时间待定」：不再静默丢弃，标成候选交给前端弹窗确认
+            boolean deferred = isDeferredFromThisRelease(summary) || isDeferredFromThisRelease(allText);
+            String deferredReason = deferred ? extractDeferredReason(summary, allText) : null;
+            if (deferred) {
+                log.info("[release-doc] {} 疑似不跟本版本（{}），待人工确认", ref.key, deferredReason);
             }
+
+            IssueRow row = new IssueRow();
+            row.setIssueKey(ref.key);
+            row.setIssueUrl(trimSlash(jiraBase) + "/browse/" + ref.key);
+            row.setSummary(cleanTaskText(summary));
+
+            String qa = findFieldByDisplayName(fields, names, "QA Assignee", "QA", "Qa Assignee");
+            if (qa == null || qa.isBlank()) {
+                qa = fields.path("assignee").path("displayName").asText("");
+            }
+            row.setQaAssignee(blankToNone(qa));
 
             ParsedComment parsed = parseComment(allText);
             row.setBranches(blankToNone(parsed.branches));
@@ -1134,6 +1164,10 @@ public class ReleaseDocService {
             row.setConfigChanges(blankToNone(parsed.config));
             // 备注只保留「注意」「发版顺序」相关
             row.setRemarks(blankToNone(parsed.remarks));
+            if (deferred) {
+                row.setDeferredCandidate(true);
+                row.setDeferredReason(deferredReason);
+            }
             return row;
         } catch (IllegalStateException e) {
             throw e;
@@ -1255,8 +1289,11 @@ public class ReleaseDocService {
                 skipNonProdConfigSection = false;
             }
 
-            List<String> fromLine = splitBranchEntries(line, keywords);
+            // 「app-admin库sql：」是库名标题，不是「项目:分支」——别拆成 bare app-admin: 去抢后面的分支行
+            boolean sqlHint = isSqlDbHint(line);
+            List<String> fromLine = sqlHint ? List.of() : splitBranchEntries(line, keywords);
             boolean addedConfigFromBranch = false;
+            boolean orderRemarkAdded = false;
             if (!fromLine.isEmpty()) {
                 List<String> filled = new ArrayList<>();
                 for (String entry : fromLine) {
@@ -1272,9 +1309,18 @@ public class ReleaseDocService {
                         addedConfigFromBranch = true;
                     }
                 }
+                // 「comment-service、app-admin：分支 按顺序发版」→ 列表顺序即发版顺序
+                if (filled.size() >= 2 && hasDeployOrderPhrase(line)) {
+                    List<String> order = filled.stream().map(ReleaseDocService::projectOfBranchEntry)
+                            .filter(s -> s != null && !s.isBlank()).toList();
+                    if (order.size() >= 2) {
+                        remarks.add("按顺序发版：" + String.join(" → ", order));
+                        orderRemarkAdded = true;
+                    }
+                }
                 branches.addAll(filled);
-            } else if (line.matches("(?i).*(branch|分支|上线分支).*")
-                    || line.matches(".*\\b[a-z0-9._-]+/[0-9]{4}-[0-9]{2}-[0-9]{2}/APP-\\d+.*")) {
+            } else if (!sqlHint && (line.matches("(?i).*(branch|分支|上线分支).*")
+                    || line.matches(".*\\b[a-z0-9._-]+/[0-9]{4}-[0-9]{2}-[0-9]{2}/APP-\\d+.*"))) {
                 if (!line.startsWith("http") && !isUrlOnlyLine(line)) {
                     branches.add(line);
                 }
@@ -1284,9 +1330,9 @@ public class ReleaseDocService {
                 sql.add(line);
             }
 
-            // 配置：本行 + 「增加配置」后的 spring. 续行
-            if (looksLikeConfigLine(line)) {
-                if (!line.equals("无") && !line.equals("无配置") && !line.contains("库下执行")) {
+            // 配置：本行 + 「增加配置」后的 spring. 续行（SQL / 库名标题不进配置）
+            if (!sqlHint && looksLikeConfigLine(line)) {
+                if (!line.equals("无") && !line.equals("无配置") && !line.contains("库下执行") && !line.contains("库sql")) {
                     // 已从「项目：增加配置」分支路径写入过，勿再追加原文（避免 esports-api / esportsapi 双条）
                     if (!addedConfigFromBranch) {
                         addConfigUnique(config, line);
@@ -1296,9 +1342,18 @@ public class ReleaseDocService {
                     }
                 }
             }
-            if (isRemarkLine(line)) {
+            // 多项目「按顺序发版」已写成「A → B」，不再把整行原文塞进备注
+            if (!orderRemarkAdded && isRemarkLine(line)) {
                 remarks.add(line);
             }
+        }
+
+        // 有 SQL，但既没有「xx库下执行 / 库sql」标题，语句里也没有 `库`.`表` → 提醒 QA 找开发确认
+        // （`ALTER TABLE \`steamcn_comment\`.\`comment_score\`` 里 steamcn_comment 已是库名，不算缺）
+        boolean sqlHasSchema = sql.stream().anyMatch(b -> schemaOfSql(b) != null);
+        if (!sql.isEmpty() && !textHasExplicitSqlDbHint(text) && !sqlHasSchema
+                && remarks.stream().noneMatch(r -> r != null && r.contains("SQL缺少库名"))) {
+            remarks.add(0, REMARK_SQL_MISSING_DB);
         }
 
         p.branches = String.join("\n", mergeClientBranches(branches));
@@ -1306,6 +1361,15 @@ public class ReleaseDocService {
         p.config = String.join("\n", config);
         p.remarks = String.join("\n", remarks);
         return p;
+    }
+
+    /** 原文里是否写明了在哪个库执行（库下执行 / 库sql） */
+    static boolean textHasExplicitSqlDbHint(String text) {
+        if (text == null || text.isBlank()) return false;
+        for (String raw : text.split("\\R")) {
+            if (isSqlDbHint(normalizeWs(raw))) return true;
+        }
+        return false;
     }
 
     /**
@@ -1465,7 +1529,9 @@ public class ReleaseDocService {
         if (line == null || line.isBlank()) return false;
         String lower = line.toLowerCase(Locale.ROOT);
         if (line.equals("无") || line.equals("无配置")) return false;
-        if (line.contains("库下执行")) return false;
+        if (isSqlDbHint(line) || line.contains("库下执行") || lower.contains("库sql")) return false;
+        // INSERT INTO xxx_config / WHERE … config 表名里带 config，不是配置变更
+        if (SQL_LINE.matcher(line).matches() || looksLikeSqlContinuation(line)) return false;
         if (isUrlOnlyLine(line)) return false;
         return lower.contains("apollo")
                 || line.contains("配置")
@@ -1572,13 +1638,58 @@ public class ReleaseDocService {
                 || v.matches("(?i)^[a-z][a-z0-9._-]*\\d{6,}.*"); // dev20260723
     }
 
-    /** 分支值去掉尾部「顺序发版」等，避免污染分支列（备注另计） */
+    /** 分支值去掉尾部「按顺序发版 / 顺序发版」等，避免污染分支列（备注另计） */
     private static String stripRemarkNoiseFromBranch(String entry) {
         if (entry == null) return "";
         String e = entry.trim();
-        e = e.replaceAll("[，,]\\s*(顺序发版|发版顺序|发版次序|注意).*$", "").trim();
-        e = e.replaceAll("\\s+(顺序发版|发版顺序|发版次序)\\s*$", "").trim();
-        return e;
+        e = e.replaceAll("[，,]\\s*(按)?顺序发版.*$", "").trim();
+        e = e.replaceAll("[，,]\\s*(发版顺序|发版次序|注意).*$", "").trim();
+        e = e.replaceAll("\\s+(按)?顺序发版\\s*$", "").trim();
+        e = e.replaceAll("\\s+(发版顺序|发版次序)\\s*$", "").trim();
+        // 「swift-sphere: (rjy/…/highlights)」→ 去掉包着分支的括号
+        int colon = Math.max(e.indexOf(':'), e.indexOf('：'));
+        if (colon >= 0) {
+            String repo = e.substring(0, colon).trim();
+            String val = unwrapBranchDecorators(e.substring(colon + 1));
+            if (val.isBlank()) {
+                return repo + ":";
+            }
+            return repo + ": " + val;
+        }
+        return unwrapBranchDecorators(e);
+    }
+
+    /**
+     * 开发常写 {@code swift-sphere (rjy/2026-9-24/APP-8301/highlights)}，
+     * 括号只是把分支括起来，不是分支名的一部分。
+     */
+    static String unwrapBranchDecorators(String val) {
+        if (val == null || val.isBlank()) return "";
+        String v = val.trim();
+        for (int i = 0; i < 3; i++) {
+            if (v.length() < 2) break;
+            char a = v.charAt(0);
+            char b = v.charAt(v.length() - 1);
+            if ((a == '(' && b == ')') || (a == '（' && b == '）') || (a == '[' && b == ']')) {
+                v = v.substring(1, v.length() - 1).trim();
+                continue;
+            }
+            break;
+        }
+        return v;
+    }
+
+    private static boolean hasDeployOrderPhrase(String line) {
+        if (line == null || line.isBlank()) return false;
+        return line.contains("按顺序发版") || line.contains("顺序发版")
+                || line.contains("发版顺序") || line.contains("发版次序");
+    }
+
+    /** {@code comment-service: agent/x} → comment-service */
+    private static String projectOfBranchEntry(String entry) {
+        if (entry == null || entry.isBlank()) return "";
+        int colon = Math.max(entry.indexOf(':'), entry.indexOf('：'));
+        return colon < 0 ? entry.trim() : entry.substring(0, colon).trim();
     }
 
     private static boolean isCodeFenceOpen(String line) {
@@ -1595,8 +1706,8 @@ public class ReleaseDocService {
 
     /**
      * 抽取完整 SQL 块：优先 Jira {@code {code:java}...{code}}，其次 markdown ```；
-     * 再兜底「xxx库下执行：」后的整段纯文本（非围栏）。
-     * 块前一行若含「库下执行」则一并带上。
+     * 再兜底「xxx库下执行： / xxx库sql：」后的整段纯文本（非围栏）。
+     * 块前一行若标明库名则一并带上。
      */
     List<String> extractSqlBlocks(String text) {
         List<String> blocks = new ArrayList<>();
@@ -1604,7 +1715,7 @@ public class ReleaseDocService {
 
         // Jira wiki：标题 + {code}/{code:java} ... {code}（标题与围栏间可有空行）
         Pattern jiraCode = Pattern.compile(
-                "(?is)(?:^|\\R)([^\r\n]*库下执行[^\r\n]*)\\s*\\R\\s*\\{code(?::[^\\}]*)?\\}\\s*\\R?(.*?)\\s*\\{code\\}");
+                "(?is)(?:^|\\R)([^\r\n]*(?:库下执行|库\\s*sql|库\\s*SQL)[^\r\n]*)\\s*\\R\\s*\\{code(?::[^\\}]*)?\\}\\s*\\R?(.*?)\\s*\\{code\\}");
         Matcher jm = jiraCode.matcher(text);
         while (jm.find()) {
             String header = normalizeWs(jm.group(1));
@@ -1613,7 +1724,7 @@ public class ReleaseDocService {
                 blocks.add(header.isBlank() ? body : header + "\n" + body);
             }
         }
-        // 无「库下执行」标题的纯 code 块（内容像 SQL 才收）
+        // 无库名标题的纯 code 块（内容像 SQL 才收）
         if (blocks.isEmpty()) {
             Pattern jiraCode2 = Pattern.compile("(?is)\\{code(?::[^\\}]*)?\\}\\s*\\R?(.*?)\\s*\\{code\\}");
             Matcher jm2 = jiraCode2.matcher(text);
@@ -1627,7 +1738,7 @@ public class ReleaseDocService {
                     for (int i = prev.length - 1; i >= 0; i--) {
                         String pl = normalizeWs(prev[i]);
                         if (pl.isEmpty()) continue;
-                        if (pl.contains("库下执行") || pl.contains("执行：")) {
+                        if (isSqlDbHint(pl) || pl.contains("执行：")) {
                             header = pl;
                         }
                         break;
@@ -1638,7 +1749,8 @@ public class ReleaseDocService {
         }
 
         // markdown ```sql ... ```
-        Pattern md = Pattern.compile("(?is)(?:^|\\R)([^\r\n]*库下执行[^\r\n]*)?\\s*\\R?```(?:sql|SQL|java)?\\s*\\R?(.*?)\\s*```");
+        Pattern md = Pattern.compile(
+                "(?is)(?:^|\\R)([^\r\n]*(?:库下执行|库\\s*sql|库\\s*SQL)[^\r\n]*)?\\s*\\R?```(?:sql|SQL|java)?\\s*\\R?(.*?)\\s*```");
         Matcher mm = md.matcher(text);
         while (mm.find()) {
             String header = normalizeWs(mm.group(1) != null ? mm.group(1) : "");
@@ -1652,20 +1764,110 @@ public class ReleaseDocService {
             }
         }
 
-        // 无围栏：从「库下执行」行起，连吃后续 SQL 相关行直到段落结束
+        // 无围栏：从「库下执行 / 库sql」行起，连吃后续 SQL 相关行直到段落结束
         if (blocks.isEmpty()) {
             blocks.addAll(extractPlainSqlAfterDbHint(text));
+        }
+        // 开发直接贴 ALTER/INSERT，不写库名标题（APP-9135）：仍要整段收下
+        if (blocks.isEmpty()) {
+            blocks.addAll(extractBareSqlBlocks(text));
         }
         return blocks;
     }
 
-    /** 「app_admin库下执行：」后直接贴 SQL（无 {code}）时的整段抽取 */
+    /**
+     * 标明「在哪个库执行 SQL」的标题行。
+     * 常见写法：{@code app_admin库下执行：}、{@code app-admin库sql：}、{@code app-admin 库 SQL}
+     */
+    static boolean isSqlDbHint(String line) {
+        if (line == null || line.isBlank()) return false;
+        String t = normalizeWs(line);
+        if (t.contains("库下执行")) return true;
+        // xxx库sql： / xxx库 SQL：
+        if (t.matches("(?i).*库\\s*sql\\s*[:：]?\\s*")) return true;
+        // 单独「库sql：」
+        return t.matches("(?i)^库\\s*sql\\s*[:：]?\\s*$");
+    }
+
+    /**
+     * 无「库下执行 / 库sql」标题、也无 {code} 时，把正文里的 ALTER/INSERT 等收成块。
+     * 若 SQL 写了 {@code `库名`.`表名`}，自动加上「库名库：」头，发版时知道进哪个库。
+     */
+    static List<String> extractBareSqlBlocks(String text) {
+        List<String> blocks = new ArrayList<>();
+        if (text == null || text.isBlank()) return blocks;
+        String[] lines = text.split("\\R", -1);
+        StringBuilder body = null;
+        for (int i = 0; i < lines.length; i++) {
+            String raw = lines[i];
+            String t = normalizeWs(raw);
+            if (t.isEmpty()) {
+                if (body != null && body.length() > 0) {
+                    String next = peekNextNonEmpty(lines, i + 1);
+                    if (!looksLikeSqlContinuation(next)) {
+                        addBareSqlBlock(blocks, body.toString());
+                        body = null;
+                    } else {
+                        body.append('\n');
+                    }
+                }
+                continue;
+            }
+            if (isSqlDbHint(t) || isCodeFenceOpen(t) || isCodeFenceCloseLine(t)) {
+                if (body != null) {
+                    addBareSqlBlock(blocks, body.toString());
+                    body = null;
+                }
+                continue;
+            }
+            boolean sqlLine = SQL_LINE.matcher(t).matches()
+                    || (body != null && (looksLikeSqlContinuation(t) || looksLikeSqlContinuationContinuation(t)));
+            if (sqlLine) {
+                if (body == null) {
+                    body = new StringBuilder();
+                } else if (body.length() > 0) {
+                    body.append('\n');
+                }
+                body.append(raw.replace("\r", ""));
+                continue;
+            }
+            if (body != null) {
+                addBareSqlBlock(blocks, body.toString());
+                body = null;
+            }
+        }
+        if (body != null) {
+            addBareSqlBlock(blocks, body.toString());
+        }
+        return blocks;
+    }
+
+    private static void addBareSqlBlock(List<String> blocks, String body) {
+        String b = body == null ? "" : body.trim();
+        if (b.isBlank() || !looksLikeSql(b)) {
+            return;
+        }
+        String schema = schemaOfSql(b);
+        blocks.add(schema == null ? b : schema + "库：\n" + b);
+    }
+
+    /** 从 {@code ALTER TABLE `steamcn_comment`.`comment_score`} 抽出库名 */
+    static String schemaOfSql(String sql) {
+        if (sql == null || sql.isBlank()) return null;
+        Matcher m = Pattern.compile(
+                "(?i)\\b(?:ALTER\\s+TABLE|INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?)\\s+"
+                        + "`?([A-Za-z_][\\w]*)`?\\s*\\.\\s*`?[A-Za-z_]")
+                .matcher(sql);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** 「app_admin库下执行：」「app-admin库sql：」后直接贴 SQL（无 {code}）时的整段抽取 */
     private static List<String> extractPlainSqlAfterDbHint(String text) {
         List<String> blocks = new ArrayList<>();
         String[] lines = text.split("\\R", -1);
         for (int i = 0; i < lines.length; i++) {
             String header = normalizeWs(lines[i]);
-            if (!header.contains("库下执行")) continue;
+            if (!isSqlDbHint(header)) continue;
 
             StringBuilder body = new StringBuilder();
             boolean inFence = false;
@@ -1718,7 +1920,7 @@ public class ReleaseDocService {
     private static boolean isSqlSectionStop(String line) {
         if (line == null || line.isBlank()) return false;
         String lower = line.toLowerCase(Locale.ROOT);
-        if (line.contains("库下执行")) return true;
+        if (isSqlDbHint(line)) return true;
         if (line.contains("注意") || line.contains("发版顺序") || line.contains("顺序发版")) return true;
         if (lower.contains("apollo") || lower.contains("xxl") || line.contains("配置变更") || line.contains("上线分支")) {
             return true;
@@ -1726,16 +1928,22 @@ public class ReleaseDocService {
         return line.matches("(?i)^(branch|分支|配置|备注)\\s*[:：].*");
     }
 
-    /** 是否像 SQL 语句/建表续行 */
+    /** 是否像 SQL 语句/建表续行 / INSERT…SELECT…WHERE 续行 */
     private static boolean looksLikeSqlContinuation(String line) {
         if (line == null || line.isBlank()) return false;
         if (SQL_LINE.matcher(line).matches()) return true;
-        String u = line.toUpperCase(Locale.ROOT);
+        String t = line.trim();
+        String u = t.toUpperCase(Locale.ROOT);
         return u.contains("CREATE TABLE") || u.contains("ALTER TABLE") || u.contains("DROP INDEX")
                 || u.contains("ADD COLUMN") || u.contains("ADD UNIQUE") || u.contains("PRIMARY KEY")
                 || u.contains("UNIQUE KEY") || u.contains("ENGINE=") || u.startsWith("KEY ")
-                || u.contains("COMMENT ") || line.trim().startsWith("(") || line.trim().startsWith(")")
-                || line.trim().startsWith(",");
+                || u.contains("COMMENT ") || t.startsWith("(") || t.startsWith(")")
+                || t.startsWith(",")
+                // INSERT … SELECT … FROM DUAL WHERE NOT EXISTS
+                || u.matches("^(FROM|WHERE|AND|OR|JOIN|LEFT\\s+JOIN|RIGHT\\s+JOIN|INNER\\s+JOIN|GROUP\\s+BY|"
+                        + "ORDER\\s+BY|HAVING|LIMIT|VALUES|SET|ON\\s+DUPLICATE|UNION|INTO)\\b.*")
+                || u.equals("DUAL") || u.startsWith("DUAL ")
+                || t.endsWith(";") && (u.contains("EXISTS") || u.contains("DUAL") || u.contains("WHERE"));
     }
 
     private static boolean looksLikeSqlContinuationContinuation(String line) {
@@ -1763,24 +1971,59 @@ public class ReleaseDocService {
         return line.contains("注意")
                 || line.contains("发版顺序")
                 || line.contains("顺序发版")
+                || line.contains("按顺序发版")
                 || line.contains("发版次序");
     }
 
     /**
-     * 备注写明不跟本版本上线时整单不统计，例如：
-     * {@code QA：暂时不跟7.23日版本上线}
+     * 备注/标题写明不跟本版本上线时标为候选（默认不进表，弹窗确认），例如：
+     * {@code QA：暂时不跟7.23日版本上线}、{@code 对外时间待定}
      */
     static boolean isDeferredFromThisRelease(String text) {
-        if (text == null || text.isBlank()) return false;
-        for (String raw : text.split("\\R")) {
-            String line = normalizeWs(raw);
-            if (line.isBlank()) continue;
-            if (DEFERRED_RELEASE.matcher(line).find()) {
-                return true;
+        return extractDeferredReason(text) != null;
+    }
+
+    /** 抽出命中「不跟版本」的那句，给弹窗展示；没有则 null */
+    static String extractDeferredReason(String... texts) {
+        if (texts == null) return null;
+        for (String text : texts) {
+            if (text == null || text.isBlank()) continue;
+            for (String raw : text.split("\\R")) {
+                String line = normalizeWs(raw);
+                if (line.isBlank()) continue;
+                Matcher m = DEFERRED_RELEASE.matcher(line);
+                if (m.find()) {
+                    String hit = m.group().trim();
+                    // 整行不太长就展示整行，方便对照标题话术
+                    if (line.length() <= 80) return line;
+                    int from = Math.max(0, m.start() - 12);
+                    int to = Math.min(line.length(), m.end() + 12);
+                    return line.substring(from, to).trim();
+                }
+            }
+            Matcher whole = DEFERRED_RELEASE.matcher(normalizeWs(text.replace('\n', ' ')));
+            if (whole.find()) {
+                return whole.group().trim();
             }
         }
-        // 整段再扫一次，防止话术被拆到两行
-        return DEFERRED_RELEASE.matcher(normalizeWs(text.replace('\n', ' '))).find();
+        return null;
+    }
+
+    /** 人工确认跟本版本：清掉候选标记，备注补上确认说明 */
+    public static IssueRow confirmFollowVersion(IssueRow row) {
+        if (row == null) return null;
+        row.setDeferredCandidate(false);
+        String reason = row.getDeferredReason();
+        row.setDeferredReason(null);
+        String note = REMARK_CONFIRM_FOLLOW_VERSION
+                + (reason != null && !reason.isBlank() ? "（原：" + reason + "）" : "");
+        String remarks = row.getRemarks();
+        if (remarks == null || remarks.isBlank() || "无".equals(remarks.trim())) {
+            row.setRemarks(note);
+        } else if (!remarks.contains("【人工确认】跟本版本")) {
+            row.setRemarks(note + "\n" + remarks);
+        }
+        return row;
     }
 
     private static final Pattern DEFERRED_RELEASE = Pattern.compile(
@@ -1791,7 +2034,12 @@ public class ReleaseDocService {
                     + "|不进本?[期次]?版本"
                     + "|不参加[^\\n]{0,20}(发版|上线)"
                     + "|本次不发版"
-                    + "|本版本不上线",
+                    + "|本版本不上线"
+                    // 「对外时间待定」= 还不跟这个版本上，整单不录入
+                    + "|对外时间\\s*待定"
+                    + "|对外(发版|上线)?时间\\s*待定"
+                    + "|上线时间\\s*待定"
+                    + "|发版时间\\s*待定",
             Pattern.CASE_INSENSITIVE);
 
     private static String normalizeWs(String s) {
@@ -2059,7 +2307,9 @@ public class ReleaseDocService {
     private static List<String> tokenizeBranchCandidates(String text) {
         if (text == null || text.isBlank()) return List.of();
         String t = text.trim();
-        t = t.replaceAll("[，,]\\s*(顺序发版|发版顺序|发版次序|注意).*$", "").trim();
+        t = t.replaceAll("[，,]\\s*(按)?顺序发版.*$", "").trim();
+        t = t.replaceAll("[，,]\\s*(发版顺序|发版次序|注意).*$", "").trim();
+        t = t.replaceAll("\\s+(按)?顺序发版\\s*$", "").trim();
         if (looksLikeSpringProp(t) || t.toLowerCase(Locale.ROOT).contains("://")) {
             return List.of();
         }
@@ -2067,12 +2317,15 @@ public class ReleaseDocService {
         List<String> out = new ArrayList<>();
         for (String p : parts) {
             if (p == null) continue;
-            String x = p.trim();
+            String x = unwrapBranchDecorators(p);
             if (x.isBlank()) continue;
             if (looksLikeDevBranchPath(x)) out.add(x);
         }
-        if (out.isEmpty() && looksLikeDevBranchPath(t)) {
-            out.add(t);
+        if (out.isEmpty()) {
+            String whole = unwrapBranchDecorators(t);
+            if (looksLikeDevBranchPath(whole)) {
+                out.add(whole);
+            }
         }
         return out;
     }
@@ -2202,11 +2455,15 @@ public class ReleaseDocService {
         if (hitKws.isEmpty()) return result;
 
         String branch = right;
-        branch = branch.replaceAll("[，,]\\s*(顺序发版|发版顺序|发版次序|注意).*$", "").trim();
+        // 「agent/x 按顺序发版」——按列表先后发；分支只要路径
+        branch = branch.replaceAll("[，,]\\s*(按)?顺序发版.*$", "").trim();
+        branch = branch.replaceAll("[，,]\\s*(发版顺序|发版次序|注意).*$", "").trim();
+        branch = branch.replaceAll("\\s+(按)?顺序发版\\s*$", "").trim();
+        branch = branch.replaceAll("\\s+(发版顺序|发版次序)\\s*$", "").trim();
         branch = branch.replaceAll("[；;].*$", "").trim();
         if (!hasBranchLikeValue("x: " + branch)) return result;
 
-        // 保持原文出现顺序
+        // 保持原文出现顺序（comment-service、app-admin → 先 comment-service 再 app-admin）
         hitKws.sort((a, b) -> Integer.compare(
                 indexOfIgnoreCase(left, a, 0),
                 indexOfIgnoreCase(left, b, 0)));
@@ -2221,7 +2478,10 @@ public class ReleaseDocService {
         return haystack.toLowerCase(Locale.ROOT).indexOf(needle.toLowerCase(Locale.ROOT), from);
     }
 
-    /** 兼容开发笔误：esport-api / esportsapi → esports-api；eventcenter → event-center；appuser → app-user；datacenter → data-center */
+    /**
+     * 兼容开发笔误 / 简称。
+     * admin → app-admin；steam-admin 是独立项目，不要并进 app-admin。
+     */
     private static String normalizeRepoName(String kw) {
         if (kw == null) return "";
         String k = kw.trim();
@@ -2239,6 +2499,10 @@ public class ReleaseDocService {
         }
         if (k.equalsIgnoreCase("datacenter") || k.equalsIgnoreCase("data_center")) {
             return "data-center";
+        }
+        // admin / appadmin → app-admin；steam-admin / app-admin 原样保留
+        if (k.equalsIgnoreCase("admin") || k.equalsIgnoreCase("appadmin") || k.equalsIgnoreCase("app_admin")) {
+            return "app-admin";
         }
         return k;
     }
@@ -2422,7 +2686,7 @@ public class ReleaseDocService {
             sb.append("<td>").append(sqlToStorage(r.getDbChanges())).append("</td>");
             sb.append("<td>").append(nlToBr(r.getConfigChanges())).append("</td>");
             sb.append("<td>").append(esc(nullToEmpty(r.getQaAssignee()))).append("</td>");
-            sb.append("<td>").append(nlToBr(r.getRemarks())).append("</td>");
+            sb.append("<td>").append(remarksToStorage(r.getRemarks())).append("</td>");
             sb.append("</tr>");
         }
         sb.append("</tbody></table>");
@@ -2442,6 +2706,24 @@ public class ReleaseDocService {
         for (int i = 0; i < parts.length; i++) {
             if (i > 0) b.append("<br/>");
             b.append(esc(parts[i]));
+        }
+        return b.toString();
+    }
+
+    /** 备注里「【需确认】」行标红，方便 QA 一眼看到要找开发对的事 */
+    private String remarksToStorage(String s) {
+        if (s == null || s.isBlank() || "无".equals(s)) return "无";
+        String[] parts = s.split("\\R");
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) b.append("<br/>");
+            String line = parts[i];
+            if (line != null && line.contains("【需确认】")) {
+                b.append("<span style=\"color:rgb(255,0,0);font-weight:bold;\">")
+                        .append(esc(line)).append("</span>");
+            } else {
+                b.append(esc(line));
+            }
         }
         return b.toString();
     }
@@ -2587,7 +2869,10 @@ public class ReleaseDocService {
         return "";
     }
 
-    /** 解析我们生成的发版表格：任务 / 上线分支 / DB变更 / 配置变更 / QA / 备注 */
+    /**
+     * 解析发版表格：任务 / 上线分支 / DB变更 / 配置变更 / QA / 备注。
+     * 一页可能有多张（如客户端一张、鸿蒙一张），全部读出，并记下各自上方的小标题。
+     */
     List<IssueRow> parseReleaseTable(String html) {
         List<IssueRow> rows = new ArrayList<>();
         if (html == null || html.isBlank()) return rows;
@@ -2598,34 +2883,52 @@ public class ReleaseDocService {
             Element first = trs.get(0);
             String head = first.text();
             if (!head.contains("任务") || !head.contains("DB")) continue;
+            String section = tableCaption(table);
 
             for (int i = 1; i < trs.size(); i++) {
                 Elements tds = trs.get(i).select("td");
                 if (tds.size() < 6) continue;
                 IssueRow row = new IssueRow();
                 Element taskTd = tds.get(0);
+                String cellTask = taskTd.text().trim();
                 Element a = taskTd.selectFirst("a[href]");
                 if (a != null) {
-                    row.setSummary(cleanTaskText(a.text().trim()));
+                    // 人工在 Wiki 里补的行常是「描述-APP-1234」只把单号做成链接，取整格文字才不丢描述
+                    String linkText = a.text().trim();
+                    row.setSummary(cleanTaskText(cellTask.length() > linkText.length() ? cellTask : linkText));
                     row.setIssueUrl(a.attr("abs:href"));
                     if (row.getIssueUrl().isBlank()) row.setIssueUrl(a.attr("href"));
                     Matcher km = ISSUE_KEY.matcher(row.getIssueUrl() + " " + row.getSummary());
                     if (km.find()) row.setIssueKey(km.group(1));
                 } else {
-                    row.setSummary(cleanTaskText(taskTd.text().trim()));
+                    row.setSummary(cleanTaskText(cellTask));
                 }
                 row.setBranches(cellText(tds.get(1)));
                 row.setDbChanges(cellText(tds.get(2)));
                 row.setConfigChanges(cellText(tds.get(3)));
                 row.setQaAssignee(tds.get(4).text().trim());
                 row.setRemarks(cellText(tds.get(5)));
+                row.setSection(section);
                 if (row.getSummary() != null && !row.getSummary().isBlank()) {
                     rows.add(row);
                 }
             }
-            if (!rows.isEmpty()) break;
         }
         return rows;
+    }
+
+    /** 表格上方最近一段非空文字（Wiki 里人写的小标题），没有则为空串 */
+    private static String tableCaption(Element table) {
+        for (Element cur = table; cur != null && !"body".equals(cur.tagName()); cur = cur.parent()) {
+            for (Element prev = cur.previousElementSibling(); prev != null; prev = prev.previousElementSibling()) {
+                if (!prev.select("table").isEmpty() || "table".equals(prev.tagName())) {
+                    return "";
+                }
+                String t = prev.text().trim();
+                if (!t.isEmpty()) return t;
+            }
+        }
+        return "";
     }
 
     private static String cellText(Element td) {

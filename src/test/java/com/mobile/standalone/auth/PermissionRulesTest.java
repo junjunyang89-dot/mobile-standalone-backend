@@ -109,6 +109,8 @@ class PermissionRulesTest {
         assertThat(PermissionRules.minRoleForRoute("/platform-users")).isEqualTo(PlatformRole.ADMIN);
         assertThat(PermissionRules.minRoleForRoute("/app-online-regression")).isEqualTo(PlatformRole.TESTER);
         assertThat(PermissionRules.minRoleForRoute("/app-packs")).isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.minRoleForRoute("/release-merge")).isEqualTo(PlatformRole.TESTER);
+        assertThat(PermissionRules.minRoleForRoute("/testing-merge")).isEqualTo(PlatformRole.TESTER);
         assertThat(PermissionRules.minRoleForRoute("/incident-playbooks")).isEqualTo(PlatformRole.TESTER);
         assertThat(PermissionRules.minRoleForRoute("/app-automation")).isEqualTo(PlatformRole.TESTER);
         // 没列出来的默认可见——菜单是给人找路的，默认藏起来只会让人以为功能没了

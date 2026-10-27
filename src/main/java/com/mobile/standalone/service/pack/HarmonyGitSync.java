@@ -12,7 +12,8 @@ import java.util.List;
  * 本机 {@code dev} 经常被误 pull 进 {@code dev221}/{@code dev222} 之类，和远端分叉后
  * {@code merge --ff-only} 会失败。打包要的是远端那份，所以用
  * {@code checkout -B &lt;branch&gt; origin/&lt;branch&gt;} 强制对齐；
- * 未提交改动仍拦截（{@code build-profile.json5} 本机签名路径除外）。
+ * 未提交改动仍拦截（{@code build-profile.json5} 本机签名、
+ * {@code oh-package-lock.json5} 本机换行重写除外）。
  */
 public final class HarmonyGitSync {
 
@@ -33,6 +34,7 @@ public final class HarmonyGitSync {
         if (!Files.isDirectory(gitDir)) {
             throw new IllegalStateException("找不到鸿蒙 Git 仓库：" + gitDir);
         }
+        resetPlatformManaged(gitDir);
         String dirty = AndroidGitSync.runGit(gitDir, 15, "status", "--porcelain");
         String blocking = blockingDirtySummary(dirty);
         if (blocking != null) {
@@ -97,6 +99,52 @@ public final class HarmonyGitSync {
         return b;
     }
 
+    /**
+     * 还原平台/DevEco 产生的本机改动，否则远端改了同一文件时 {@code checkout -B} 会拒绝：
+     * build-profile.json5（签名已缓存，对齐后写回）、oh-package-lock.json5（换行重写）、
+     * 以及仅被平台去掉剪贴板权限的 module.json5。
+     */
+    static List<String> resetPlatformManaged(Path gitDir) throws Exception {
+        String porcelain = AndroidGitSync.runGit(gitDir, 15, "status", "--porcelain");
+        List<String> reset = new ArrayList<>();
+        for (String raw : porcelain.split("\n")) {
+            if (raw.length() < 4 || raw.startsWith("??")) {
+                continue;
+            }
+            String path = porcelainPath(raw.stripTrailing());
+            if (path == null || path.isBlank()) {
+                continue;
+            }
+            if (isLocalSigningNoise(path) || isPasteboardPatchOnly(gitDir, path)) {
+                AndroidGitSync.runGit(gitDir, 15, "checkout", "--", path);
+                reset.add(path);
+            }
+        }
+        return reset;
+    }
+
+    private static boolean isPasteboardPatchOnly(Path gitDir, String path) {
+        String p = path.replace('\\', '/');
+        if (!p.endsWith(HarmonyPasteboardPermissionPatch.MODULE_REL)) {
+            return false;
+        }
+        try {
+            String head = AndroidGitSync.runGit(gitDir, 10, "show", "HEAD:" + p);
+            String working = Files.readString(gitDir.resolve(p));
+            return samePasteboardPatch(head, working);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean samePasteboardPatch(String head, String working) {
+        if (!head.contains(HarmonyPasteboardPermissionPatch.PERMISSION)) {
+            return false;
+        }
+        String patched = HarmonyPasteboardPermissionPatch.stripPermission(head);
+        return patched.replaceAll("\\s+", "").equals(working.replaceAll("\\s+", ""));
+    }
+
     /** 本机签名路径改动不挡同步；其它脏文件仍拦截。 */
     static String blockingDirtySummary(String porcelain) {
         if (porcelain == null || porcelain.isBlank()) {
@@ -135,6 +183,8 @@ public final class HarmonyGitSync {
 
     private static boolean isLocalSigningNoise(String path) {
         String p = path.replace('\\', '/');
-        return p.endsWith("build-profile.json5");
+        // 本机签名路径；DevEco/ohpm 常把 lock 换行重写，也不挡同步
+        return p.endsWith("build-profile.json5")
+                || p.endsWith("oh-package-lock.json5");
     }
 }

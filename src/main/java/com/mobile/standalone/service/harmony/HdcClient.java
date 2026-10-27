@@ -74,35 +74,71 @@ public class HdcClient {
         if (!available()) {
             return targets;
         }
-        ExecResult r = exec(defaultTimeoutSeconds, "list", "targets");
-        if (r.exitCode != 0) {
-            log.debug("hdc list targets 失败 exit={} out={}", r.exitCode, r.combined());
-            return targets;
+        // -v 才能看到 Offline/Unauthorized；无 -v 时离线机会直接变 [Empty]，设备列表里消失
+        ExecResult r = exec(defaultTimeoutSeconds, "list", "targets", "-v");
+        if (r.exitCode != 0 || blankOrEmptyTargets(r.stdout)) {
+            ExecResult plain = exec(defaultTimeoutSeconds, "list", "targets");
+            if (plain.exitCode == 0 && !blankOrEmptyTargets(plain.stdout)) {
+                r = plain;
+            } else if (r.exitCode != 0) {
+                log.debug("hdc list targets 失败 exit={} out={}", r.exitCode, r.combined());
+                return targets;
+            }
         }
         for (String line : r.stdout.split("\\R")) {
-            String t = line.trim();
-            if (t.isEmpty() || t.equalsIgnoreCase("Empty") || t.toLowerCase().contains("empty")) {
+            HdcTarget t = parseTargetLine(line);
+            if (t == null) {
                 continue;
             }
-            if (t.startsWith("[") && t.contains("Empty")) {
-                continue;
+            if (!t.authorized()) {
+                String reason = t.unauthorized() ? "Unauthorized" : (t.offline() ? "Offline" : "?");
+                log.warn("鸿蒙设备 {} 状态为 {}（请解锁手机并点允许 USB/HDC 调试）", t.serial(), reason);
             }
-            String[] parts = t.split("\\s+");
-            String serial = parts[0].trim();
-            if (serial.isEmpty()) {
-                continue;
-            }
-            String status = parts.length > 1 ? parts[1].trim().toLowerCase() : "";
-            boolean unauthorized = status.contains("unauthorized");
-            boolean offline = status.contains("offline");
-            boolean authorized = !unauthorized && !offline;
-            if (!authorized) {
-                log.warn("鸿蒙设备 {} 状态为 {}（请在手机上点允许 USB 调试）", serial,
-                        parts.length > 1 ? parts[1] : status);
-            }
-            targets.add(new HdcTarget(serial, authorized, unauthorized, offline));
+            targets.add(t);
         }
         return targets;
+    }
+
+    static boolean blankOrEmptyTargets(String stdout) {
+        if (stdout == null || stdout.isBlank()) {
+            return true;
+        }
+        String t = stdout.trim();
+        return t.equalsIgnoreCase("Empty")
+                || t.equalsIgnoreCase("[Empty]")
+                || t.toLowerCase().contains("[empty]");
+    }
+
+    /**
+     * 解析 {@code hdc list targets [-v]} 一行。
+     * 无 -v：{@code SERIAL} 或 {@code SERIAL Unauthorized}
+     * 有 -v：{@code SERIAL  USB  Offline  localhost} / {@code SERIAL  USB  Connected  localhost}
+     */
+    static HdcTarget parseTargetLine(String line) {
+        if (line == null) {
+            return null;
+        }
+        String t = line.trim();
+        if (t.isEmpty() || t.equalsIgnoreCase("Empty") || t.toLowerCase().contains("empty")) {
+            return null;
+        }
+        if (t.startsWith("[") && t.toLowerCase().contains("empty")) {
+            return null;
+        }
+        String[] parts = t.split("\\s+");
+        String serial = parts[0].trim();
+        if (serial.isEmpty()) {
+            return null;
+        }
+        // 跳过表头
+        if ("serial".equalsIgnoreCase(serial) || "connect-key".equalsIgnoreCase(serial)) {
+            return null;
+        }
+        String lower = t.toLowerCase();
+        boolean unauthorized = lower.contains("unauthorized");
+        boolean offline = lower.contains("offline");
+        boolean authorized = !unauthorized && !offline;
+        return new HdcTarget(serial, authorized, unauthorized, offline);
     }
 
     public record HdcTarget(String serial, boolean authorized, boolean unauthorized, boolean offline) {}
@@ -113,7 +149,8 @@ public class HdcClient {
     }
 
     public ExecResult install(String deviceId, String hapPath) {
-        return exec(Math.max(defaultTimeoutSeconds, 300), "-t", deviceId, "install", hapPath);
+        // -g：安装时尝试授予 user_grant 权限；hdc 失败时仍常返回 exit 0，见 ExecResult.ok()
+        return exec(Math.max(defaultTimeoutSeconds, 300), "-t", deviceId, "install", "-g", hapPath);
     }
 
     public ExecResult uninstall(String deviceId, String bundleName) {
@@ -217,7 +254,19 @@ public class HdcClient {
         }
 
         public boolean ok() {
-            return exitCode == 0;
+            if (exitCode != 0) {
+                return false;
+            }
+            // hdc install/uninstall 失败时也经常 exit 0，只在 stdout 里写 msg:error
+            String c = combined();
+            if (c.isBlank()) {
+                return true;
+            }
+            String lower = c.toLowerCase();
+            return !lower.contains("msg:error")
+                    && !lower.contains("error: failed")
+                    && !lower.contains("failed to install")
+                    && !lower.contains("failed to uninstall");
         }
 
         public String combined() {

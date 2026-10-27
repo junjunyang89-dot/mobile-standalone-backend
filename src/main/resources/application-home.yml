@@ -1,4 +1,4 @@
-# 在家：连本机 MySQL，避免每条 SQL 都走公网。
+# 在家：连本机 MySQL（外置盘 APFS 镜像，见 ./scripts/local-db.sh），大文件也落外置盘。
 # 切换：./scripts/use-db.sh home
 spring:
   datasource:
@@ -10,3 +10,13 @@ spring:
       minimum-idle: 3
       connection-timeout: 5000
       validation-timeout: 3000
+
+# 图片 / 包 / 报告等：直接放 MOVESPEED（exFAT 存普通文件没问题）
+app:
+  data-dir: /Volumes/MOVESPEED/mobile-standalone/files/data
+  reports-dir: /Volumes/MOVESPEED/mobile-standalone/files/reports
+  upload-dir: /Volumes/MOVESPEED/mobile-standalone/files/uploads/applications
+  agent-upload-dir: /Volumes/MOVESPEED/mobile-standalone/files/uploads/agent-files
+  screenshot-dir: /Volumes/MOVESPEED/mobile-standalone/files/screenshots
+  screenshot:
+    inspect-dir: /Volumes/MOVESPEED/mobile-standalone/files/screenshots-inspect

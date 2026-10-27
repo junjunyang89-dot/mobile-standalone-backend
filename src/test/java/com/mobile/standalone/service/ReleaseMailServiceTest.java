@@ -3,6 +3,7 @@ package com.mobile.standalone.service;
 import com.mobile.standalone.config.ReleaseDocProperties;
 import com.mobile.standalone.dto.ReleaseDocDtos.IssueRow;
 import com.mobile.standalone.dto.ReleaseDocDtos.MailDraftRequest;
+import com.mobile.standalone.dto.ReleaseDocDtos.SendMailRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.mail.javamail.JavaMailSender;
 
@@ -11,14 +12,27 @@ import java.time.ZoneId;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
 
 class ReleaseMailServiceTest {
 
+    private ReleaseMailService svcWithWiki(List<IssueRow> wikiRows) {
+        ReleaseDocProperties props = new ReleaseDocProperties();
+        props.getMail().setDefaultTo("yangjunjun@pwrd.com");
+        ReleaseDocService doc = mock(ReleaseDocService.class);
+        when(doc.loadIssueRowsFromWikiUrl(anyString())).thenReturn(wikiRows);
+        return new ReleaseMailService(props, mock(JavaMailSender.class), doc);
+    }
+
+    /** Wiki 不可用时回退前端 rows（兼容旧单测路径） */
     private ReleaseMailService svc() {
         ReleaseDocProperties props = new ReleaseDocProperties();
         props.getMail().setDefaultTo("yangjunjun@pwrd.com");
-        return new ReleaseMailService(props, mock(JavaMailSender.class), mock(ReleaseDocService.class));
+        ReleaseDocService doc = mock(ReleaseDocService.class);
+        when(doc.loadIssueRowsFromWikiUrl(anyString()))
+                .thenThrow(new IllegalStateException("wiki down"));
+        return new ReleaseMailService(props, mock(JavaMailSender.class), doc);
     }
 
     @Test
@@ -64,6 +78,71 @@ class ReleaseMailServiceTest {
     }
 
     @Test
+    void draftPreferWikiOverStaleFrontendRows() {
+        IssueRow stale = new IssueRow();
+        stale.setSummary("旧任务");
+        stale.setDbChanges("无");
+        stale.setBranches("无");
+        stale.setConfigChanges("无");
+        stale.setRemarks("无");
+
+        IssueRow fresh = new IssueRow();
+        fresh.setSummary("Wiki最新任务");
+        fresh.setDbChanges("steamcn_comment库：\nALTER TABLE t ADD c INT;");
+        fresh.setBranches("app-admin: agent/x");
+        fresh.setConfigChanges("无");
+        fresh.setRemarks("无");
+
+        MailDraftRequest req = new MailDraftRequest();
+        req.setTitle("10月8日 测试版本");
+        req.setWikiPageUrl("https://wiki.shdev.net/pages/viewpage.action?pageId=99");
+        req.setRows(List.of(stale));
+
+        var draft = svcWithWiki(List.of(fresh)).draft(req);
+        assertTrue(draft.getHtmlBody().contains("Wiki最新任务"), draft.getHtmlBody());
+        assertFalse(draft.getHtmlBody().contains("旧任务"), draft.getHtmlBody());
+        assertTrue(draft.getMessage().contains("Wiki"), draft.getMessage());
+    }
+
+    @Test
+    void draftGroupsTablesBySectionWhenWikiHasSeveral() {
+        IssueRow client = new IssueRow();
+        client.setSummary("侧边栏UI升级");
+        client.setDbChanges("无");
+        client.setSection("10月15日 电竞4.1.9客户端版本");
+        IssueRow harmony = new IssueRow();
+        harmony.setSummary("【鸿蒙】【V224】完美时刻v4");
+        harmony.setDbChanges("无");
+        harmony.setSection("10月15日 鸿蒙224单子");
+
+        MailDraftRequest req = new MailDraftRequest();
+        req.setTitle("10月15日 电竞4.1.9客户端版本");
+        req.setWikiPageUrl("https://wiki.shdev.net/pages/viewpage.action?pageId=119732327");
+
+        String html = svcWithWiki(List.of(client, harmony)).draft(req).getHtmlBody();
+        assertTrue(html.contains("<b>10月15日 鸿蒙224单子</b>"), html);
+        assertTrue(html.indexOf("侧边栏UI升级") < html.indexOf("鸿蒙224单子"), html);
+        assertTrue(html.indexOf("鸿蒙224单子") < html.indexOf("完美时刻v4"), html);
+        assertEquals(2, html.split("<table").length - 1, html);
+    }
+
+    @Test
+    void draftSingleTableHasNoSectionHeading() {
+        IssueRow only = new IssueRow();
+        only.setSummary("任务C");
+        only.setDbChanges("无");
+        only.setSection("10月15日 电竞4.1.9客户端版本");
+
+        MailDraftRequest req = new MailDraftRequest();
+        req.setTitle("10月15日 电竞4.1.9客户端版本");
+        req.setWikiPageUrl("https://wiki.shdev.net/pages/viewpage.action?pageId=1");
+
+        String html = svcWithWiki(List.of(only)).draft(req).getHtmlBody();
+        assertFalse(html.contains("<b>10月15日 电竞4.1.9客户端版本</b>"), html);
+        assertEquals(1, html.split("<table").length - 1, html);
+    }
+
+    @Test
     void sqlDeadlineIsDayBeforeRelease() {
         assertEquals("麻烦何政于9月16日（发版前一日）执行完毕",
                 svc().buildSqlDeadlinePhrase("9月17日 PogPog H5&服务端版本"));
@@ -95,5 +174,27 @@ class ReleaseMailServiceTest {
         assertFalse(draft.isHasDb());
         assertTrue(draft.getHtmlBody().contains("相关发布内容已准备就绪"));
         assertFalse(draft.getHtmlBody().contains("二、DB变更执行"));
+    }
+
+    @Test
+    void sendWithoutWikiFallsBackToHtmlBody() {
+        ReleaseDocProperties props = new ReleaseDocProperties();
+        props.getMail().setUsername("u");
+        props.getMail().setPassword("p");
+        props.getMail().setFrom("from@pwrd.com");
+        JavaMailSender sender = mock(JavaMailSender.class);
+        when(sender.createMimeMessage()).thenReturn(new jakarta.mail.internet.MimeMessage((jakarta.mail.Session) null));
+
+        ReleaseMailService mail = new ReleaseMailService(props, sender, mock(ReleaseDocService.class));
+        SendMailRequest req = new SendMailRequest();
+        req.setTo("to@pwrd.com");
+        req.setSubject("主题");
+        req.setHtmlBody("<p>手改正文</p>");
+
+        var r = mail.send(req);
+        assertTrue(r.isOk());
+        assertEquals("<p>手改正文</p>", r.getHtmlBody());
+        assertTrue(r.getMessage().contains("已发送"));
+        verify(sender).send(any(jakarta.mail.internet.MimeMessage.class));
     }
 }

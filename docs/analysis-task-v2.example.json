@@ -1,0 +1,42 @@
+{
+  "contractVersion": "2",
+  "externalId": "APP-9119-snapshot-001",
+  "businessGroup": "APP",
+  "requirementKey": "APP-9119",
+  "materialVersion": "snapshot-001",
+  "expectedReportRevision": "report-revision-001",
+  "changeNotes": "分析本单需求与多项目交互；SQL 仅用于分析，不执行。",
+  "repositories": [
+    {
+      "projectId": "app-engine",
+      "baseRef": "release-base",
+      "targetRef": "feature-branch"
+    }
+  ],
+  "materials": [
+    {
+      "id": "requirement-main",
+      "type": "requirement",
+      "title": "已确认需求与验收条件",
+      "content": "替换为本单的需求正文和验收条件。"
+    },
+    {
+      "id": "design-main",
+      "type": "design",
+      "title": "本单设计稿节点",
+      "url": "https://www.figma.com/design/REPLACE?node-id=REPLACE"
+    },
+    {
+      "id": "schema-orders",
+      "type": "schema",
+      "title": "相关老表当前结构",
+      "content": "替换为当前 CREATE TABLE，包含字段注释及索引。"
+    },
+    {
+      "id": "migration-orders",
+      "type": "migration",
+      "title": "本次数据库迁移",
+      "content": "替换为本次 ALTER/CREATE SQL，并说明测试环境是否已执行。"
+    }
+  ]
+}

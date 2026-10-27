@@ -190,7 +190,7 @@ public class AiCaseGenerator {
 
     public Job start(Request req, BranchTarget into) {
         if (!qwen.isConfigured()) {
-            throw new IllegalStateException("千问没配：application.yml 里 diagnosis.ai.api-key 填上密钥");
+            throw new IllegalStateException(qwen.notConfiguredMessage());
         }
         if (CaptureCatalogService.INBOX.equals(req.project())) {
             throw new IllegalArgumentException("待归类的接口先归到项目再生成");
@@ -317,7 +317,7 @@ public class AiCaseGenerator {
      */
     public synchronized Batch startAll(Set<EndpointLevel> levels, boolean tryRun, boolean runWrites) {
         if (!qwen.isConfigured()) {
-            throw new IllegalStateException("千问没配：application.yml 里 diagnosis.ai.api-key 填上密钥");
+            throw new IllegalStateException(qwen.notConfiguredMessage());
         }
         if (levels == null || levels.isEmpty()) {
             throw new IllegalArgumentException("至少选一个级别");

@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 /**
- * 发版上线看板：按项目汇总分支，人工勾选已上线 / 已合 master。
+ * 发版上线看板：按项目汇总分支，分支级勾选已合并 / 已上线。
  */
 @RestController
 @RequestMapping("/release-go-live")
@@ -41,8 +41,40 @@ public class ReleaseGoLiveController {
             return ResponseEntity.ok(releaseGoLiveService.saveState(
                     str(body, "wikiPageId"),
                     str(body, "project"),
+                    str(body, "branch"),
                     bool(body, "mergedMaster"),
                     bool(body, "released")));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : e.toString()));
+        }
+    }
+
+    /** 每日发版校对：日期 + 项目：分支列表 → 待合并 / Jenkins / 待上线 */
+    @PostMapping("/daily")
+    public ResponseEntity<?> daily(@RequestBody Map<String, Object> body) {
+        try {
+            return ResponseEntity.ok(releaseGoLiveService.dailyChecklist(
+                    str(body, "date"),
+                    str(body, "text")));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("message", e.getMessage() != null ? e.getMessage() : e.toString()));
+        }
+    }
+
+    /** 再核对一次该分支是否已在 master（结果写回看板） */
+    @PostMapping("/verify-master")
+    public ResponseEntity<?> verifyMaster(@RequestBody Map<String, Object> body) {
+        try {
+            return ResponseEntity.ok(releaseGoLiveService.verifyMaster(
+                    str(body, "wikiPageId"),
+                    str(body, "project"),
+                    str(body, "branch")));
         } catch (IllegalArgumentException | IllegalStateException e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         } catch (Exception e) {

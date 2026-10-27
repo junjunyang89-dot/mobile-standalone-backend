@@ -195,6 +195,11 @@ public class AppPackService {
         String nodeHome = HarmonyPackTools.nodeHome(nodeHomeConfig);
         boolean projectOk = Files.isDirectory(project)
                 && Files.isRegularFile(project.resolve("build-profile.json5"));
+        if (projectOk) {
+            // 页面判断签名就绪前，先尝试写回缓存的本机签名（对齐远端后常见 Windows 路径）
+            HarmonyLocalSigning.rememberIfLocal(project);
+            HarmonyLocalSigning.restore(project);
+        }
         List<HarmonyBuildProfile.Product> products = projectOk
                 ? HarmonyBuildProfile.products(project) : List.of();
         Map<String, HarmonyBuildProfile.Product> byName = new LinkedHashMap<>();
@@ -203,11 +208,14 @@ public class AppPackService {
         }
         // Testing 不在 products 里，是 buildMode=devTest；产物目录复用 debug
         List<Map<String, Object>> productVos = new ArrayList<>();
+        String testingHint = "buildMode=devTest，对应 DevEco 测试包（可切测试环境）。"
+                + "本机签名会自动缓存；对齐远端后写回，无需每次重置。"
+                + "若装不上且提示 READ_PASTEBOARD，打包时会临时去掉该权限以便安装。";
         productVos.add(harmonyPackKindVo(
                 HarmonyPackCommand.KIND_TESTING,
                 byName.get(HarmonyPackCommand.KIND_DEBUG),
                 byName.get(HarmonyPackCommand.KIND_RELEASE),
-                "buildMode=devTest，对应 DevEco 测试包（可切测试环境）"));
+                testingHint));
         productVos.add(harmonyPackKindVo(
                 HarmonyPackCommand.KIND_DEBUG,
                 byName.get(HarmonyPackCommand.KIND_DEBUG),
@@ -219,12 +227,13 @@ public class AppPackService {
                 null,
                 null));
         if (productVos.stream().noneMatch(it -> Boolean.TRUE.equals(it.get("signingReady"))) && projectOk) {
-            productVos.clear();
-            productVos.add(Map.of(
-                    "id", HarmonyPackCommand.KIND_TESTING,
-                    "label", "Testing",
-                    "signingReady", true,
-                    "hint", "buildMode=devTest，对应 DevEco 测试包（可切测试环境）"));
+            // 不再假装 signingReady=true：否则页面可点、装机必挂
+            for (Map<String, Object> vo : productVos) {
+                if (!Boolean.TRUE.equals(vo.get("signingReady"))) {
+                    vo.put("hint", "本机签名未就绪。请在 DevEco → Signing Configs 对 debug 勾选自动签名并 Apply 一次；"
+                            + "平台会缓存到 ~/.mobile-standalone/harmony-signing/，之后打包自动恢复。");
+                }
+            }
         }
         boolean ready = projectOk && hvigorw != null && nodeHome != null;
         String defaultBranch = harmonyBranch == null || harmonyBranch.isBlank()
@@ -502,8 +511,9 @@ public class AppPackService {
         boolean ready = sign == null || sign.signingReady();
         vo.put("signingReady", ready);
         if (!ready && sign != null) {
-            vo.put("hint", "本机找不到该产品的签名文件（" + sign.signingConfig()
-                    + "）。Testing/Debug 请用 DevEco 自动签名，或把 signingConfig 指到本机已有材料。");
+            vo.put("hint", "本机找不到签名文件（" + sign.signingConfig()
+                    + " → " + (sign.storeFile() == null || sign.storeFile().isBlank() ? "空路径" : sign.storeFile())
+                    + "）。请在 DevEco 对 debug 勾选自动签名并 Apply 一次；平台会缓存，之后不用每次重置。");
         } else if (extraHint != null && !extraHint.isBlank()) {
             vo.put("hint", extraHint);
         }
@@ -754,8 +764,25 @@ public class AppPackService {
             appendLine(logBuf, "[平台] Git 仓库 " + gitRoot);
             appendLine(logBuf, "[平台] 切到 " + gitBranch + " 并对齐 origin/" + gitBranch);
             flushLog(id, logBuf);
+            // 对齐远端会冲掉本机签名路径；先记住再写回
+            HarmonyLocalSigning.rememberIfLocal(project);
             HarmonyGitSync.Result git = HarmonyGitSync.sync(gitRoot, gitBranch);
             appendLine(logBuf, "[平台] 当前 " + git.branch() + " @" + git.commit());
+            if (HarmonyLocalSigning.restore(project)) {
+                appendLine(logBuf, "[平台] 已恢复本机签名配置（不必每次 DevEco 重置）");
+            } else if (!HarmonyLocalSigning.hasUsableLocalStore(project)) {
+                appendLine(logBuf, "[平台] 警告：本机签名未就绪（storeFile 指向 Windows 或不存在）。"
+                        + "请在 DevEco 对 debug 勾选自动签名并 Apply 一次，平台会缓存供后续打包使用。");
+            }
+            String signingName = HarmonyBuildProfile.products(project).stream()
+                    .filter(p -> p.name().equals(hvigorProduct))
+                    .map(HarmonyBuildProfile.Product::signingConfig)
+                    .findFirst()
+                    .orElse(hvigorProduct);
+            String pasteNote = HarmonyPasteboardPermissionPatch.applyIfProfileLacksAcl(project, signingName);
+            if (pasteNote != null) {
+                appendLine(logBuf, "[平台] " + pasteNote);
+            }
             appendLine(logBuf, "[平台] 包类型 " + HarmonyPackCommand.label(packKind)
                     + "（product=" + hvigorProduct
                     + ", buildMode=" + HarmonyPackCommand.buildMode(packKind) + "）");
@@ -897,6 +924,7 @@ public class AppPackService {
 
     private void runIos(String id, Path project, String branch, String deviceId) {
         StringBuilder logBuf = new StringBuilder();
+        IosPodfilePatch.Applied podfilePatch = IosPodfilePatch.Applied.none(project.resolve("Podfile"));
         try {
             markRunning(id);
             Path gitRoot = IosGitSync.gitRoot(project, iosGitDir);
@@ -923,6 +951,11 @@ public class AppPackService {
             if (pod == null) {
                 throw new IllegalStateException("找不到 pod");
             }
+            podfilePatch = IosPodfilePatch.apply(project);
+            for (String note : podfilePatch.notes()) {
+                appendLine(logBuf, "[平台] Podfile 临时补丁：" + note);
+            }
+            flushLog(id, logBuf);
             List<String> podCmd = List.of(pod, "install");
             appendLine(logBuf, "[平台] " + String.join(" ", podCmd));
             flushLog(id, logBuf);
@@ -939,7 +972,10 @@ public class AppPackService {
             if (podCode != 0) {
                 throw new IllegalStateException("pod install 失败，退出码 " + podCode);
             }
-
+            for (String note : IosPodsBuildPatch.apply(project)) {
+                appendLine(logBuf, "[平台] Pods 编译补丁：" + note);
+            }
+            flushLog(id, logBuf);
             Path jobDir = Path.of(outputDir).toAbsolutePath().normalize().resolve(id);
             Files.createDirectories(jobDir);
             Path archivePath = jobDir.resolve("esport-app.xcarchive");
@@ -999,6 +1035,11 @@ public class AppPackService {
         } catch (Exception e) {
             markFailed(id, logBuf, e);
         } finally {
+            try {
+                podfilePatch.restore();
+            } catch (Exception restoreEx) {
+                log.warn("[app-pack] 还原 Podfile 失败: {}", restoreEx.getMessage());
+            }
             running.remove(id);
             busy.set(false);
         }

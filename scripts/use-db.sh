@@ -26,10 +26,21 @@ if [[ "$choice" != "home" && "$choice" != "office" ]]; then
 fi
 
 printf 'spring.profiles.active=%s\n' "$choice" > "$OUT"
+SECRETS="$ROOT/scripts/db-secrets.local"
+if [[ "$choice" == "home" && -f "$SECRETS" ]]; then
+  # shellcheck disable=SC1090
+  source "$SECRETS"
+  {
+    printf 'HOME_DB_HOST=%s\n' "${HOME_DB_HOST:-127.0.0.1}"
+    printf 'HOME_DB_PORT=%s\n' "${HOME_DB_PORT:-3306}"
+    printf 'HOME_DB_USERNAME=%s\n' "${HOME_DB_USER:-root}"
+    printf 'HOME_DB_PASSWORD=%s\n' "${HOME_DB_PASSWORD:-}"
+  } >> "$OUT"
+fi
 echo "已切换到 ${choice}。重启后端后生效（mvn spring-boot:run）。"
 if [[ "$choice" == "home" ]]; then
-  echo "本机库：127.0.0.1:3306 / mobile_standalone"
-  echo "第一次在家用：先起本机 MySQL，再 ./scripts/apply-sql.sh init-home"
+  echo "本机库：${HOME_DB_HOST:-127.0.0.1}:${HOME_DB_PORT:-3306} / mobile_standalone"
+  echo "第一次用：./scripts/local-db.sh setup 建本机独立实例（3316）"
 else
   echo "公司库：118.25.144.133:13306（公网直连）"
 fi

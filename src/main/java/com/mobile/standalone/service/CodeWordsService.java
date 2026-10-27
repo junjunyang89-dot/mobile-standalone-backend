@@ -122,7 +122,7 @@ public class CodeWordsService {
         } catch (IllegalStateException | IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
-            throw new IllegalStateException("千问调用失败: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), e);
+            throw new IllegalStateException(qwen.providerLabel() + " 调用失败: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), e);
         }
     }
 
@@ -317,7 +317,7 @@ public class CodeWordsService {
 
     private void ensureQwenConfigured() {
         if (!qwen.isConfigured()) {
-            throw new IllegalStateException("千问未配置：请在 application.yml 的 diagnosis.ai.api-key 填入密钥");
+            throw new IllegalStateException(qwen.notConfiguredMessage());
         }
     }
 

@@ -44,7 +44,7 @@ public class HandbookAiSummarizer {
             String hintProject
     ) throws Exception {
         if (!qwen.isConfigured()) {
-            throw new IllegalStateException("千问未配置：请在 application.yml 的 diagnosis.ai.api-key 填入密钥");
+            throw new IllegalStateException(qwen.notConfiguredMessage());
         }
         boolean hasText = text != null && !text.isBlank();
         boolean hasImages = images != null && !images.isEmpty();

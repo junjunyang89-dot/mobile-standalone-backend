@@ -10,8 +10,10 @@ HOST="192.168.10.5"
 PORT="3306"
 if [[ -f "$ROOT/.db-profile.properties" ]] \
   && grep -q 'spring.profiles.active=home' "$ROOT/.db-profile.properties"; then
-  HOST="127.0.0.1"
-  PORT="3306"
+  HOST="$(sed -n 's/^HOME_DB_HOST=//p' "$ROOT/.db-profile.properties")"
+  PORT="$(sed -n 's/^HOME_DB_PORT=//p' "$ROOT/.db-profile.properties")"
+  HOST="${HOST:-127.0.0.1}"
+  PORT="${PORT:-3306}"
 fi
 
 if ! nc -z -w 3 "$HOST" "$PORT" >/dev/null 2>&1; then

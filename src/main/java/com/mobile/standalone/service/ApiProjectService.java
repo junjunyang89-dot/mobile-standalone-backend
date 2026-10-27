@@ -421,7 +421,7 @@ public class ApiProjectService {
         }
         for (ApiProjectCatalog.Category cat : ApiProjectCatalog.categoriesInOrder()) {
             jdbcTemplate.update(
-                    "INSERT INTO api_project_categories (cat_key, label, sort_order, builtin) VALUES (?, ?, ?, 1)",
+                    "INSERT INTO api_project_categories (cat_key, label, sort_order, builtin) VALUES (?, ?, ?, ?)",
                     cat.key(), cat.label(), categorySeedOrder(cat.key()), 1);
         }
         log.info("[api-projects] 已种子内置分类");

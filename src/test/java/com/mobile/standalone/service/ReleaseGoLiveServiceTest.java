@@ -2,6 +2,7 @@ package com.mobile.standalone.service;
 
 import com.mobile.standalone.config.ReleaseDocProperties;
 import com.mobile.standalone.dto.ReleaseDocDtos.IssueRow;
+import com.mobile.standalone.service.releasemerge.ReleaseMergeService;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -20,7 +21,9 @@ class ReleaseGoLiveServiceTest {
         return new ReleaseGoLiveService(
                 new ReleaseDocService(props),
                 props,
-                mock(JdbcTemplate.class));
+                mock(JdbcTemplate.class),
+                mock(ReleaseMergeService.class),
+                mock(ReleaseJenkinsPackageService.class));
     }
 
     @Test
@@ -70,6 +73,46 @@ class ReleaseGoLiveServiceTest {
         assertEquals("app-swift-v3", projects.get(1).get("project"));
         assertTrue(ReleaseGoLiveService.isFrontendProject("app-swift"));
         assertFalse(ReleaseGoLiveService.isFrontendProject("data-center"));
+    }
+
+    @Test
+    void aggregateKeepsBranchToIssueLinkWithoutAppKeyInBranch() {
+        IssueRow a = new IssueRow();
+        a.setIssueKey("APP-9183");
+        a.setSummary("评分开关");
+        a.setBranches("app-admin: agent/2026-09-24/rating_switch");
+        IssueRow b = new IssueRow();
+        b.setIssueKey("APP-9066");
+        b.setSummary("新手攻略");
+        b.setBranches("app-admin: agent/2026-09-15/dota-deadlock-introduction");
+
+        ReleaseGoLiveService s = svc();
+        Map<String, ReleaseGoLiveService.ProjectAgg> agg = s.aggregateByProject(List.of(a, b));
+        assertEquals(2, agg.get("app-admin").branches.size());
+        assertEquals(
+                "APP-9183",
+                agg.get("app-admin").issuesForBranch("agent/2026-09-24/rating_switch").get(0).get("issueKey"));
+        assertEquals(
+                "APP-9066",
+                agg.get("app-admin").issuesForBranch("agent/2026-09-15/dota-deadlock-introduction").get(0).get("issueKey"));
+    }
+
+    @Test
+    void cleanBranchStripsWrappingParens() {
+        assertEquals(
+                "rjy/2026-9-23/APP-9164/refine",
+                ReleaseGoLiveService.cleanBranch("(rjy/2026-9-23/APP-9164/refine)"));
+        assertEquals("cj/app-9166", ReleaseGoLiveService.cleanBranch("cj/app-9166"));
+    }
+
+    @Test
+    void parseBranchWithParens() {
+        ReleaseGoLiveService s = svc();
+        List<ReleaseGoLiveService.ProjectBranch> pairs =
+                s.parseProjectBranches("app-swift: (rjy/2026-9-23/APP-9164/refine)", propsKeywords());
+        assertEquals(1, pairs.size());
+        assertEquals("app-swift", pairs.get(0).project());
+        assertEquals("rjy/2026-9-23/APP-9164/refine", pairs.get(0).branch());
     }
 
     private List<String> propsKeywords() {

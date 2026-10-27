@@ -142,6 +142,14 @@ public class ReleaseMergeService {
     // ---------------------------------------------------------------- 核对
 
     public Map<String, Object> check(String text, List<Map<String, Object>> rows) {
+        return check(text, rows, null);
+    }
+
+    /**
+     * @param targetOverride 非空时所有行合进这个分支（如 {@code testing}），忽略项目 baseBranch
+     */
+    public Map<String, Object> check(String text, List<Map<String, Object>> rows, String targetOverride) {
+        String forced = blankToNull(targetOverride);
         List<ApiProject> projects = projectMapper.findAll(true);
         List<Map<String, Object>> results = new ArrayList<>();
         List<Map<String, Object>> todo = new ArrayList<>();
@@ -150,6 +158,7 @@ public class ReleaseMergeService {
                 String code = str(r.get("projectCode"));
                 String branch = str(r.get("branch"));
                 Map<String, Object> row = baseRow(str(r.get("raw")), code, branch);
+                copyMeta(r, row);
                 ApiProject p = code == null ? null : projectMapper.findByCode(code);
                 if (p == null) {
                     row.put("status", "BLOCK");
@@ -158,7 +167,7 @@ public class ReleaseMergeService {
                     row.put("status", "BLOCK");
                     blockers(row).add("分支名不对：" + branch);
                 } else {
-                    fillProject(row, p, "MANUAL");
+                    fillProject(row, p, "MANUAL", forced);
                     todo.add(row);
                 }
                 results.add(row);
@@ -176,7 +185,7 @@ public class ReleaseMergeService {
                         row.put("status", "BLOCK");
                         blockers(row).add("项目管理里没认出「" + l.project() + "」，在下拉里选一下");
                     } else {
-                        fillProject(row, m.project(), m.how());
+                        fillProject(row, m.project(), m.how(), forced);
                         todo.add(row);
                     }
                 }
@@ -184,7 +193,9 @@ public class ReleaseMergeService {
             }
         }
         if (results.isEmpty()) {
-            throw new IllegalArgumentException("没有要核对的分支，每行写一个「项目：分支」");
+            throw new IllegalArgumentException(forced != null
+                    ? "没有要核对的分支，先从 JIRA 拉分支或手工补项目和分支"
+                    : "没有要核对的分支，每行写一个「项目：分支」");
         }
         if (!todo.isEmpty()) {
             inspectAll(todo);
@@ -195,6 +206,7 @@ public class ReleaseMergeService {
         out.put("rows", results);
         out.put("reposDir", reposDir().toString());
         out.put("tokenSet", setting(tokenKey()) != null);
+        out.put("target", forced);
         return out;
     }
 
@@ -284,11 +296,11 @@ public class ReleaseMergeService {
         if (!mergedIn.isEmpty()) {
             row.put("mergedIn", mergedIn);
             warnings(row).add(warn("MERGED_IN", "分支里合进过别的分支：" + String.join("、", mergedIn)
-                    + "。如果它们今天不上线，合 master 会把它们的代码一起带上去，先和开发确认"));
+                    + "。如果它们不该进 " + target + "，合进去会把它们的代码一起带上，先和开发确认"));
         }
         if (authors.size() > 1) {
             warnings(row).add(warn("AUTHORS", "分支里有 " + authors.size() + " 个人的提交：" + String.join("、", authors)
-                    + "，确认都是这次要上线的"));
+                    + "，确认都是这次要合进 " + target + " 的"));
         }
 
         MergeRules.Files files = MergeRules.classify(MasterRepo.nameStatus(dir, m, b));
@@ -301,9 +313,9 @@ public class ReleaseMergeService {
                 risky.addAll(MergeRules.riskySql(MasterRepo.show(dir, b, f, SQL_MAX_CHARS)));
             }
             row.put("riskySql", new ArrayList<>(risky));
-            warnings(row).add(warn("SQL", "改了 " + files.sql().size() + " 个 SQL 文件，发版前先执行 SQL，再发这个服务"
-                    + (risky.isEmpty() ? "" : "。注意有：" + String.join("、", risky)
-                    + "——老代码还在跑时先执行可能让老服务出错，和开发确认执行时机")));
+            warnings(row).add(warn("SQL", "改了 " + files.sql().size() + " 个 SQL 文件，合进 " + target
+                    + " 前先和开发确认有没有必须一起准备的库表/脚本"
+                    + (risky.isEmpty() ? "" : "。注意有：" + String.join("、", risky))));
         }
         List<String> keys = MergeRules.newConfigKeys(MasterRepo.diffLines(dir, m, b, "*.java", "*.kt"));
         if (!files.config().isEmpty() || !keys.isEmpty()) {
@@ -317,11 +329,13 @@ public class ReleaseMergeService {
                 parts.add("代码新读了配置项 " + String.join("、", keys.size() > 8 ? keys.subList(0, 8) : keys)
                         + (keys.size() > 8 ? " 等 " + keys.size() + " 个" : ""));
             }
-            warnings(row).add(warn("CONFIG", String.join("；", parts) + "。发版前先在配置中心加好，否则上线拿不到值会挂"));
+            warnings(row).add(warn("CONFIG", String.join("；", parts) + "。合进 " + target
+                    + " 前确认测试环境配置中心已有对应项，否则服务起来会挂"));
         }
         String kind = str(row.get("kind"));
         if (ApiProjectKind.FRONTEND.equals(kind) || ApiProjectKind.CLIENT.equals(kind)) {
-            warnings(row).add(warn("FRONT", "这是前端 / 客户端：依赖的后端必须先上线，后端没上就发前端会挂"));
+            warnings(row).add(warn("FRONT", "这是前端 / 客户端：依赖的后端建议先合进 " + target
+                    + "，后端还没合就合前端可能联调挂"));
         }
         if ("FUZZY".equals(row.get("matchHow"))) {
             warnings(row).add(warn("FUZZY", "项目是按相近名字猜的（你写的是「" + row.get("rawProject") + "」），确认没合错项目"));
@@ -343,6 +357,11 @@ public class ReleaseMergeService {
     // ---------------------------------------------------------------- 合并
 
     public Map<String, Object> merge(String projectCode, String branch, String expectSha, List<String> acked) {
+        return merge(projectCode, branch, expectSha, acked, null);
+    }
+
+    public Map<String, Object> merge(String projectCode, String branch, String expectSha, List<String> acked,
+                                     String targetOverride) {
         if (projectCode == null || branch == null || expectSha == null) {
             throw new IllegalArgumentException("缺项目、分支或核对时的提交，先核对再合并");
         }
@@ -351,24 +370,27 @@ public class ReleaseMergeService {
             throw new IllegalStateException("这个项目正在合并中，别重复点");
         }
         try {
-            return doMerge(projectCode.trim(), branch.trim(), expectSha.trim(), acked == null ? List.of() : acked);
+            return doMerge(projectCode.trim(), branch.trim(), expectSha.trim(),
+                    acked == null ? List.of() : acked, blankToNull(targetOverride));
         } finally {
             merging.remove(lock);
         }
     }
 
-    private Map<String, Object> doMerge(String code, String branch, String expectSha, List<String> acked) {
+    private Map<String, Object> doMerge(String code, String branch, String expectSha, List<String> acked,
+                                        String targetOverride) {
         String token = requireToken();
         ApiProject p = projectMapper.findByCode(code);
         if (p == null) {
             throw new IllegalArgumentException("项目不存在：" + code);
         }
         Map<String, Object> row = baseRow(null, code, branch);
-        fillProject(row, p, "MANUAL");
+        fillProject(row, p, "MANUAL", targetOverride);
         inspect(row);
         String status = str(row.get("status"));
+        String target = str(row.get("target"));
         if ("ALREADY".equals(status)) {
-            throw new IllegalStateException("这个分支已经在 master 里了，不用再合");
+            throw new IllegalStateException("这个分支已经在 " + target + " 里了，不用再合");
         }
         if ("BLOCK".equals(status)) {
             throw new IllegalStateException("重新核对没通过：" + String.join("；", blockers(row)));
@@ -386,7 +408,6 @@ public class ReleaseMergeService {
             throw new IllegalStateException("还有提醒没确认：" + String.join("；", missing));
         }
 
-        String target = str(row.get("target"));
         String base = MergeRules.apiBase(p.getGitUrl(), setting(K_GITLAB_BASE));
         String path = MergeRules.projectPath(p.getGitUrl());
         if (base == null || path == null) {
@@ -394,12 +415,13 @@ public class ReleaseMergeService {
         }
         GitLabClient gl = new GitLabClient(base, token);
         String operator = CurrentUser.nameOr("unknown");
+        String lane = "testing".equalsIgnoreCase(target) ? "合并到 testing" : "合并上线";
         GitLabClient.Mr mr = null;
         try {
             mr = gl.findOpen(path, branch, target);
             if (mr == null) {
                 mr = gl.create(path, branch, target, branch + " → " + target,
-                        "测试平台「合并上线」发起，操作人：" + operator + "，核对时分支提交：" + expectSha);
+                        "测试平台「" + lane + "」发起，操作人：" + operator + "，核对时分支提交：" + expectSha);
             }
             mr = gl.waitChecked(path, mr.iid(), 30_000);
             String ds = mr.detailed() != null ? mr.detailed() : mr.mergeStatus();
@@ -446,11 +468,25 @@ public class ReleaseMergeService {
     }
 
     public List<Map<String, Object>> logs(int limit) {
+        return logs(limit, null);
+    }
+
+    /** @param targetFilter 非空时只看合进这个目标分支的记录（如 testing） */
+    public List<Map<String, Object>> logs(int limit, String targetFilter) {
+        int n = Math.max(1, Math.min(limit, 200));
+        String t = blankToNull(targetFilter);
+        if (t == null) {
+            return jdbc.queryForList("""
+                    SELECT id, project_code AS projectCode, branch, target_branch AS target, source_sha AS sourceSha,
+                           merge_sha AS mergeSha, mr_url AS mrUrl, status, message, operator, created_at AS createdAt
+                    FROM release_merge_log ORDER BY id DESC LIMIT ?
+                    """, n);
+        }
         return jdbc.queryForList("""
                 SELECT id, project_code AS projectCode, branch, target_branch AS target, source_sha AS sourceSha,
                        merge_sha AS mergeSha, mr_url AS mrUrl, status, message, operator, created_at AS createdAt
-                FROM release_merge_log ORDER BY id DESC LIMIT ?
-                """, Math.max(1, Math.min(limit, 200)));
+                FROM release_merge_log WHERE target_branch = ? ORDER BY id DESC LIMIT ?
+                """, t, n);
     }
 
     private void writeLog(String code, String branch, String target, String sha, String mergeSha, GitLabClient.Mr mr,
@@ -479,12 +515,29 @@ public class ReleaseMergeService {
         return row;
     }
 
-    private static void fillProject(Map<String, Object> row, ApiProject p, String how) {
+    private static void fillProject(Map<String, Object> row, ApiProject p, String how, String targetOverride) {
         row.put("projectCode", p.getCode());
         row.put("projectName", p.getName() == null || p.getName().isBlank() ? p.getCode() : p.getName());
         row.put("kind", ApiProjectKind.of(p));
         row.put("matchHow", how);
-        row.put("target", p.getBaseBranch() == null || p.getBaseBranch().isBlank() ? "master" : p.getBaseBranch().trim());
+        if (targetOverride != null && !targetOverride.isBlank()) {
+            row.put("target", targetOverride.trim());
+        } else {
+            row.put("target", p.getBaseBranch() == null || p.getBaseBranch().isBlank()
+                    ? "master" : p.getBaseBranch().trim());
+        }
+    }
+
+    private static void copyMeta(Map<String, Object> from, Map<String, Object> to) {
+        for (String k : List.of("issueKey", "issueSummary", "issueUrl", "rawProject", "note", "matchHow")) {
+            if (from.get(k) != null) {
+                to.put(k, from.get(k));
+            }
+        }
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s.trim();
     }
 
     @SuppressWarnings("unchecked")

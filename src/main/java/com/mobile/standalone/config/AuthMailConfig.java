@@ -28,24 +28,22 @@ public class AuthMailConfig {
         sender.setProtocol("smtp");
         sender.setDefaultEncoding("UTF-8");
 
-        MailSSLSocketFactory sf = new MailSSLSocketFactory();
-        sf.setTrustAllHosts(true);
-
         Properties p = sender.getJavaMailProperties();
         p.put("mail.transport.protocol", "smtp");
         p.put("mail.smtp.auth", String.valueOf(props.isSmtpAuth()));
         p.put("mail.smtp.ssl.trust", "*");
         p.put("mail.smtp.ssl.checkserveridentity", "false");
-        p.put("mail.smtp.ssl.socketFactory", sf);
-        p.put("mail.smtp.ssl.socketFactory.fallback", "false");
+        p.put("mail.smtp.socketFactory", new DirectMailSocketFactory());
+        p.put("mail.smtp.socketFactory.fallback", "false");
 
         if (props.isSsl()) {
             p.put("mail.smtp.ssl.enable", "true");
-            p.put("mail.smtp.socketFactory", sf);
-            p.put("mail.smtp.socketFactory.class", MailSSLSocketFactory.class.getName());
-            p.put("mail.smtp.socketFactory.port", String.valueOf(props.getPort()));
             p.put("mail.smtp.starttls.enable", "false");
         } else if (props.isStarttls()) {
+            MailSSLSocketFactory sf = new MailSSLSocketFactory();
+            sf.setTrustAllHosts(true);
+            p.put("mail.smtp.ssl.socketFactory", sf);
+            p.put("mail.smtp.ssl.socketFactory.fallback", "false");
             p.put("mail.smtp.starttls.enable", "true");
             p.put("mail.smtp.starttls.required", "true");
             p.put("mail.smtp.ssl.enable", "false");

@@ -34,6 +34,12 @@ public final class ReleaseDocDtos {
         private String configChanges;
         private String qaAssignee;
         private String remarks;
+        /** 标题/备注命中「不跟版本」等话术，默认不进表格，等人工确认 */
+        private Boolean deferredCandidate;
+        /** 命中话术摘录，弹窗里展示给 QA 看 */
+        private String deferredReason;
+        /** 从 Wiki 读回时，所在表格上方的小标题（一页多张表时用来分组，如「鸿蒙224单子」） */
+        private String section;
     }
 
     @Data
@@ -45,6 +51,8 @@ public final class ReleaseDocDtos {
         private String wikiPageUrl;
         private String message;
         private List<IssueRow> rows = new ArrayList<>();
+        /** 疑似不跟本版本的单，前端弹窗让人选是否纳入 */
+        private List<IssueRow> deferredCandidates = new ArrayList<>();
         private List<String> logs = new ArrayList<>();
     }
 
@@ -52,9 +60,9 @@ public final class ReleaseDocDtos {
     public static class MailDraftRequest {
         /** 发版文档标题（新建 Wiki 标题） */
         private String title;
-        /** 新建 Wiki 完整 URL */
+        /** 新建 Wiki 完整 URL；有则始终从 Wiki 拉最新表格 */
         private String wikiPageUrl;
-        /** 校对后的表格行；有则优先用，避免再拉 Wiki */
+        /** 仅 Wiki 不可用时的回退；正常流程以 Wiki 为准 */
         private List<IssueRow> rows;
     }
 
@@ -75,12 +83,18 @@ public final class ReleaseDocDtos {
         private String to;
         private String cc;
         private String subject;
+        /** 无 Wiki 刷新时的正文；有 title+wikiPageUrl 时发送前会用 Wiki 最新内容重装 */
         private String htmlBody;
+        /** 与 wikiPageUrl 一起传：发送前再拉一次 Wiki，避免草稿过期 */
+        private String title;
+        private String wikiPageUrl;
     }
 
     @Data
     public static class SendMailResult {
         private boolean ok;
         private String message;
+        /** 实际发出去的正文（可能已按 Wiki 刷新） */
+        private String htmlBody;
     }
 }

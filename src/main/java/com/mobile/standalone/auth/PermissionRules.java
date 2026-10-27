@@ -140,6 +140,7 @@ public final class PermissionRules {
             Map.entry("/app-online-regression", PlatformRole.TESTER),
             Map.entry("/app-automation", PlatformRole.TESTER),
             Map.entry("/ui-flows", PlatformRole.TESTER),
+            Map.entry("/smart-app", PlatformRole.TESTER),
             Map.entry("/asr", PlatformRole.TESTER),
             Map.entry("/ui-elements", PlatformRole.TESTER),
             Map.entry("/ui-inspector-import", PlatformRole.TESTER),
@@ -153,7 +154,8 @@ public final class PermissionRules {
             Map.entry("/redis-tool", PlatformRole.TESTER),
             Map.entry("/kafka-tool", PlatformRole.TESTER),
             // 会用自己的 GitLab 令牌往 master 合代码
-            Map.entry("/release-merge", PlatformRole.TESTER));
+            Map.entry("/release-merge", PlatformRole.TESTER),
+            Map.entry("/testing-merge", PlatformRole.TESTER));
 
     /**
      * 路径里出现 {@code .} / {@code ..} 段、反斜杠、或解码后仍残留的 {@code %}——正常业务路径不会有，一律拒绝。

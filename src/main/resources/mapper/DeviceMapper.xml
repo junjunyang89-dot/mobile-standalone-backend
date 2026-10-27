@@ -54,6 +54,20 @@
         WHERE id = #{id}
     </update>
 
+    <!-- 定时扫描专用：只动探测字段，锁持有更短，公网库不易踩 3s 事务超时 -->
+    <update id="updatePresence">
+        UPDATE devices
+        SET name = #{name},
+            platform = #{platform},
+            version = #{version},
+            status = #{status},
+            last_seen = #{lastSeen},
+            worker_id = COALESCE(#{workerId}, worker_id),
+            is_emulator = COALESCE(#{emulator}, is_emulator),
+            environment = COALESCE(#{environment}, environment)
+        WHERE id = #{id}
+    </update>
+
     <update id="markUsed">
         UPDATE devices SET last_used_at = #{usedAt} WHERE id = #{id}
     </update>

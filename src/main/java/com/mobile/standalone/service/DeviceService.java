@@ -520,17 +520,18 @@ public class DeviceService {
             }
             lastDevicePersistMs = now;
 
-            // 一台一短事务：整批包在一个事务里时，慢链路（隧道）会长时间锁住 devices，
-            // 建任务 INSERT tasks 外键等锁，页面「开始执行」就会一直转圈。
+            // 一台一短事务；读放事务外——公网库 SELECT+UPDATE 叠在 3s 超时里很容易被客户端取消。
+            // 整批包一个事务时，慢链路会长时间锁 devices，建任务 INSERT tasks 外键等锁。
             for (Device scannedDevice : scanned) {
                 try {
-                    shortTx(3).executeWithoutResult(status -> persistScannedDevice(scannedDevice));
+                    Device existing = deviceMapper.findById(scannedDevice.getId());
+                    shortTx(8).executeWithoutResult(status -> persistScannedDevice(scannedDevice, existing));
                 } catch (Exception e) {
                     log.warn("落库设备失败 {}: {}", scannedDevice.getId(), e.getMessage());
                 }
             }
             try {
-                shortTx(3).executeWithoutResult(status -> markDisconnectedDevices());
+                markDisconnectedDevices();
             } catch (Exception e) {
                 log.warn("标记离线设备失败: {}", e.getMessage());
             }
@@ -546,9 +547,8 @@ public class DeviceService {
         return tx;
     }
 
-    private void persistScannedDevice(Device scannedDevice) {
+    private void persistScannedDevice(Device scannedDevice, Device existingDevice) {
         LocalDateTime now = LocalDateTime.now();
-        Device existingDevice = deviceMapper.findById(scannedDevice.getId());
         Device.DeviceStatus status = scannedDevice.getStatus() != null
                 ? scannedDevice.getStatus()
                 : Device.DeviceStatus.CONNECTED;
@@ -566,7 +566,7 @@ public class DeviceService {
                     && (existingDevice.getEnvironment() == null || existingDevice.getEnvironment().isBlank())) {
                 existingDevice.setEnvironment("TEST");
             }
-            deviceMapper.update(existingDevice);
+            deviceMapper.updatePresence(existingDevice);
             return;
         }
         scannedDevice.setStatus(status);
@@ -588,7 +588,8 @@ public class DeviceService {
     }
     
     /**
-     * 标记未连接的设备为断开状态
+     * 标记未连接的设备为断开状态。
+     * findAll 在事务外；每台设备单独短事务，避免整表扫+多行 UPDATE 挤爆超时。
      */
     private void markDisconnectedDevices() {
         List<Device> allDevices = deviceMapper.findAll();
@@ -600,9 +601,15 @@ public class DeviceService {
             }
             if (device.getStatus() == Device.DeviceStatus.CONNECTED) {
                 if (device.getLastSeen() == null || device.getLastSeen().isBefore(threshold)) {
-                    device.setStatus(Device.DeviceStatus.DISCONNECTED);
-                    deviceMapper.update(device);
-                    log.debug("设备已断开: {} ({})", device.getName(), device.getId());
+                    try {
+                        shortTx(8).executeWithoutResult(status -> {
+                            device.setStatus(Device.DeviceStatus.DISCONNECTED);
+                            deviceMapper.updatePresence(device);
+                        });
+                        log.debug("设备已断开: {} ({})", device.getName(), device.getId());
+                    } catch (Exception e) {
+                        log.warn("标记离线失败 {}: {}", device.getId(), e.getMessage());
+                    }
                 }
             }
         }

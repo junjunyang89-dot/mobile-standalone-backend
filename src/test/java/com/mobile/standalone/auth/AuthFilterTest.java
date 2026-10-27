@@ -40,7 +40,8 @@ class AuthFilterTest {
         PlatformUserService users = mock(PlatformUserService.class);
         when(users.isBootstrapping()).thenReturn(bootstrapping);
         when(users.get(anyString())).thenReturn(user);
-        return new AuthFilter(tokens, users);
+        return new AuthFilter(tokens, users,
+                new OpenApiAuth(new com.mobile.standalone.config.OpenApiProperties()));
     }
 
     private MockHttpServletRequest req(String method, String uri, String token) {

@@ -1,0 +1,250 @@
+<p class="auto-cursor-target"><div class="toc-macro client-side-toc-macro  conf-macro output-block" data-headerelements="H1,H2,H3,H4,H5,H6,H7" data-hasbody="false" data-macro-name="toc"> </div></p><h1 class="auto-cursor-target" id="id-【进行中】玩家反馈流程优化-需求目的">需求目的</h1><p>优化玩家联系客服排查问题时、收集信息的体验:</p><ul><li>减少开发、客服、玩家之间的沟通流程，降低沟通成本、提高沟通效率</li><li>简化用户侧操作流程</li><li>尽可能多收集排查用户问题需要的信息，协助解决问题</li></ul><h1 id="id-【进行中】玩家反馈流程优化-需求内容">需求内容</h1><h2 id="id-【进行中】玩家反馈流程优化-需收集信息内容">需收集信息内容</h2><p>主要依照我们过去一段时间内实际接到玩家诉求、需要收集的信息确定</p><div class="table-wrap"><table class="relative-table wrapped confluenceTable" style="width: 51.4584%;"><colgroup><col style="width: 12.4197%;"/><col style="width: 25.4818%;"/><col style="width: 23.3405%;"/><col style="width: 22.8051%;"/><col style="width: 15.9529%;"/></colgroup><tbody><tr><th class="confluenceTh">分类</th><th class="confluenceTh">需收集信息</th><th class="confluenceTh">收集方式</th><th class="confluenceTh">大小及时间范围限制</th><th class="confluenceTh">备注</th></tr><tr><td class="confluenceTd">客户端日志</td><td class="confluenceTd">客户端日志文件</td><td class="confluenceTd">从【目录】直接获取</td><td class="confluenceTd"><br/></td><td class="confluenceTd"><br/></td></tr><tr><td class="confluenceTd">反作弊</td><td class="confluenceTd">反作弊日志</td><td class="confluenceTd"><br/></td><td class="confluenceTd"><br/></td><td class="confluenceTd"><br/></td></tr><tr><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd">VT-D相关设置开启状态</td><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd"><br/></td></tr><tr><td colspan="1" class="confluenceTd">网络情况</td><td colspan="1" class="confluenceTd">本地网络测试报告</td><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd"><br/></td></tr><tr><td colspan="1" class="confluenceTd">用户系统信息</td><td colspan="1" class="confluenceTd">用户软硬件信息</td><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd"><br/></td><td colspan="1" class="confluenceTd"><br/></td></tr></tbody></table></div><h2 id="id-【进行中】玩家反馈流程优化-信息展示方式">信息展示方式</h2><p>我们收集的信息主要分配置详情和日志文件两种，希望有以下两种展示方式</p><h3 id="id-【进行中】玩家反馈流程优化-报告展示">报告展示</h3><p>整理我们收集的所有玩家相关信息：如硬件信息、系统设置开启情况、玩家本地网络测试情况等，整合成一份报告直接阅读</p><p>可以依赖人工智能能力生成类似的报告，总之优先保证信息的完整性和可读性，作为辅助解决问题的工具即可</p><p><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image confluence-external-resource" alt="image2026-7-14_17-39-22.png" width="600" src="https://wiki.shdev.net/download/attachments/119717563/image2026-7-14_17-39-22.png?version=1&amp;modificationDate=1784021963000&amp;api=v2" data-image-src="https://wiki.shdev.net/download/attachments/119717563/image2026-7-14_17-39-22.png?version=1&amp;modificationDate=1784021963000&amp;api=v2"></span></p><h3 id="id-【进行中】玩家反馈流程优化-文件列表">文件列表</h3><p>参考当前客户端日志的列表展示方式，展示所有我们收集的文件类型的日志（客户端日志、反作弊日志、蓝屏文件等），点击可预览查看、下载</p><p><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image" height="400" src="/download/attachments/119717563/image2026-9-11_16-59-39.png?version=1&amp;modificationDate=1789117179000&amp;api=v2" data-image-src="/download/attachments/119717563/image2026-9-11_16-59-39.png?version=1&amp;modificationDate=1789117179000&amp;api=v2" data-unresolved-comment-count="0" data-linked-resource-id="119727923" data-linked-resource-version="1" data-linked-resource-type="attachment" data-linked-resource-default-alias="image2026-9-11_16-59-39.png" data-base-url="https://wiki.shdev.net" data-linked-resource-content-type="image/png" data-linked-resource-container-id="119717563" data-linked-resource-container-version="18"></span></p><h2 id="id-【进行中】玩家反馈流程优化-发起流程">发起流程</h2><p>在管理后台新增页面：玩家错误报告。该页面具备以下功能：</p><ul><li>可以输入steamid，向玩家的客户端发送获取其错误报告的离线消息</li><li>可通过steamid查询对应的报告信息</li><li>对玩家上传的报告可以做以下操作：<ul><li>查看报告：对我们收集到的信息，生成一份有组织的报告，供需要时查询</li><li>文件列表：展开可下载的日志文件列表，选择下载对应需要的文件进行分析</li></ul></li></ul><p><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image" height="400" src="/download/attachments/119717563/image2026-9-11_16-37-13.png?version=1&amp;modificationDate=1789115833000&amp;api=v2" data-image-src="/download/attachments/119717563/image2026-9-11_16-37-13.png?version=1&amp;modificationDate=1789115833000&amp;api=v2" data-unresolved-comment-count="0" data-linked-resource-id="119727914" data-linked-resource-version="1" data-linked-resource-type="attachment" data-linked-resource-default-alias="image2026-9-11_16-37-13.png" data-base-url="https://wiki.shdev.net" data-linked-resource-content-type="image/png" data-linked-resource-container-id="119717563" data-linked-resource-container-version="18"></span></p><p>管理后台发起后，玩家侧收到离线系统消息：</p><p><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image" height="400" src="/download/attachments/119717563/image2026-9-11_16-57-37.png?version=1&amp;modificationDate=1789117056000&amp;api=v2" data-image-src="/download/attachments/119717563/image2026-9-11_16-57-37.png?version=1&amp;modificationDate=1789117056000&amp;api=v2" data-unresolved-comment-count="0" data-linked-resource-id="119727922" data-linked-resource-version="1" data-linked-resource-type="attachment" data-linked-resource-default-alias="image2026-9-11_16-57-37.png" data-base-url="https://wiki.shdev.net" data-linked-resource-content-type="image/png" data-linked-resource-container-id="119717563" data-linked-resource-container-version="18"></span></p><p>点击后客户端弹出确认弹窗，弹窗有以下逻辑：</p><ul><li>若玩家未点击同意上传过信息，系统消息有效期7天，到期后自动清除</li><li>若玩家已点击同意上传信息，该系统消息无法再次弹窗，此时点击气泡提示【您已提交过相关信息，请耐心等待技术人员排查】</li></ul><p><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image" height="400" src="/download/attachments/119717563/image2026-9-11_16-50-31.png?version=1&amp;modificationDate=1789116630000&amp;api=v2" data-image-src="/download/attachments/119717563/image2026-9-11_16-50-31.png?version=1&amp;modificationDate=1789116630000&amp;api=v2" data-unresolved-comment-count="0" data-linked-resource-id="119727920" data-linked-resource-version="1" data-linked-resource-type="attachment" data-linked-resource-default-alias="image2026-9-11_16-50-31.png" data-base-url="https://wiki.shdev.net" data-linked-resource-content-type="image/png" data-linked-resource-container-id="119717563" data-linked-resource-container-version="18"></span></p><p><br/></p><p><br/></p><div id="expander-1549063446" class="expand-container conf-macro output-block" data-hasbody="true" data-macro-name="expand"><div id="expander-control-1549063446" class="expand-control"><span class="expand-icon aui-icon aui-icon-small aui-iconfont-chevron-right"> </span><span class="expand-control-text">人工智能</span></div><div id="expander-content-1549063446" class="expand-content expand-hidden"><h1 id="id-【进行中】玩家反馈流程优化-人工智能DEMO">人工智能DEMO</h1><p><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image" height="250" src="/download/attachments/119717563/image2026-7-14_17-39-1.png?version=2&amp;modificationDate=1793012279793&amp;api=v2" data-image-src="/download/attachments/119717563/image2026-7-14_17-39-1.png?version=2&amp;modificationDate=1793012279793&amp;api=v2" data-unresolved-comment-count="0" data-linked-resource-id="119718097" data-linked-resource-version="2" data-linked-resource-type="attachment" data-linked-resource-default-alias="image2026-7-14_17-39-1.png" data-base-url="https://wiki.shdev.net" data-linked-resource-content-type="image/png" data-linked-resource-container-id="119717563" data-linked-resource-container-version="18" /></span><span class="confluence-embedded-file-wrapper confluence-embedded-manual-size"><img class="confluence-embedded-image" height="250" src="/download/attachments/119717563/image2026-7-14_17-39-22.png?version=1&amp;modificationDate=1784021963000&amp;api=v2" data-image-src="/download/attachments/119717563/image2026-7-14_17-39-22.png?version=1&amp;modificationDate=1784021963000&amp;api=v2" data-unresolved-comment-count="0" data-linked-resource-id="119718098" data-linked-resource-version="1" data-linked-resource-type="attachment" data-linked-resource-default-alias="image2026-7-14_17-39-22.png" data-base-url="https://wiki.shdev.net" data-linked-resource-content-type="image/png" data-linked-resource-container-id="119717563" data-linked-resource-container-version="18" /></span></p><p class="auto-cursor-target"><span class="confluence-embedded-file-wrapper conf-macro output-inline" data-hasbody="false" data-macro-name="view-file"><a class="confluence-embedded-file" href="/download/attachments/119717563/DiagnosticTool.exe?version=1&amp;modificationDate=1783655576000&amp;api=v2" data-nice-type="null" data-file-src="/download/attachments/119717563/DiagnosticTool.exe?version=1&amp;modificationDate=1783655576000&amp;api=v2" data-linked-resource-id="119717589" data-linked-resource-type="attachment" data-linked-resource-container-id="119717563" data-linked-resource-default-alias="DiagnosticTool.exe" data-mime-type="application/octet-stream" data-has-thumbnail="false" data-linked-resource-version="1"><img src="/s/en_US/8100/4410012ac87e845516b70bc69b6f7a893eabaa5a/4.0.3/_/download/resources/com.atlassian.confluence.plugins.confluence-view-file-macro:view-file-macro-resources/images/placeholder-medium-file.png" height="250" /><span class="title">DiagnosticTool.exe</span></a></span></p><div class="conf-macro output-block" data-hasbody="true" data-macro-name="markdown"><hr /> 
+<h2 id="修正方案一次性系统诊断小工具"><a href="#修正方案一次性系统诊断小工具">修正方案：一次性系统诊断小工具</a></h2> 
+<h3 id="设计原则"><a href="#设计原则">设计原则</a></h3> 
+<table class="confluenceTable"><thead><tr><th class="confluenceTh">原则</th><th class="confluenceTh">说明</th></tr></thead><tbody><tr><td class="confluenceTd"><strong>一次性运行</strong></td><td class="confluenceTd">双击运行 → 采集 → 出报告 → 退出，不驻留后台</td></tr><tr><td class="confluenceTd"><strong>聚焦阻断事件</strong></td><td class="confluenceTd">蓝屏、崩溃、死机、严重网络丢包、启动失败</td></tr><tr><td class="confluenceTd"><strong>不诊断性能</strong></td><td class="confluenceTd">不采集 GPU 负载曲线、温度曲线、FPS 时序</td></tr><tr><td class="confluenceTd"><strong>轻量</strong></td><td class="confluenceTd">单个 exe &lt; 5MB，无依赖，采集时间 &lt; 2 分钟</td></tr></tbody></table> 
+<hr /> 
+<h2 id="一采集内容按诊断场景组织"><a href="#一采集内容按诊断场景组织">一、采集内容（按诊断场景组织）</a></h2> 
+<h3 id="场景-a蓝屏死机"><a href="#场景-a蓝屏死机">场景 A：蓝屏/死机</a></h3> 
+<table class="confluenceTable"><thead><tr><th class="confluenceTh">采集项</th><th class="confluenceTh">来源</th><th class="confluenceTh">诊断价值</th></tr></thead><tbody><tr><td class="confluenceTd"><strong>Minidump 文件</strong></td><td class="confluenceTd"><code>C:\Windows\Minidump\*.dmp</code></td><td class="confluenceTd">解析崩溃驱动/模块，直接定位根因</td></tr><tr><td class="confluenceTd"><strong>系统事件 BugCheck</strong></td><td class="confluenceTd"><code>System</code> 日志，EventID 1001</td><td class="confluenceTd">蓝屏时间线、BugCheck 代码</td></tr><tr><td class="confluenceTd"><strong>系统事件 Kernel-Power</strong></td><td class="confluenceTd"><code>System</code> 日志，EventID 41</td><td class="confluenceTd">意外断电/强制关机/死机</td></tr><tr><td class="confluenceTd"><strong>系统事件 Disk</strong></td><td class="confluenceTd"><code>System</code> 日志，EventID 7/11/51</td><td class="confluenceTd">磁盘控制器故障导致死机</td></tr><tr><td class="confluenceTd"><strong>可靠性监视器</strong></td><td class="confluenceTd"><code>RacAgent</code> 日志</td><td class="confluenceTd">崩溃历史时间线、频繁度</td></tr><tr><td class="confluenceTd"><strong>WER 报告</strong></td><td class="confluenceTd"><code>C:\ProgramData\Microsoft\Windows\WER\ReportArchive\</code></td><td class="confluenceTd">Windows 错误报告详情</td></tr></tbody></table> 
+<p>采集完 Minidump 后，工具可对 <code>.dmp</code> 文件做<strong>轻量级自动解析</strong>：</p> 
+<pre><code>解析流程（无需完整 WinDbg，只需提取关键信息）:
+└─ .dmp 文件 → 提取 BugCheck 代码 + 故障模块名
+├─ nvlddmkm.sys → &quot;NVIDIA 显卡驱动崩溃，请升级驱动&quot;
+├─ ntoskrnl.exe + MEMORY_MANAGEMENT → &quot;内存硬件故障，建议跑 MemTest86&quot;
+├─ tcpip.sys → &quot;网卡驱动问题&quot;
+├─ ntfs.sys / storport.sys → &quot;硬盘/控制器故障&quot;
+├─ easyanticheat.sys / vgk.sys → &quot;反作弊驱动冲突&quot;
+└─ dxgkrnl.sys → &quot;DirectX / 显卡驱动问题&quot;
+</code></pre> 
+<h3 id="场景-b游戏启动失败--崩溃到桌面"><a href="#场景-b游戏启动失败--崩溃到桌面">场景 B：游戏启动失败 / 崩溃到桌面</a></h3> 
+<table class="confluenceTable"><thead><tr><th class="confluenceTh">采集项</th><th class="confluenceTh">来源</th><th class="confluenceTh">诊断价值</th></tr></thead><tbody><tr><td class="confluenceTd"><strong>Application Error 事件</strong></td><td class="confluenceTd"><code>Application</code> 日志，EventID 1000/1026</td><td class="confluenceTd">游戏 exe 崩溃模块、异常码</td></tr><tr><td class="confluenceTd"><strong>游戏自带日志</strong></td><td class="confluenceTd">游戏安装目录下的 log/crash 文件夹</td><td class="confluenceTd">最直接的崩溃原因</td></tr><tr><td class="confluenceTd"><strong>Windows 错误报告</strong></td><td class="confluenceTd">WER 中游戏进程的报告</td><td class="confluenceTd">补充崩溃调用栈信息</td></tr><tr><td class="confluenceTd"><strong>DirectX 版本</strong></td><td class="confluenceTd"><code>dxdiag</code> 注册表</td><td class="confluenceTd">缺少 DirectX 组件</td></tr><tr><td class="confluenceTd"><strong>VC++ 运行库列表</strong></td><td class="confluenceTd"><code>HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\</code></td><td class="confluenceTd">缺少必要运行库</td></tr><tr><td class="confluenceTd"><strong>显卡驱动版本/日期</strong></td><td class="confluenceTd"><code>wmic path win32_videocontroller</code></td><td class="confluenceTd">驱动过旧不兼容</td></tr><tr><td class="confluenceTd"><strong>反作弊软件</strong></td><td class="confluenceTd">进程和服务列表</td><td class="confluenceTd">反作弊冲突（Vanguard/EAC/BattlEye）</td></tr><tr><td class="confluenceTd"><strong>杀毒软件拦截记录</strong></td><td class="confluenceTd">杀毒软件日志</td><td class="confluenceTd">误杀游戏文件</td></tr><tr><td class="confluenceTd"><strong>游戏文件完整性</strong></td><td class="confluenceTd">对关键 exe/dll 计算 SHA256</td><td class="confluenceTd">文件损坏</td></tr></tbody></table> 
+<h3 id="场景-c严重网络丢包--完全连不上"><a href="#场景-c严重网络丢包--完全连不上">场景 C：严重网络丢包 / 完全连不上</a></h3> 
+<table class="confluenceTable"><thead><tr><th class="confluenceTh">采集项</th><th class="confluenceTh">来源</th><th class="confluenceTh">诊断价值</th></tr></thead><tbody><tr><td class="confluenceTd"><strong>到游戏服务器的 Ping</strong></td><td class="confluenceTd"><code>System.Net.NetworkInformation.Ping</code></td><td class="confluenceTd">延迟、丢包率，发 50 个探测包</td></tr><tr><td class="confluenceTd"><strong>到游戏服务器的 Traceroute</strong></td><td class="confluenceTd">多跳 <code>ping</code>，递增 TTL</td><td class="confluenceTd">定位哪个网络节点丢包</td></tr><tr><td class="confluenceTd"><strong>DNS 解析</strong></td><td class="confluenceTd"><code>System.Net.Dns</code></td><td class="confluenceTd">DNS 能否正确解析游戏域名</td></tr><tr><td class="confluenceTd"><strong>本机网络配置</strong></td><td class="confluenceTd"><code>ipconfig /all</code> + <code>Get-NetAdapter</code></td><td class="confluenceTd">IP/DNS/网关是否正确</td></tr><tr><td class="confluenceTd"><strong>Windows 防火墙规则</strong></td><td class="confluenceTd"><code>netsh advfirewall</code></td><td class="confluenceTd">防火墙是否拦截游戏</td></tr><tr><td class="confluenceTd"><strong>网络适配器驱动</strong></td><td class="confluenceTd"><code>Get-NetAdapter \| Get-NetAdapterDriverInformation</code></td><td class="confluenceTd">网卡驱动问题</td></tr><tr><td class="confluenceTd"><strong>系统 Hosts 文件</strong></td><td class="confluenceTd"><code>C:\Windows\System32\drivers\etc\hosts</code></td><td class="confluenceTd">是否被篡改</td></tr><tr><td class="confluenceTd"><strong>HTTP/HTTPS 连通性</strong></td><td class="confluenceTd">对 CDN/登录服务器发 HTTPS 请求</td><td class="confluenceTd">返回码、握手是否成功</td></tr></tbody></table> 
+<h3 id="场景-d系统硬件环境快照辅助判断兼容性"><a href="#场景-d系统硬件环境快照辅助判断兼容性">场景 D：系统硬件环境快照（辅助判断兼容性）</a></h3> 
+<table class="confluenceTable"><thead><tr><th class="confluenceTh">采集项</th><th class="confluenceTh">来源</th><th class="confluenceTh">用途</th></tr></thead><tbody><tr><td class="confluenceTd">CPU / GPU / 内存 / 磁盘 型号</td><td class="confluenceTd">WMI</td><td class="confluenceTd">是否满足最低配置</td></tr><tr><td class="confluenceTd">OS 版本与 Build</td><td class="confluenceTd"><code>Get-ComputerInfo</code></td><td class="confluenceTd">已知不兼容的 Windows 版本</td></tr><tr><td class="confluenceTd">内存总量</td><td class="confluenceTd">WMI</td><td class="confluenceTd">是否 &lt; 8GB</td></tr><tr><td class="confluenceTd">磁盘剩余空间</td><td class="confluenceTd">WMI</td><td class="confluenceTd">C 盘满了导致无法写入</td></tr><tr><td class="confluenceTd">虚拟内存（页面文件）设置</td><td class="confluenceTd"><code>Get-CimInstance Win32_PageFileUsage</code></td><td class="confluenceTd">页面文件禁用导致内存不足崩溃</td></tr><tr><td class="confluenceTd">显卡驱动版本</td><td class="confluenceTd"><code>wmic</code> + NVAPI</td><td class="confluenceTd">特定驱动版本的已知 Bug</td></tr></tbody></table> 
+<hr /> 
+<h2 id="二工具架构一次性采集"><a href="#二工具架构一次性采集">二、工具架构（一次性采集）</a></h2> 
+<pre><code>┌─────────────────────────────────────────────────┐
+│ 诊断工具 (DiagnosticTool.exe) │
+│ ~3MB，无依赖，XP-&gt;Win11兼容 │
+│ │
+│ ┌──────────────────────────────────────────────┐ │
+│ │ Orchestrator (调度器) │ │
+│ │ 按优先级依次执行，单线程不阻塞 │ │
+│ └──────────────────┬───────────────────────────┘ │
+│ │ │
+│ ┌────────────────┼────────────────┐ │
+│ │ │ │ │
+│ ┌─┴──────────┐ ┌─┴──────────┐ ┌─┴──────────┐ │
+│ │ Crash/Dump │ │ Network │ │ System │ │
+│ │ Collector │ │ Collector │ │ Snapshot │ │
+│ │ │ │ │ │ Collector │ │
+│ │ Minidump │ │ PING*50 │ │ CPU/GPU/ │ │
+│ │ EventLog │ │ TRACERT │ │ RAM/Disk │ │
+│ │ WER │ │ DNS TEST │ │ OS Version │ │
+│ │ Game Logs │ │ Firewall │ │ Driver Ver │ │
+│ │ AV Check │ │ Hosts File │ │ PageFile │ │
+│ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ │
+│ │ │ │ │
+│ ┌─────┴───────────────┴───────────────┴──────┐ │
+│ │ Report Generator (报告生成) │ │
+│ │ JSON (结构化上报) + HTML (玩家可读) │ │
+│ └─────────────────────┬──────────────────────┘ │
+│ │ │
+└────────────────────────┼──────────────────────────┘
+│
+┌────┴──────────┐
+│ 上传到服务端 │
+│ 客服/自动化系统 │
+│ 读取 JSON │
+└───────────────┘
+</code></pre> 
+<hr /> 
+<h2 id="三核心采集实现"><a href="#三核心采集实现">三、核心采集实现</a></h2> 
+<h3 id="31-crashdump-采集器"><a href="#31-crashdump-采集器">3.1 Crash/Dump 采集器</a></h3> 
+<pre><code>优先级最高，最先采集（保证数据不被后续操作污染）
+
+采集步骤:
+1. 扫描 C:\Windows\Minidump\*.dmp
+- 按时间倒序，提取最近 10 个
+- 对每个 .dmp: 解析 TIME_STAMP + BugCheckCode + 故障模块
+方式: DbgHelp.dll 的 MiniDumpReadDumpStream() API
+(不依赖 WinDbg，Windows 自带 DbgHelp.dll)
+
+2. 扫描 C:\Windows\LiveKernelReports*.dmp (Watchdog Dump)
+- 用于分析系统卡死/无响应 (非蓝屏死机)
+
+3. 读取 System Event Log:
+- BugCheck (EventID 1001): 蓝屏事件
+- Kernel-Power (EventID 41): 意外关机/死机
+- Disk (EventID 7/11/51): 磁盘错误
+每个日志类型只需最近 20 条
+
+4. 读取 Application Event Log:
+- Application Error (EventID 1000): 进程崩溃
+- WER (EventID 1001): Windows 错误报告
+过滤进程名包含游戏进程名的记录
+
+5. (可选) 扫描游戏目录下的 crash/error/log 文件夹
+- 用户选择游戏安装路径，工具在常见路径下搜索 *.log, crash_*.txt 等
+</code></pre> 
+<p><strong>轻量级 Minidump 解析的关键代码逻辑</strong>：</p> 
+<pre><code>调用 Windows DbgHelp API:
+MiniDumpReadDumpStream() 读取以下 Stream:
+- SystemInfoStream → 提取处理器架构、OS 版本
+- ModuleListStream → 提取所有已加载驱动列表
+- ExceptionStream → 提取异常代码、异常地址、错误模块
+→ 横向对比 Module 版本，找到异常的模块
+</code></pre> 
+<h3 id="32-network-采集器"><a href="#32-network-采集器">3.2 Network 采集器</a></h3> 
+<pre><code>采集步骤 (使用 .NET Framework 内置 API，零依赖):
+
+1. 读取预置的游戏服务器 IP/域名列表
+(工具内置，不需要联网获取)
+
+2. 对每个目标服务器:
+a. DNS 解析测试:
+- Resolve-DnsName 计时 (&lt; 100ms = 正常)
+b. 连通性测试:
+- TCP 尝试连接游戏端口 (TCP Socket.Connect, 超时 5s)
+- 记录成功/失败，连接耗时
+c. 延迟测试:
+- Ping 50 次，间隔 200ms
+- 统计: min/avg/max/p95 延迟, 丢包率, 抖动
+d. 路由追踪 (轻量版):
+- Ping TTL 从 1 递增到 30
+- 记录每一跳的 IP 和延迟
+- 识别丢包节点: 如果第 N 跳之后全部超时
+
+3. 本地网络环境:
+- ipconfig /all 解析为结构化数据
+- 网关可达性 (ping 网关)
+- DNS 服务器可达性
+- 检查 Windows 防火墙出站规则是否阻止游戏端口
+- 读取 hosts 文件，检查是否有被劫持的游戏域名
+
+4. 网卡驱动信息:
+- 网卡型号、驱动版本、驱动日期
+- 是否有禁用/未连接的适配器
+</code></pre> 
+<pre><code>输出示例:
+{
+&quot;network_test&quot;: {
+&quot;game_server_1&quot;: {
+&quot;dns_resolve_ms&quot;: 12,
+&quot;tcp_connect_ms&quot;: 45,
+&quot;ping&quot;: {
+&quot;sent&quot;: 50, &quot;received&quot;: 48,
+&quot;loss_pct&quot;: 4.0,
+&quot;avg_ms&quot;: 62, &quot;max_ms&quot;: 235, &quot;jitter_ms&quot;: 28
+},
+&quot;traceroute&quot;: [
+{&quot;hop&quot;: 1, &quot;ip&quot;: &quot;192.168.1.1&quot;, &quot;latency_ms&quot;: 1},
+{&quot;hop&quot;: 2, &quot;ip&quot;: &quot;10.0.0.1&quot;, &quot;latency_ms&quot;: 8},
+...
+{&quot;hop&quot;: 17, &quot;ip&quot;: &quot;*&quot;, &quot;latency_ms&quot;: -1} // 超时节点
+]
+}
+}
+}
+</code></pre> 
+<h3 id="33-system-snapshot-采集器"><a href="#33-system-snapshot-采集器">3.3 System Snapshot 采集器</a></h3> 
+<pre><code>采集步骤:
+
+1. 硬件清单 (WMI 查询，一次性完成):
+- Win32_Processor → CPU 型号 + 核心数
+- Win32_PhysicalMemory → 内存条数 + 容量 + 频率
+- Win32_VideoController → 显卡 + 驱动版本 + 日期
+- Win32_DiskDrive → 磁盘型号 + 类型 (SSD/HDD)
+- Win32_LogicalDisk → 各分区剩余空间
+- Win32_BaseBoard → 主板型号
+- Win32_ComputerSystem → 系统制造商/型号 (笔记本型号)
+
+2. 系统环境:
+- OS 版本 + Build 号 (通过 GetVersionEx + 注册表)
+- 电源方案 (powercfg /getactivescheme)
+- 页面文件配置 (Win32_PageFileUsage)
+- 虚拟化状态 (HVCI/内存完整性是否开启)
+
+3. 软件环境:
+- 显卡驱动版本 + 日期 → 对比游戏最低要求
+- 已安装杀毒软件 (SecurityCenter2 WMI namespace)
+- Windows Defender 实时保护状态
+- 反作弊驱动列表 (vgk.sys, easyanticheat.sys, faceit.sys 等)
+
+4. 异常状态检查:
+- Windows 更新是否有待处理的重新启动
+- 磁盘是否有待处理的坏扇区
+- 是否有设备管理器中显示黄色叹号的设备
+</code></pre> 
+<hr /> 
+<h2 id="四报告生成"><a href="#四报告生成">四、报告生成</a></h2> 
+<h3 id="输出两份报告"><a href="#输出两份报告">输出两份报告</a></h3> 
+<table class="confluenceTable"><thead><tr><th class="confluenceTh">格式</th><th class="confluenceTh">用途</th><th class="confluenceTh">内容</th></tr></thead><tbody><tr><td class="confluenceTd"><strong>JSON</strong></td><td class="confluenceTd">上传服务端，客服/自动化分析</td><td class="confluenceTd">结构化全量数据</td></tr><tr><td class="confluenceTd"><strong>HTML</strong></td><td class="confluenceTd">玩家本地打开即可查看</td><td class="confluenceTd">友好的诊断结论 + 可操作建议</td></tr></tbody></table> 
+<h3 id="html-报告关键设计"><a href="#html-报告关键设计">HTML 报告关键设计</a></h3> 
+<pre><code>┌────────────────────────────────────────────────┐
+│ FPS Game Diagnostic Report │
+│ 2026-07-10 15:30:00 │
+├────────────────────────────────────────────────┤
+│ │
+│ [发现问题] NVIDIA 显卡驱动崩溃 (BSOD) │
+│ ┌─────────────────────────────────────────┐ │
+│ │ 检测到您的系统在最近7天内发生了3次蓝屏 │ │
+│ │ 崩溃原因: nvlddmkm.sys │ │
+│ │ 建议: 使用 DDU 卸载当前驱动，安装 551.86 │ │
+│ │ 版本的 NVIDIA Game Ready 驱动 │ │
+│ └─────────────────────────────────────────┘ │
+│ │
+│ [网络问题] 到游戏服务器丢包率 8% │
+│ ┌─────────────────────────────────────────┐ │
+│ │ Ping 50次，丢包4次(8%)，超过 2% 正常阈值 │ │
+│ │ 路由追踪显示丢包发生在第12跳(骨干网) │ │
+│ │ 建议: 1) 切换加速器节点 │ │
+│ │ 2) 联系网络运营商排查 │ │
+│ └─────────────────────────────────────────┘ │
+│ │
+│ [系统环境] 正常 │
+│ ┌─────────────────────────────────────────┐ │
+│ │ CPU: Ryzen 5 5600X ✓ │ │
+│ │ GPU: RTX 3060 (12GB) ✓ │ │
+│ │ 内存: 32GB DDR4 ✓ │ │
+│ │ 磁盘: 剩余 200GB ✓ │ │
+│ └─────────────────────────────────────────┘ │
+│ │
+│ [附件列表] │
+│ • minidump_0710.dmp (蓝屏转储) │
+│ • event_system.json (系统事件日志) │
+│ • network_test.json (网络诊断结果) │
+└────────────────────────────────────────────────┘
+</code></pre> 
+<hr /> 
+<h2 id="五工具最终的行为流程"><a href="#五工具最终的行为流程">五、工具最终的行为流程</a></h2> 
+<pre><code>玩家双击 DiagnosticTool.exe
+│
+├── [0-5秒] 显示界面: &quot;正在检测您的系统...&quot;
+├── [5-30秒] 采集 Crash/Dump + EventLog
+├── [30-60秒] 采集 Network (Ping+Traceroute+TCP)
+├── [60-75秒] 采集 System Snapshot (WMI)
+├── [75-80秒] 分析 + 匹配已知问题模式
+├── [80-85秒] 生成 JSON + HTML 报告
+├── [85秒] 询问: &quot;是否将诊断报告发送给客服？&quot;
+│ 是 → 上传 JSON (可选，需网络)
+│ 否 → 仅保存本地
+└── [完成] 打开 HTML 报告，工具退出
+</code></pre> 
+<hr /> 
+<h2 id="六与服务端的配合"><a href="#六与服务端的配合">六、与服务端的配合</a></h2> 
+<p>客户端工具生成 JSON 后上传，服务端可以：</p> 
+<ol><li><strong>自动化分级</strong>：根据 JSON 中的问题严重性自动分类工单（蓝屏=最高优先级）</li><li><strong>模式匹配知识库</strong>：已知 Bug（如 <code>nvlddmkm.sys</code> + 驱动版本 <code>555.99</code> = 已知崩溃）自动匹配修复方案</li><li><strong>批量分析</strong>：统计所有玩家的 Crash 模块分布，快速发现某次更新引入的共性 Bug</li></ol> 
+<hr /> 
+<p><strong>总结</strong>：方案从&quot;实时监控&quot;切换到&quot;一次性诊断快照&quot;，聚焦于<strong>蓝屏/崩溃/死机/严重丢包/启动失败</strong>五类阻断性事件，通过解析 Minidump + EventLog + 网络探测 + 系统快照，在 90 秒内生成可操作的诊断报告。</p><script>//<![CDATA[
+
+AJS.$('[data-macro-name="markdown"] code').each(function(i, block) {
+    hljs.highlightBlock(block);
+  });
+
+//]]>
+</script><style>
+.hljs {display: inline;}
+pre &gt; code {display: block !important;}
+</style></div></div></div><p><br/></p>

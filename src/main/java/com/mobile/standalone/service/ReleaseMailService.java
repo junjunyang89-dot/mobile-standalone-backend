@@ -17,7 +17,9 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -45,34 +47,22 @@ public class ReleaseMailService {
         String wikiUrl = trim(req.getWikiPageUrl());
         if (wikiUrl.isEmpty()) throw new IllegalArgumentException("请填写新建 Wiki 页面地址");
 
-        List<IssueRow> rows = req.getRows() != null ? new ArrayList<>(req.getRows()) : new ArrayList<>();
-        if (rows.isEmpty()) {
-            log.info("[release-mail] 前端未带表格，从 Wiki 拉取: {}", wikiUrl);
-            rows.addAll(releaseDocService.loadIssueRowsFromWikiUrl(wikiUrl));
-        }
-
-        boolean hasDb = hasDbChanges(rows);
-        String datePhrase = buildDatePhrase(title);
-        String readyPhrase = hasDb
-                ? "相关发布及DB变更内容已准备就绪"
-                : "相关发布内容已准备就绪";
-        String sqlDeadlinePhrase = hasDb ? buildSqlDeadlinePhrase(title) : null;
-
-        String html = buildHtmlBody(title, datePhrase, readyPhrase, wikiUrl, rows, hasDb, sqlDeadlinePhrase);
+        List<IssueRow> rows = loadRowsPreferWiki(wikiUrl, req.getRows());
+        BuiltMail built = buildFromRows(title, wikiUrl, rows);
 
         MailDraftResult out = new MailDraftResult();
         out.setSubject("【发版通知】" + title);
-        out.setHtmlBody(html);
-        out.setHasDb(hasDb);
-        out.setDatePhrase(datePhrase);
-        out.setReadyPhrase(readyPhrase);
+        out.setHtmlBody(built.html);
+        out.setHasDb(built.hasDb);
+        out.setDatePhrase(built.datePhrase);
+        out.setReadyPhrase(built.readyPhrase);
         out.setWikiPageUrl(wikiUrl);
         String defaultTo = props.getMail() != null ? trim(props.getMail().getDefaultTo()) : "";
         if (defaultTo.isEmpty() && props.getMail() != null) {
             defaultTo = trim(props.getMail().getFrom());
         }
         out.setDefaultTo(defaultTo.isEmpty() ? "yangjunjun@pwrd.com" : defaultTo);
-        out.setMessage("草稿已生成（" + rows.size() + " 条），可编辑后发送");
+        out.setMessage("已从 Wiki 拉取最新 " + rows.size() + " 条生成草稿，可编辑后发送");
         return out;
     }
 
@@ -80,9 +70,22 @@ public class ReleaseMailService {
         if (req == null) throw new IllegalArgumentException("请求体不能为空");
         String to = trim(req.getTo());
         String subject = trim(req.getSubject());
-        String html = req.getHtmlBody() != null ? req.getHtmlBody() : "";
         if (to.isEmpty()) throw new IllegalArgumentException("请填写收件人");
         if (subject.isEmpty()) throw new IllegalArgumentException("请填写邮件主题");
+
+        String wikiUrl = trim(req.getWikiPageUrl());
+        String title = trim(req.getTitle());
+        String html;
+        boolean refreshed = false;
+        // 有 Wiki 地址就发送前再拉一次，避免草稿生成后 Wiki 又改过还发旧表
+        if (!wikiUrl.isEmpty() && !title.isEmpty()) {
+            List<IssueRow> rows = loadRowsPreferWiki(wikiUrl, null);
+            html = buildFromRows(title, wikiUrl, rows).html;
+            refreshed = true;
+            log.info("[release-mail] 发送前已从 Wiki 刷新表格 url={} rows={}", wikiUrl, rows.size());
+        } else {
+            html = req.getHtmlBody() != null ? req.getHtmlBody() : "";
+        }
         if (html.isBlank()) throw new IllegalArgumentException("邮件正文为空");
 
         ReleaseDocProperties.Mail mail = props.getMail();
@@ -104,17 +107,54 @@ public class ReleaseMailService {
             helper.setSubject(subject);
             helper.setText(html, true);
             mailSender.send(message);
-            log.info("[release-mail] 已发送 to={} subject={}", to, subject);
+            log.info("[release-mail] 已发送 to={} subject={} refreshedFromWiki={}", to, subject, refreshed);
             SendMailResult r = new SendMailResult();
             r.setOk(true);
-            r.setMessage("邮件已发送至 " + to);
+            r.setHtmlBody(html);
+            r.setMessage(refreshed
+                    ? "已从 Wiki 拉取最新内容并发送至 " + to
+                    : "邮件已发送至 " + to);
             return r;
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            throw e;
         } catch (Exception e) {
             log.error("[release-mail] 发送失败: {}", e.getMessage(), e);
             throw new IllegalStateException("邮件发送失败: " + e.getMessage()
                     + "（可检查 release-doc.mail.host/port，或改用 ssl=true + 465）", e);
         }
     }
+
+    /**
+     * 优先从 Wiki 拉最新表格；仅 Wiki 失败且前端带了 rows 时回退（单测 / 应急）。
+     */
+    List<IssueRow> loadRowsPreferWiki(String wikiUrl, List<IssueRow> fallbackRows) {
+        try {
+            List<IssueRow> fromWiki = releaseDocService.loadIssueRowsFromWikiUrl(wikiUrl);
+            if (fromWiki == null || fromWiki.isEmpty()) {
+                throw new IllegalStateException("Wiki 页未解析到发版表格");
+            }
+            return fromWiki;
+        } catch (RuntimeException e) {
+            if (fallbackRows != null && !fallbackRows.isEmpty()) {
+                log.warn("[release-mail] Wiki 拉取失败，回退前端表格: {}", e.getMessage());
+                return new ArrayList<>(fallbackRows);
+            }
+            throw e;
+        }
+    }
+
+    private BuiltMail buildFromRows(String title, String wikiUrl, List<IssueRow> rows) {
+        boolean hasDb = hasDbChanges(rows);
+        String datePhrase = buildDatePhrase(title);
+        String readyPhrase = hasDb
+                ? "相关发布及DB变更内容已准备就绪"
+                : "相关发布内容已准备就绪";
+        String sqlDeadlinePhrase = hasDb ? buildSqlDeadlinePhrase(title) : null;
+        String html = buildHtmlBody(title, datePhrase, readyPhrase, wikiUrl, rows, hasDb, sqlDeadlinePhrase);
+        return new BuiltMail(html, hasDb, datePhrase, readyPhrase);
+    }
+
+    private record BuiltMail(String html, boolean hasDb, String datePhrase, String readyPhrase) {}
 
     String buildDatePhrase(String title) {
         LocalDate target = parseReleaseDate(title);
@@ -219,7 +259,7 @@ public class ReleaseMailService {
                 .append(esc(wikiUrl)).append("</a></p>");
         sb.append(gap);
 
-        sb.append(buildTableHtml(rows));
+        appendTables(sb, rows);
 
         if (hasDb) {
             sb.append(gap);
@@ -244,6 +284,28 @@ public class ReleaseMailService {
         sb.append("<p style=\"margin:4px 0 0 0;padding:0;\">杨俊俊</p>");
         sb.append("</div>");
         return sb.toString();
+    }
+
+    /** Wiki 一页多张表（如客户端 + 鸿蒙）时按表分组，各带小标题；只有一张表时与原来一致 */
+    private void appendTables(StringBuilder sb, List<IssueRow> rows) {
+        Map<String, List<IssueRow>> bySection = new LinkedHashMap<>();
+        for (IssueRow r : rows) {
+            bySection.computeIfAbsent(trim(r.getSection()), k -> new ArrayList<>()).add(r);
+        }
+        if (bySection.size() <= 1) {
+            sb.append(buildTableHtml(rows));
+            return;
+        }
+        boolean first = true;
+        for (Map.Entry<String, List<IssueRow>> e : bySection.entrySet()) {
+            String top = first ? "0" : "16px";
+            first = false;
+            if (!e.getKey().isEmpty()) {
+                sb.append("<p style=\"margin:").append(top).append(" 0 6px 0;padding:0;\"><b>")
+                        .append(esc(e.getKey())).append("</b></p>");
+            }
+            sb.append(buildTableHtml(e.getValue()));
+        }
     }
 
     private String buildTableHtml(List<IssueRow> rows) {
