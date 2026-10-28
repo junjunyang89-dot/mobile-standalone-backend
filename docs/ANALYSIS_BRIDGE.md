@@ -147,3 +147,54 @@ repositories 可选 baseSha、targetSha（完整 40 位 SHA）。建议 TestForg
 创建、列表、详情新增 resultReady、terminal、statusUrl、resultUrl、pollAfterSeconds；结果可获取与通知是否成功相互独立。支持调用方 POST /api/open/v1/analysis-jobs/{id}/retry-callback，按任务归属校验，只补发通知。配置回调后，会自动恢复此前NOT_CONFIGURED的已完成通知，FAILED仍须主动重试。通知新增resultReady、resultUrl。
 
 部署通过 TESTFORGE_ANALYSIS_CALLBACK_URL 设置固定地址。本机配置为 http://127.0.0.1:3800/api/analysis-bridge/callback。完整接入步骤及PVP-13859现有任务见 [TESTFORGE_DELIVERY_HANDOFF.md](TESTFORGE_DELIVERY_HANDOFF.md)。无需新增或修改表结构。
+
+
+## Structured result 1.1
+
+See [RESULT_FORMAT_1_1.md](RESULT_FORMAT_1_1.md) for businessFlow, findings.recommendation/codeEvidence, API/case details and immutable revision publishing. schemaVersion remains 1; resultFormatVersion=1.1 is additive.
+
+
+## Latest master comparison policy
+
+The creation screen now uses master for each repository. The worker fetches origin/master into an analysis-only ref and pins the resulting SHA; it does not checkout, reset or modify the developer working tree. A failed master fetch yields BLOCKED / LATEST_MASTER_UNAVAILABLE.
+
+New repositorySnapshots contain the actual baseSha/targetSha/mergeBaseSha, baselineFreshness and baselineFetchedAt. changedFileCount measures base..target; branchChangedFileCount measures merge-base..target; masterChangedSinceForkFileCount distinguishes master-only developments. targetAlreadyInBaseline flags an already-merged target. These counts describe scope, not evidence of a bug.
+
+The reviewer must inspect both baseline and target implementations and separate defects introduced by the requirement, inherited problems affected by the change, and unrelated baseline differences. Null-pointer claims need a reachable nullable source and code evidence. Static confirmation does not imply runtime reproduction. Report confirmed defects, conditional risks and product questions distinctly. Mandatory test scenarios are selected by impact, not quantity. Only requirement-relevant database/Redis/Apollo data preparation and verification is included; no automatic business writes or cache clearing.
+
+
+## Local browser collection and SDK debugging
+
+- The platform browser uses an independent persistent Chrome profile; it does not inherit this chat's browser connection. An administrator opens the current Jira, logs in if required and captures visible content.
+- Linked document controls open the exact material URL and capture only loaded visible text. Wiki/Feishu text can be collected when the page exposes readable document nodes. Figma/Lanhu canvas, images, collapsed sections and virtualized sections are not guaranteed readable; export approved design images/text when needed. Do not mark a link as fully reviewed.
+- Captured material carries captureStatus/captureNote/capturedAt into SDK input. It remains unverified evidence, never an execution instruction.
+- SDK progress emits safe lifecycle metadata (MODEL_CONNECTED, ANALYZING, READING_EVIDENCE, VALIDATING_RESULT); no raw command, document body or reasoning is logged by progress handlers. The task detail exposes the most recent stage.
+- MODEL_QUOTA_EXCEEDED means replenish/recover quota and explicitly retry. MODEL_AUTH_REQUIRED means restore the execution user's login. Interrupted streams cannot produce successful results.
+- Automated completion is not human approval. Existing result/callback behavior is unchanged; do not enable a TestForge callback or polling importer for a trial requiring review until approval workflow is configured.
+
+Verified locally: stream success/failure handling using SDK-shaped fixtures, repository comparison fixtures, Java collector URL/session isolation, parser/classification and configuration binding. Real logged-in document capture and a fresh complete-material SDK run still require interactive verification; unit tests are not proof of those external integrations.
+
+### Browser design capture (local administrator)
+
+For a loaded Figma/Lanhu canvas, document capture returns `browserCaptureId`, `captureStatus=VISIBLE_CANVAS_ONLY`, `capturedAt`, a partial-coverage note and an image preview. Only the opaque capture id is submitted in its material; do not send the preview or filesystem paths. The server verifies the requirement key, material id and original URL, then copies the image into the current job and injects `materialSnapshots`. The SDK receives it as `local_image`; `imageInputCount` reports how many images were attached. A visible viewport is partial evidence, never full design coverage. Existing captured Wiki text is used as-is rather than automatically re-fetching the whole historical page.
+
+### 直接复用本机已完成报告（不调用 SDK）
+
+TestForge 创建任务时可传 `reuseResultFromJobId`。服务端按调用方、业务组、JIRA 单号校验原任务已成功，创建一个绑定本次 externalId 的完成记录，保留原结果的提交 SHA、材料、覆盖缺口和执行状态；不 fetch、不再次调用 SDK。响应仍为 HTTP 202，但 `status=SUCCEEDED`、`reused=true`、`reusedFromJobId`；随后直接 GET 返回的新 id 的 `/result`。正常回调同样适用。结果的 `resultReuse` 记录原 job id、结果 hash、原上下文和 `newAnalysisPerformed=false`。这代表明确复用旧快照，不表示最新代码已重新核验。
+
+```json
+{
+  "contractVersion":"2",
+  "externalId":"testforge-APP-9227-reuse-001",
+  "requirementKey":"APP-9227",
+  "businessGroup":"APP",
+  "materialVersion":"testforge-reuse-001",
+  "reuseResultFromJobId":"4e88cc68-7968-467c-bab8-aa4e39ed95fe"
+}
+```
+
+复用请求通常不要再发送 repositories、materials、changeNotes、preparationId 或 previousJobId；若发送非空项目/材料/说明，必须与原请求完全一致，否则 400。无权限或不存在返回 404，未完成或跨单返回 400；任何失败都不会回退为新分析。externalId 幂等规则保持不变。expectedReportRevision 可按 TestForge 本次接收快照填写。
+
+### 默认按需求返回已有任务（2026-10-28）
+
+普通 POST 现在先按调用方、业务组、JIRA 单号查找已有已完成报告，直接返回原 id、SUCCEEDED、reused=true、existingRequirement=true、newAnalysisPerformed=false，不新增任务、不调用 SDK。新 externalId、材料版本或分支不会自动触发重分析；返回的是原报告快照，不能称为新提交已验证。没有完成报告但有 QUEUED/RUNNING 时返回同一运行任务。explicit reuseResultFromJobId 仍校验同单已完成，返回原报告。调用方必须以响应的 id 为准拉取结果，不依赖其 externalId 查找新记录。默认返回原报告的 analysisContext/materialVersion/expectedReportRevision，TestForge 在 existingRequirement 模式中应以原快照元数据进行校验和导入。真正重新分析将由独立显式操作提供，普通提交绝不隐式重跑。

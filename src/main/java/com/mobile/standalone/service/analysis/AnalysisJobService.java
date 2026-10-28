@@ -65,19 +65,30 @@ public class AnalysisJobService {
     }
     public Map<String,Object> config() {
         return Map.of("executorEnabled",props.isEnabled(),"scriptPresent",Files.isRegularFile(Path.of(props.getScript())),
-            "repositoryProjects",props.getRepositories().keySet(),"callbackClients",props.getCallbacks().entrySet().stream().filter(e->e.getValue()!=null && !e.getValue().isBlank()).map(Map.Entry::getKey).toList(),
+            "repositoryProjects",props.getRepositories().keySet(),"repositoryGroups",props.getRepositoryGroups(),"callbackClients",props.getCallbacks().entrySet().stream().filter(e->e.getValue()!=null && !e.getValue().isBlank()).map(Map.Entry::getKey).toList(),
             "wikiConfigured", wikiIngest != null && wikiIngest.configured(),
             "figmaConfigured",!props.getFigmaToken().isBlank(),
             "jiraConfigured",preparation.configured(),
             "hint",props.isEnabled()?"已启用执行端；SDK、模型登录及材料工具仍需可用":"未启用 Codex 执行端，可接收任务并人工导入结果");
     }
-    public Map<String,Object> create(String client, JsonNode input) {
-        allowClient(client); AnalysisContract.validateRequest(input); preparation.validate(client,input); ensureTable();
+    public synchronized Map<String,Object> create(String client, JsonNode input) {
+        allowClient(client); AnalysisContract.validateRequest(input); ensureTable();
+        // Existing requirement reports win over external request ids and new snapshots.
+        var reusable=existingRequirementJob(client,input);
+        if(reusable!=null)return reusable;
+        preparation.validate(client,input);
         for(JsonNode repo:input.path("repositories")){
             String group=props.getRepositoryGroups().get(repo.path("projectId").asText());
             if(group!=null && !Set.of(input.path("businessGroup").asText(),"SHARED").contains(group))throw AnalysisContract.invalid("项目不属于本单业务组："+repo.path("projectId").asText());
         }
         ObjectNode body = input.deepCopy();
+        Set<String> excludedSources=new HashSet<>();
+        for(JsonNode material:body.path("materials"))if(Set.of("EXCLUDED","SUPERSEDED").contains(material.path("reviewStatus").asText()))excludedSources.add(material.path("id").asText());
+        if(body.path("materials").isArray()) {
+            var selected=(com.fasterxml.jackson.databind.node.ArrayNode)body.path("materials");
+            for(int i=selected.size()-1;i>=0;i--){JsonNode material=selected.get(i);if(excludedSources.contains(material.path("id").asText())||excludedSources.contains(material.path("sourceId").asText())||"DUPLICATE".equals(material.path("reviewStatus").asText())||(material.has("analysisIncluded")&&!material.path("analysisIncluded").asBoolean()))selected.remove(i);}
+        }
+
         body.put("externalId",input.path("externalId").asText().trim());
         body.put("requirementKey",input.path("requirementKey").asText().trim());
         if(body.has("previousJobId")) {
@@ -88,6 +99,7 @@ public class AnalysisJobService {
         String external=body.path("externalId").asText(), hash=AnalysisContract.hash(body);
         var existing=jdbc.queryForList("SELECT id,request_hash FROM analysis_bridge_jobs WHERE client=? AND external_id=?",client,external);
         if (!existing.isEmpty()) return duplicate(client,existing.get(0),hash);
+        if(body.has("reuseResultFromJobId"))return createReused(client,body,hash);
         String id=UUID.randomUUID().toString();
         String status=props.isEnabled()?"QUEUED":"BLOCKED";
         try { jdbc.update("INSERT INTO analysis_bridge_jobs(id,client,external_id,requirement_key,request_hash,request_json,status,error_code) VALUES(?,?,?,?,?,?,?,?)", id,client,external,body.path("requirementKey").asText(),hash,body.toString(),status,props.isEnabled()?null:"EXECUTOR_DISABLED"); }
@@ -96,6 +108,44 @@ public class AnalysisJobService {
             if(row.isEmpty())throw e; return duplicate(client,row.get(0),hash);
         }
         Map<String,Object> out=new LinkedHashMap<>(detail(client,id)); out.put("duplicate",false);return out;
+    }
+    private Map<String,Object> existingRequirementJob(String client,JsonNode input) {
+        String key=input.path("requirementKey").asText().trim().toUpperCase(Locale.ROOT);
+        String group=input.path("businessGroup").asText(key.substring(0,key.lastIndexOf('-')));
+        var candidates=jdbc.queryForList("SELECT id,status,request_json FROM analysis_bridge_jobs WHERE client=? AND requirement_key=? AND (status='SUCCEEDED' AND result_json IS NOT NULL OR status IN ('RUNNING','QUEUED')) ORDER BY CASE WHEN status='SUCCEEDED' THEN 0 ELSE 1 END,finished_at DESC,created_at DESC",client,key);
+        for(var candidate:candidates) {
+            try {
+                JsonNode original=JSON.readTree(Objects.toString(candidate.get("request_json"),"{}"));
+                String originalGroup=original.path("businessGroup").asText(key.substring(0,key.lastIndexOf('-')));
+                if(!group.equals(originalGroup))continue;
+                // Explicit references must still point to this requirement, even though no new record is created.
+                if(input.has("reuseResultFromJobId")) {
+                    var selected=row(client,input.path("reuseResultFromJobId").asText());
+                    if(!key.equals(selected.get("requirement_key"))||!"SUCCEEDED".equals(selected.get("status")))throw AnalysisContract.invalid("复用报告不属于当前已完成需求");
+                    candidate=selected;
+                }
+                var out=new LinkedHashMap<>(detail(client,candidate.get("id").toString()));
+                out.put("duplicate",true);out.put("reused","SUCCEEDED".equals(candidate.get("status")));out.put("newAnalysisPerformed",false);out.put("existingRequirement",true);
+                out.put("requestedExternalId",input.path("externalId").asText());
+                out.put("message","SUCCEEDED".equals(candidate.get("status"))?"已返回本单已有报告，未创建任务、未重新分析":"本单已有分析任务，未重复创建");
+                return out;
+            }catch(java.io.IOException e){throw AnalysisContract.invalid("已有任务材料不可读取，未创建新分析");}
+        }
+        return null;
+    }
+    private ObjectNode reusedResult(String client,ObjectNode request)throws java.io.IOException {
+        String sourceId=request.path("reuseResultFromJobId").asText();Map<String,Object> source=row(client,sourceId);
+        AnalysisResultReuse.validate(request,JSON.readTree(source.get("request_json").toString()),source.get("status").toString());
+        return AnalysisResultReuse.copy(result(client,sourceId),sourceId,Objects.toString(source.get("result_hash"),""));
+    }
+    private Map<String,Object> createReused(String client,ObjectNode request,String hash) {
+        try {
+            ObjectNode value=reusedResult(client,request);String id=UUID.randomUUID().toString(),attempt=UUID.randomUUID().toString();
+            try{jdbc.update("INSERT INTO analysis_bridge_jobs(id,client,external_id,requirement_key,request_hash,request_json,status,attempt_id,heartbeat_at) VALUES(?,?,?,?,?,?,'RUNNING',?,NOW())",id,client,request.path("externalId").asText(),request.path("requirementKey").asText(),hash,request.toString(),attempt);}
+            catch(DuplicateKeyException e){var rows=jdbc.queryForList("SELECT id,request_hash FROM analysis_bridge_jobs WHERE client=? AND external_id=?",client,request.path("externalId").asText());if(rows.isEmpty())throw e;return duplicate(client,rows.get(0),hash);}
+            try{finish(id,attempt,value,"reused");}catch(Exception e){jdbc.update("UPDATE analysis_bridge_jobs SET status='FAILED',error_code='RESULT_REUSE_FAILED',updated_at=NOW() WHERE id=? AND attempt_id=? AND status='RUNNING'",id,attempt);throw e;}
+            var response=new LinkedHashMap<>(detail(client,id));response.put("duplicate",false);response.put("reused",true);response.put("reusedFromJobId",request.path("reuseResultFromJobId").asText());return response;
+        }catch(java.io.IOException e){throw AnalysisContract.invalid("原报告材料不可读取；未触发新分析");}
     }
     private Map<String,Object> duplicate(String client,Map<String,Object> row,String hash) {
         if(!hash.equals(row.get("request_hash")))throw new ResponseStatusException(HttpStatus.CONFLICT,"externalId 已用于不同内容，请使用新的请求 ID");
@@ -131,6 +181,14 @@ public class AnalysisJobService {
         Map<String,Object> out=summary(source);
         try { out.put("analysisInput",JSON.readTree(Objects.toString(source.get("request_json"),"{}"))); }
         catch(Exception e){throw new IllegalStateException("任务材料读取失败");}
+        String attempt=Objects.toString(source.get("attempt_id"),"");
+        if(id.matches("[a-f0-9-]{36}")&&attempt.matches("[a-f0-9-]{36}")) {
+            Path workerLog=Path.of(props.getWorkspace()).toAbsolutePath().resolve(id).resolve(attempt).resolve("worker.log");
+            if(Files.isRegularFile(workerLog))try(var lines=Files.lines(workerLog)){
+                String progress=lines.filter(line->line.startsWith("{\"event\":\"analysis_progress\"")).reduce((first,last)->last).orElse("");
+                if(!progress.isBlank()){JsonNode event=JSON.readTree(progress);out.put("analysisStage",event.path("stage").asText());out.put("analysisProgressAt",event.path("at").asText());}
+            }catch(Exception ignored){}
+        }
         out.remove("request_json");out.remove("result_json");out.remove("request_hash");
         return out;
     }
@@ -146,9 +204,14 @@ public class AnalysisJobService {
         return detail(client,id);
     }
     public Map<String,Object> retry(String id) {
-        row(null,id);
-        int changed=jdbc.update("UPDATE analysis_bridge_jobs SET status=?,error_code=?,updated_at=NOW(),finished_at=NULL,attempt_id=NULL WHERE id=? AND status IN ('FAILED','BLOCKED')",props.isEnabled()?"QUEUED":"BLOCKED",props.isEnabled()?null:"EXECUTOR_DISABLED",id);
-        if(changed==0)throw new ResponseStatusException(HttpStatus.CONFLICT,"仅失败或阻塞任务可重新分析");return detail(null,id);
+        var current=row(null,id);
+        try {
+            var input=JSON.readTree(current.get("request_json").toString());
+            var existing=existingRequirementJob(current.get("client").toString(),input);
+            if(existing!=null&&!id.equals(existing.get("id")))return existing;
+        }catch(java.io.IOException e){throw AnalysisContract.invalid("任务材料不可读取");}
+        int changed=jdbc.update("UPDATE analysis_bridge_jobs SET status=?,error_code=?,updated_at=NOW(),finished_at=NULL,attempt_id=NULL WHERE id=? AND status IN ('FAILED','BLOCKED','CANCELLED')",props.isEnabled()?"QUEUED":"BLOCKED",props.isEnabled()?null:"EXECUTOR_DISABLED",id);
+        if(changed==0)throw new ResponseStatusException(HttpStatus.CONFLICT,"仅失败、阻塞或已取消任务可重新分析");return detail(null,id);
     }
     // Imported results are visibly labelled manual and never replace a completed or running result.
     public Map<String,Object> importResult(String id,JsonNode value) {
@@ -199,6 +262,7 @@ public class AnalysisJobService {
             context.set("materialManifest",manifest);
             published.set("analysisContext",context);
         }catch(Exception e){throw new IllegalStateException("结果上下文生成失败");}
+        published.set("presentation",AnalysisPresentation.build(published));
         String event=UUID.randomUUID().toString();
         jdbc.update("UPDATE analysis_bridge_jobs SET status='SUCCEEDED',result_json=?,result_hash=?,result_source=?,error_code=NULL,finished_at=NOW(),updated_at=NOW(),callback_event_id=?,callback_state='PENDING',callback_next_at=NOW() WHERE id=? AND attempt_id=? AND status='RUNNING'",published.toString(),AnalysisContract.hash(published),source,event,id,attempt);
     }
@@ -232,6 +296,7 @@ public class AnalysisJobService {
         try {
             Map<String,Object> job=row(null,id);
             ObjectNode input=(ObjectNode)JSON.readTree(job.get("request_json").toString());
+            if(input.has("reuseResultFromJobId")){finish(id,attempt,reusedResult(job.get("client").toString(),input),"reused");return;}
             ObjectNode paths=JSON.createObjectNode();
             for(JsonNode repo:input.path("repositories")) {
                 String project=repo.path("projectId").asText();
@@ -246,13 +311,14 @@ public class AnalysisJobService {
             try { Files.setPosixFilePermissions(dir, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")); } catch (UnsupportedOperationException ignored) {}
             preparation.attach(job.get("client").toString(),input,dir);
             if (!input.has("preparationId") && wikiIngest != null) wikiIngest.attachToJob(input, dir);
+            BrowserCaptureStore.attach(Path.of(props.getWorkspace()),input,dir);
             Path in=dir.resolve("input.json"),out=dir.resolve("result.json");Files.writeString(in,input.toString());
             Path script=Path.of(props.getScript()).toAbsolutePath();if(!Files.isRegularFile(script))throw new Blocked("WORKER_SCRIPT_MISSING");
             Process p=new ProcessBuilder(props.getNode(),script.toString(),in.toString(),out.toString()).redirectErrorStream(true).redirectOutput(dir.resolve("worker.log").toFile()).start();
             running.put(id,p);
             if(!"RUNNING".equals(row(null,id).get("status")))stop(p);
             if(!p.waitFor(Math.max(10,props.getTimeoutSeconds()),TimeUnit.SECONDS)){stop(p);throw new Blocked("ANALYSIS_TIMEOUT");}
-            if(p.exitValue()!=0)throw new Blocked("EXECUTOR_FAILED_CHECK_LOCAL_CONFIGURATION");
+            if(p.exitValue()!=0)throw new Blocked(AnalysisWorkerDiagnostics.failureCode(Files.readString(dir.resolve("worker.log"))));
             if(!Files.isRegularFile(out)||Files.size(out)>8_000_000)throw new Blocked("INVALID_RESULT_SIZE");
             JsonNode result=JSON.readTree(Files.readString(out));AnalysisContract.validateResult(result,job.get("requirement_key").toString());
             finish(id,attempt,result,"codex");
@@ -313,7 +379,9 @@ public class AnalysisJobService {
             try{
                 git(root,180,"fetch","--no-tags","origin","+refs/heads/"+normalized+":"+privateRef);
                 repo.put(field.equals("baseRef")?"resolvedBaseRef":"resolvedTargetRef",privateRef);
+                if(field.equals("baseRef")&&normalized.equals("master")){repo.put("latestMasterVerified",true);repo.put("baselineFetchedAt",Instant.now().toString());}
             }catch(Exception e){
+                if(field.equals("baseRef")&&normalized.equals("master"))throw new Blocked("LATEST_MASTER_UNAVAILABLE");
                 input.withArray("materialGaps").add("项目 "+project+" 的 "+ref+" 未同步成功，使用已有本地引用；无法确认是远程最新提交");
             }
         }
