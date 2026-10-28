@@ -24,6 +24,7 @@ public class OpenAnalysisController {
     @GetMapping("/preparations/{id}") public Object prepared(HttpServletRequest req,@PathVariable String id){return preparation.get(client(req),id);}
     @PostMapping public ResponseEntity<?> create(HttpServletRequest req,@RequestBody JsonNode body){return ResponseEntity.status(202).body(jobs.create(client(req),body));}
     @GetMapping public Object list(HttpServletRequest req,@RequestParam(required=false)String externalId){return jobs.list(client(req),externalId);}
+    @PostMapping("/{id}/supplement-sources") public Object supplement(HttpServletRequest req,@PathVariable String id,@RequestBody JsonNode body){return jobs.supplementSources(client(req),id,body);}
     @GetMapping("/{id}") public Object detail(HttpServletRequest req,@PathVariable String id){return jobs.detail(client(req),id);}
     @GetMapping("/{id}/result") public Object result(HttpServletRequest req,@PathVariable String id){return jobs.result(client(req),id);}
     @PostMapping("/{id}/retry-callback") public Object retryCallback(HttpServletRequest req,@PathVariable String id){return jobs.retryCallback(client(req),id);}
