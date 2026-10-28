@@ -10,10 +10,8 @@ import com.mobile.standalone.config.WebTestProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
-@EnableScheduling
 @EnableConfigurationProperties({ReleaseDocProperties.class, ChangeReviewProperties.class, WebTestProperties.class,
         AuthMailProperties.class, ReleaseJenkinsProperties.class, OpenApiProperties.class})
 public class BackendApplication {
