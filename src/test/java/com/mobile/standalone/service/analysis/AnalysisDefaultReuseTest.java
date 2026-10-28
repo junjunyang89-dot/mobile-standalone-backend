@@ -19,4 +19,12 @@ class AnalysisDefaultReuseTest {
   var output=service.create("testforge",input);assertEquals("existing",output.get("id"));assertEquals(true,output.get("reused"));assertEquals(false,output.get("newAnalysisPerformed"));
   verifyNoInteractions(prep);verify(jdbc,never()).update(startsWith("INSERT INTO analysis_bridge_jobs"),any(Object[].class));service.close();
  }
+ @Test void unchangedSupplementDoesNotStartSdk()throws Exception {
+  var jdbc=mock(JdbcTemplate.class);var props=new AnalysisBridgeProperties();props.getRepositories().put("pvp-galaxy","/configured");
+  var service=new AnalysisJobService(jdbc,props,mock(OpenApiAuth.class),mock(WikiRequirementIngestService.class),mock(AnalysisPreparationService.class));
+  when(jdbc.queryForList(anyString(),any(Object[].class))).thenAnswer(call->{String sql=call.getArgument(0);if(sql.startsWith("SELECT id FROM"))return List.of();return List.of(Map.of("id","source","status","SUCCEEDED","requirement_key","APP-9227","request_json","{\"repositories\":[{\"projectId\":\"pvp-galaxy\",\"targetRef\":\"feature\"}]}"));});
+  var additions=new ObjectMapper().readTree("{\"repositories\":[{\"projectId\":\"pvp-galaxy\",\"targetRef\":\"feature\"}]}");
+  assertThrows(org.springframework.web.server.ResponseStatusException.class,()->service.supplementSources("testforge","source",additions));
+  verify(jdbc,never()).update(startsWith("INSERT INTO analysis_bridge_jobs"),any(Object[].class));service.close();
+ }
 }

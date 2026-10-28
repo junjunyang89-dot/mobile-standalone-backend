@@ -71,11 +71,12 @@ public class AnalysisJobService {
             "jiraConfigured",preparation.configured(),
             "hint",props.isEnabled()?"已启用执行端；SDK、模型登录及材料工具仍需可用":"未启用 Codex 执行端，可接收任务并人工导入结果");
     }
-    public synchronized Map<String,Object> create(String client, JsonNode input) {
+    public synchronized Map<String,Object> create(String client,JsonNode input){return createInternal(client,input,false);}
+    private Map<String,Object> createInternal(String client, JsonNode input,boolean supplemental) {
         allowClient(client); AnalysisContract.validateRequest(input); ensureTable();
         // Existing requirement reports win over external request ids and new snapshots.
         var reusable=existingRequirementJob(client,input);
-        if(reusable!=null)return reusable;
+        if(!supplemental&&reusable!=null)return reusable;
         preparation.validate(client,input);
         for(JsonNode repo:input.path("repositories")){
             String group=props.getRepositoryGroups().get(repo.path("projectId").asText());
@@ -108,6 +109,35 @@ public class AnalysisJobService {
             if(row.isEmpty())throw e; return duplicate(client,row.get(0),hash);
         }
         Map<String,Object> out=new LinkedHashMap<>(detail(client,id)); out.put("duplicate",false);return out;
+    }
+    /** Explicit operator action only; ordinary POST always returns the existing report. */
+    public synchronized Map<String,Object> supplementSources(String client,String sourceId,JsonNode additions) {
+        var source=row(client,sourceId);
+        var active=jdbc.queryForList("SELECT id FROM analysis_bridge_jobs WHERE client=? AND requirement_key=? AND status IN ('QUEUED','RUNNING') ORDER BY created_at DESC LIMIT 1",client,source.get("requirement_key"));
+        if(!active.isEmpty())throw AnalysisContract.invalid("本单已有运行中任务，请先完成或取消，未重复启动补充分析");
+        if(!"SUCCEEDED".equals(source.get("status")))throw AnalysisContract.invalid("只能在已完成报告上补充源码");
+        JsonNode repos=additions.path("repositories");
+        if(!repos.isArray()||repos.isEmpty()||repos.size()>10)throw AnalysisContract.invalid("请补充项目及对应提测分支");
+        try {
+            ObjectNode body=(ObjectNode)JSON.readTree(source.get("request_json").toString());
+            // A reused report may itself contain only a reference. Resolve its actual input snapshot.
+            if(body.has("reuseResultFromJobId"))body=(ObjectNode)JSON.readTree(row(client,body.path("reuseResultFromJobId").asText()).get("request_json").toString());
+            var merged=body.withArray("repositories");boolean changed=false;
+            for(JsonNode repo:repos) {
+                String project=AnalysisContract.required(repo,"projectId",160),target=AnalysisContract.required(repo,"targetRef",240);
+                if(!props.getRepositories().containsKey(project)&&!props.getRepositoryUrls().containsKey(project))throw AnalysisContract.invalid("源码尚未配置到服务端仓库映射："+project);
+                boolean exists=false;
+                for(int i=0;i<merged.size();i++)if(project.equals(merged.get(i).path("projectId").asText())) {
+                    exists=true;if(!target.equals(merged.get(i).path("targetRef").asText())){var value=JSON.createObjectNode().put("projectId",project).put("baseRef","master").put("targetRef",target);merged.set(i,value);changed=true;}break;
+                }
+                if(!exists){merged.addObject().put("projectId",project).put("baseRef","master").put("targetRef",target);changed=true;}
+            }
+            if(!changed)throw AnalysisContract.invalid("项目与分支未变化，未启动补充分析");
+            body.remove(List.of("reuseResultFromJobId","preparationId"));
+            body.put("externalId","source-supplement-"+UUID.randomUUID()).put("materialVersion","source-supplement-"+Instant.now().toEpochMilli()).put("previousJobId",sourceId);
+            body.put("changeNotes",body.path("changeNotes").asText()+"\n本轮显式补充缺失源码：优先复核新补仓库、跨项目调用和原覆盖缺口，保留未受影响用例及真实执行记录；原报告不是已验证证据。不要扩大到无关历史功能。");
+            return createInternal(client,body,true);
+        }catch(java.io.IOException e){throw AnalysisContract.invalid("原任务材料不可读取");}
     }
     private Map<String,Object> existingRequirementJob(String client,JsonNode input) {
         String key=input.path("requirementKey").asText().trim().toUpperCase(Locale.ROOT);
